@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { AuthProvider } from "@/lib/prototype-auth/auth-context";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,9 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DriverXtra — Global Automotive Commerce Infrastructure",
+  title: "DriverXtra — Global Automotive Commerce Platform",
   description:
-    "Buy and sell vehicles, find parts with guaranteed fitment, book certified automotive services, and trade with protected escrow — all in one governed global platform.",
+    "Enterprise SaaS application for consumers, dealers, workshops, fleets, and marketplace operations.",
 };
 
 export default function RootLayout({
@@ -28,8 +29,8 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-slate-50 text-slate-900">
-        {children}
+      <body className="min-h-full flex flex-col bg-slate-100 text-slate-900">
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );
