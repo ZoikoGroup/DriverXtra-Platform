@@ -22,7 +22,9 @@ import {
   LogOut,
   ChevronRight,
   ShieldCheck,
-  FileText
+  FileText,
+  User,
+  Building2
 } from "lucide-react";
 
 interface SidebarProps {
@@ -135,7 +137,7 @@ export default function Sidebar({
           </div>
         )}
 
-        {/* Role-Specific Navigation Links */}
+          {/* Role-Specific Navigation Links */}
         <div className="px-3 py-2 space-y-1">
           {!collapsed && (
             <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
@@ -143,7 +145,11 @@ export default function Sidebar({
             </div>
           )}
 
-          {navItems.map((item) => {
+          {[
+            { id: "profile", label: "My Profile (Phase 1)", icon: User, badge: "Phase 1" },
+            { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Phase 1" },
+            ...navItems
+          ].map((item) => {
             const Icon = item.icon;
             const isActive = currentTab === item.id;
             return (

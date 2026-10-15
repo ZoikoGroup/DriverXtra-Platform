@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
-import { CanonicalRole } from "@/lib/prototype-auth/types";
 import {
   Lock,
   Mail,
@@ -20,7 +20,7 @@ import {
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login, availablePrototypeUsers } = useAuth();
+  const { login, authError, clearAuthError, availablePrototypeUsers } = useAuth();
 
   const [email, setEmail] = useState("mark.harrison@example.co.uk");
   const [password, setPassword] = useState("DriverXtra2026!");
@@ -28,7 +28,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) {
       setError("Please provide both email and password.");
@@ -36,16 +36,32 @@ export default function LoginPage() {
     }
 
     setIsSubmitting(true);
-    login(email);
-    router.replace("/platform");
+    setError(null);
+    clearAuthError();
+
+    const success = await login(email, password);
+    setIsSubmitting(false);
+
+    if (success) {
+      router.replace("/platform");
+    } else {
+      setError(authError || "Invalid email or password.");
+    }
   };
 
-  const handleFastLogin = (targetEmail: string, role: CanonicalRole) => {
-    setIsSubmitting(true);
+  const handleFastLogin = async (targetEmail: string) => {
     setEmail(targetEmail);
-    login(targetEmail, role);
-    router.replace("/platform");
+    // Suggest or fill the corresponding known test credentials for Phase 1 verification
+    if (targetEmail.includes("admin")) {
+      setPassword("SuperAdminPassword123!");
+    } else {
+      setPassword("SecurePassword123!");
+    }
+    setError(null);
+    clearAuthError();
   };
+
+  const displayedError = error || authError;
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative overflow-hidden">
@@ -73,20 +89,20 @@ export default function LoginPage() {
 
       <div className="mt-6 sm:mx-auto sm:w-full sm:max-w-lg relative z-10 px-4">
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl">
-          {/* Prototype Notice Banner */}
+          {/* Environment Banner */}
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3.5 mb-6 text-xs text-amber-300 flex items-start gap-2.5">
             <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
             <div>
-              <strong className="font-bold">Prototype Demonstration Environment:</strong>
+              <strong className="font-bold">Phase 1 Authentication Environment:</strong>
               <div className="text-[11px] text-amber-200/80 mt-0.5">
-                Authentication is handled client-side using documented RBAC archetypes. No real credentials are sent over the network.
+                Connected to Django REST Framework backend at http://127.0.0.1:8000/api/v1/. JWT tokens are verified server-side.
               </div>
             </div>
           </div>
 
-          {error && (
+          {displayedError && (
             <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs font-semibold">
-              {error}
+              {displayedError}
             </div>
           )}
 
@@ -145,17 +161,30 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full h-11 bg-amber-400 hover:bg-amber-500 text-slate-950 font-black rounded-xl text-sm flex items-center justify-center gap-2 shadow-md transition-all hover:shadow-amber-400/20"
+              className="w-full h-11 bg-amber-400 hover:bg-amber-500 text-slate-950 font-black rounded-xl text-sm flex items-center justify-center gap-2 shadow-md transition-all hover:shadow-amber-400/20 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <span>{isSubmitting ? "Authenticating..." : "Sign In to Platform"}</span>
+              <span>{isSubmitting ? "Authenticating via Real API..." : "Sign In to Platform"}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
 
+          {/* Path to Register */}
+          <div className="mt-4 text-center">
+            <span className="text-xs text-slate-400">
+              Need a new platform account?{" "}
+              <Link
+                href="/register"
+                className="text-amber-400 hover:text-amber-300 font-bold hover:underline inline-flex items-center gap-1"
+              >
+                <span>Register here</span>
+              </Link>
+            </span>
+          </div>
+
           {/* Prototype Quick Role Switcher */}
           <div className="mt-8 pt-6 border-t border-slate-800">
             <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3 text-center">
-              Quick Sign In via Documented Archetype:
+              Quick Autofill Credentials for Verification:
             </span>
 
             <div className="grid grid-cols-1 gap-2.5">
@@ -185,7 +214,7 @@ export default function LoginPage() {
                   <button
                     key={u.id}
                     type="button"
-                    onClick={() => handleFastLogin(u.email, u.role)}
+                    onClick={() => handleFastLogin(u.email)}
                     className="w-full text-left p-3 rounded-xl bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-amber-400/50 transition-all flex items-center justify-between group"
                   >
                     <div className="flex items-center gap-3 min-w-0">

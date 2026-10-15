@@ -10,6 +10,8 @@ import DealerDashboardView from "@/components/platform/DealerDashboardView";
 import WorkshopDashboardView from "@/components/platform/WorkshopDashboardView";
 import FleetDashboardView from "@/components/platform/FleetDashboardView";
 import OperationsDashboardView from "@/components/platform/OperationsDashboardView";
+import Phase1ProfileView from "@/components/platform/Phase1ProfileView";
+import Phase1OrganisationsView from "@/components/platform/Phase1OrganisationsView";
 import {
   Bell,
   X
@@ -50,7 +52,7 @@ export default function PlatformDashboardPage() {
       <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white text-xs">
         <div className="flex items-center gap-2">
           <div className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-          <span>Validating Prototype Authorization...</span>
+          <span>Validating Authorization...</span>
         </div>
       </div>
     );
@@ -58,6 +60,8 @@ export default function PlatformDashboardPage() {
 
   const getTabLabel = (tab: string) => {
     const map: Record<string, string> = {
+      profile: "User Profile (Phase 1 Identity & RBAC)",
+      organisations: "Organisations & Teams (Phase 1 RBAC)",
       garage: "My Garage (Vehicle Master)",
       orders: "Orders & Escrow Holds",
       parts_fitment: "Guaranteed Fit Parts",
@@ -104,24 +108,32 @@ export default function PlatformDashboardPage() {
         />
 
         <main className="flex-1 overflow-y-auto">
-          {user.role === "CONSUMER" && (
-            <ConsumerDashboardView activeTab={currentTab} />
-          )}
+          {currentTab === "profile" ? (
+            <Phase1ProfileView />
+          ) : currentTab === "organisations" ? (
+            <Phase1OrganisationsView />
+          ) : (
+            <>
+              {user.role === "CONSUMER" && (
+                <ConsumerDashboardView activeTab={currentTab} />
+              )}
 
-          {user.role === "INVENTORY_MANAGER" && (
-            <DealerDashboardView activeTab={currentTab} />
-          )}
+              {user.role === "INVENTORY_MANAGER" && (
+                <DealerDashboardView activeTab={currentTab} />
+              )}
 
-          {user.role === "WORKSHOP_MANAGER" && (
-            <WorkshopDashboardView activeTab={currentTab} />
-          )}
+              {user.role === "WORKSHOP_MANAGER" && (
+                <WorkshopDashboardView activeTab={currentTab} />
+              )}
 
-          {user.role === "FLEET_MANAGER" && (
-            <FleetDashboardView activeTab={currentTab} />
-          )}
+              {user.role === "FLEET_MANAGER" && (
+                <FleetDashboardView activeTab={currentTab} />
+              )}
 
-          {user.role === "MARKETPLACE_ADMIN" && (
-            <OperationsDashboardView activeTab={currentTab} />
+              {user.role === "MARKETPLACE_ADMIN" && (
+                <OperationsDashboardView activeTab={currentTab} />
+              )}
+            </>
           )}
         </main>
       </div>

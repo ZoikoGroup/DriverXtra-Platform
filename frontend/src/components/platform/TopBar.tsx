@@ -45,10 +45,12 @@ export default function TopBar({ currentTabLabel, onOpenNotifications }: TopBarP
 
       {/* Right: Prototype Mode Pill & Role Switcher */}
       <div className="flex items-center gap-3">
-        {/* Prototype Indicator */}
-        <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-amber-300 text-amber-900 text-[11px] font-bold">
-          <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
-          <span>Prototype Mode</span>
+        {/* Environment Indicator */}
+        <div className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold ${
+          user.status ? "bg-emerald-50 border border-emerald-300 text-emerald-900" : "bg-amber-50 border border-amber-300 text-amber-900"
+        }`}>
+          <span className={`w-2 h-2 rounded-full ${user.status ? "bg-emerald-500" : "bg-amber-500 animate-pulse"}`}></span>
+          <span>{user.status ? "Backend Connected (Phase 1)" : "Prototype Mode"}</span>
         </div>
 
         {/* Quick Role Switcher Pill */}

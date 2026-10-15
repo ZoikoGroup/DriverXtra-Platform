@@ -1,7 +1,8 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { PrototypeUser, CanonicalRole, AuthContextType } from "./types";
+import { api, tokenStorage, ApiError, BackendUserProfile, RegisterPayload } from "@/lib/api/client";
 
 export const PROTOTYPE_USERS: PrototypeUser[] = [
   {
@@ -99,79 +100,245 @@ export const PROTOTYPE_USERS: PrototypeUser[] = [
   }
 ];
 
+export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): PrototypeUser {
+  const rawRoles = backendUser.roles || [];
+  let role: CanonicalRole = "CONSUMER";
+  let roleLabel = "Consumer & Vehicle Owner";
+  let tenantType: PrototypeUser["tenantType"] = "INDIVIDUAL";
+  let permissions: string[] = [
+    "garage:view",
+    "garage:manage",
+    "order:create",
+    "order:view",
+    "booking:create",
+    "dispute:create"
+  ];
+
+  // Strictly enforce least privilege role mapping based on inspected backend roles
+  if (backendUser.is_superuser || rawRoles.includes("ADMIN")) {
+    role = "MARKETPLACE_ADMIN";
+    roleLabel = "Marketplace Administrator (Operations Lead)";
+    tenantType = "INTERNAL_OPS";
+    permissions = [
+      "ops:queue.view",
+      "ops:maker_checker.approve",
+      "dispute:adjudicate",
+      "trust:kyb_review",
+      "policy:evaluate"
+    ];
+  } else if (rawRoles.includes("SELLER")) {
+    role = "INVENTORY_MANAGER";
+    roleLabel = "Dealer Principal / Inventory Manager";
+    tenantType = "DEALER_GROUP";
+    permissions = [
+      "listing:create",
+      "listing:update",
+      "listing:publish",
+      "inventory:manage",
+      "feed:sync",
+      "payout:view",
+      "payout:request"
+    ];
+  } else if (rawRoles.includes("WORKSHOP")) {
+    role = "WORKSHOP_MANAGER";
+    roleLabel = "Workshop Bay Manager";
+    tenantType = "WORKSHOP";
+    permissions = [
+      "workorder:view",
+      "workorder:update",
+      "changeorder:create",
+      "servicerecord:write",
+      "capacity:manage"
+    ];
+  } else if (backendUser.is_staff || rawRoles.includes("STAFF")) {
+    role = "MARKETPLACE_ADMIN";
+    roleLabel = "Operations Staff Member";
+    tenantType = "INTERNAL_OPS";
+    permissions = [
+      "ops:queue.view",
+      "ops:maker_checker.approve",
+      "policy:evaluate"
+    ];
+  } else if (rawRoles.includes("BUYER")) {
+    role = "CONSUMER";
+    roleLabel = "Consumer & Vehicle Owner";
+    tenantType = "INDIVIDUAL";
+    permissions = [
+      "garage:view",
+      "garage:manage",
+      "order:create",
+      "order:view",
+      "booking:create",
+      "dispute:create"
+    ];
+  }
+
+  // Active organisation context from real backend data
+  const primaryOrg = backendUser.organisations && backendUser.organisations[0];
+  const orgName = primaryOrg ? primaryOrg.organisation_name : (tenantType === "INDIVIDUAL" ? "Personal Garage" : "DriverXtra Platform");
+  const orgId = primaryOrg ? primaryOrg.organisation_id : undefined;
+
+  return {
+    id: String(backendUser.id),
+    email: backendUser.email,
+    fullName: backendUser.full_name || `${backendUser.first_name || ""} ${backendUser.last_name || ""}`.trim() || backendUser.email,
+    role,
+    roleLabel,
+    organizationId: orgId,
+    organizationName: orgName,
+    jurisdiction: "GB-ENG",
+    tenantType,
+    permissions,
+    first_name: backendUser.first_name,
+    last_name: backendUser.last_name,
+    phone_number: backendUser.phone_number,
+    status: backendUser.status,
+    rawRoles: backendUser.roles,
+    is_staff: backendUser.is_staff,
+    is_superuser: backendUser.is_superuser,
+    organisations: backendUser.organisations,
+    date_joined: backendUser.date_joined,
+    created_at: backendUser.created_at,
+  };
+}
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<PrototypeUser | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // Load existing prototype session if saved in localStorage
-    const timer = setTimeout(() => {
-      try {
-        const savedUserJson = localStorage.getItem("driverxtra_prototype_user");
-        if (savedUserJson) {
-          setUser(JSON.parse(savedUserJson));
-        }
-      } catch {
-        // ignore
-      } finally {
-        setIsInitialized(true);
-      }
-    }, 0);
-
-    return () => clearTimeout(timer);
+  const clearAuthError = useCallback(() => {
+    setAuthError(null);
   }, []);
 
-  const login = (email: string, role?: CanonicalRole): boolean => {
-    const normalizedEmail = email.toLowerCase().trim();
-    let matchedUser = PROTOTYPE_USERS.find(
-      (u) => u.email.toLowerCase() === normalizedEmail
-    );
-
-    // Support admin aliases or partial matches (e.g. priya.patel, sarah.chen, admin)
-    if (!matchedUser && (normalizedEmail.includes("admin") || normalizedEmail.includes("priya") || normalizedEmail.includes("sarah") || normalizedEmail.includes("ops"))) {
-      matchedUser = PROTOTYPE_USERS.find((u) => u.role === "MARKETPLACE_ADMIN");
+  // Restore authenticated session on mount from Django backend token
+  const refreshProfile = useCallback(async () => {
+    const token = tokenStorage.getAccessToken();
+    if (!token) {
+      setUser(null);
+      return;
     }
 
-    if (!matchedUser && role) {
-      matchedUser = PROTOTYPE_USERS.find((u) => u.role === role);
-    }
-
-    if (!matchedUser) {
-      // Default fallback to first prototype user if arbitrary email entered
-      matchedUser = PROTOTYPE_USERS[0];
-    }
-
-    setUser(matchedUser);
     try {
-      localStorage.setItem("driverxtra_prototype_user", JSON.stringify(matchedUser));
+      setIsLoading(true);
+      const profile = await api.users.getMe();
+      const mappedUser = mapBackendUserToPrototypeUser(profile);
+      setUser(mappedUser);
+      setAuthError(null);
     } catch {
-      // ignore
+      tokenStorage.clearTokens();
+      setUser(null);
+    } finally {
+      setIsLoading(false);
     }
-    return true;
+  }, []);
+
+  useEffect(() => {
+    const initSession = async () => {
+      const token = tokenStorage.getAccessToken();
+      if (token) {
+        try {
+          const profile = await api.users.getMe();
+          setUser(mapBackendUserToPrototypeUser(profile));
+        } catch {
+          tokenStorage.clearTokens();
+          setUser(null);
+        }
+      }
+      setIsInitialized(true);
+    };
+
+    initSession();
+  }, []);
+
+  const login = async (email: string, password?: string): Promise<boolean> => {
+    setIsLoading(true);
+    setAuthError(null);
+
+    // Require password for authentication and disallow prototype fallback for login attempts
+    if (!password) {
+      setIsLoading(false);
+      setAuthError("Password is required for platform authentication.");
+      return false;
+    }
+
+    try {
+      const response = await api.auth.login(email, password);
+      if (!response?.tokens?.access || !response?.tokens?.refresh) {
+        throw new ApiError("Authentication failed: server did not return both access and refresh tokens.", 500);
+      }
+      const mappedUser = mapBackendUserToPrototypeUser(response.user);
+      setUser(mappedUser);
+      setIsLoading(false);
+      return true;
+    } catch (err: unknown) {
+      setIsLoading(false);
+      const msg = err instanceof ApiError ? err.message : "Authentication failed. Please verify credentials.";
+      setAuthError(msg);
+      return false;
+    }
   };
 
-  const logout = () => {
-    setUser(null);
+  const register = async (payload: RegisterPayload): Promise<{ success: boolean; error?: string }> => {
+    setIsLoading(true);
+    setAuthError(null);
     try {
-      localStorage.removeItem("driverxtra_prototype_user");
-    } catch {
-      // ignore
+      await api.auth.register(payload);
+      setIsLoading(false);
+      return { success: true };
+    } catch (err: unknown) {
+      setIsLoading(false);
+      const msg = err instanceof ApiError ? err.message : "Registration failed. Please check form inputs.";
+      setAuthError(msg);
+      return { success: false, error: msg };
+    }
+  };
+
+  const logout = async (): Promise<void> => {
+    setIsLoading(true);
+    try {
+      await api.auth.logout();
+    } finally {
+      tokenStorage.clearTokens();
+      setUser(null);
+      setIsLoading(false);
     }
   };
 
   const switchRole = (role: CanonicalRole) => {
-    const targetUser = PROTOTYPE_USERS.find((u) => u.role === role) || PROTOTYPE_USERS[0];
-    setUser(targetUser);
+    if (!user) return;
+    // When real user is authenticated, keep backend fields and adjust view role
+    const updatedUser: PrototypeUser = {
+      ...user,
+      role,
+      roleLabel: role === "MARKETPLACE_ADMIN" ? "Marketplace Administrator" :
+                 role === "INVENTORY_MANAGER" ? "Dealer Principal" :
+                 role === "WORKSHOP_MANAGER" ? "Workshop Bay Manager" :
+                 role === "FLEET_MANAGER" ? "Fleet Manager" : "Consumer & Vehicle Owner"
+    };
+    setUser(updatedUser);
+  };
+
+  const updateProfile = async (data: { first_name?: string; last_name?: string; phone_number?: string }): Promise<boolean> => {
     try {
-      localStorage.setItem("driverxtra_prototype_user", JSON.stringify(targetUser));
-    } catch {
-      // ignore
+      setIsLoading(true);
+      const updatedProfile = await api.users.updateMe(data);
+      const mappedUser = mapBackendUserToPrototypeUser(updatedProfile);
+      setUser(mappedUser);
+      setIsLoading(false);
+      return true;
+    } catch (err: unknown) {
+      setIsLoading(false);
+      const msg = err instanceof ApiError ? err.message : "Failed to update profile.";
+      setAuthError(msg);
+      return false;
     }
   };
 
-  // Avoid flash of unauthenticated before hydration
+  // Avoid flash before hydration/token inspection
   if (!isInitialized) {
     return null;
   }
@@ -181,10 +348,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         user,
         isAuthenticated: !!user,
+        isLoading,
+        authError,
+        clearAuthError,
         login,
+        register,
         logout,
         switchRole,
-        availablePrototypeUsers: PROTOTYPE_USERS
+        availablePrototypeUsers: PROTOTYPE_USERS,
+        refreshProfile,
+        updateProfile,
       }}
     >
       {children}
