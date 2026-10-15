@@ -5,27 +5,29 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import Sidebar from "@/components/platform/Sidebar";
 import TopBar from "@/components/platform/TopBar";
-import ConsumerDashboardView from "@/components/platform/ConsumerDashboardView";
-import DealerDashboardView from "@/components/platform/DealerDashboardView";
-import WorkshopDashboardView from "@/components/platform/WorkshopDashboardView";
-import FleetDashboardView from "@/components/platform/FleetDashboardView";
-import OperationsDashboardView from "@/components/platform/OperationsDashboardView";
 import Phase1ProfileView from "@/components/platform/Phase1ProfileView";
 import Phase1OrganisationsView from "@/components/platform/Phase1OrganisationsView";
+import Phase2GarageView from "@/components/platform/Phase2GarageView";
+import Phase2CatalogueView from "@/components/platform/Phase2CatalogueView";
+import Phase2SellerOnboardingView from "@/components/platform/Phase2SellerOnboardingView";
 import {
   Bell,
   X
 } from "lucide-react";
 
-function getDefaultTabForRole(role?: string): string {
-  switch (role) {
-    case "CONSUMER": return "garage";
-    case "INVENTORY_MANAGER": return "inventory";
-    case "WORKSHOP_MANAGER": return "work_orders";
-    case "FLEET_MANAGER": return "fleet_portfolio";
-    case "MARKETPLACE_ADMIN": return "maker_checker";
-    default: return "garage";
-  }
+function getDefaultTabForRole(user?: { is_superuser?: boolean; is_staff?: boolean; role?: string; rawRoles?: string[] } | null): string {
+  if (!user) return "garage";
+  const isAdmin = Boolean(
+    user.is_superuser ||
+    user.is_staff ||
+    user.role === "MARKETPLACE_ADMIN" ||
+    user.rawRoles?.includes("ADMIN") ||
+    user.rawRoles?.includes("STAFF")
+  );
+  if (isAdmin) return "seller_reviews";
+  if (user.role === "INVENTORY_MANAGER" || user.rawRoles?.includes("SELLER")) return "catalogue";
+  if (user.role === "WORKSHOP_MANAGER" || user.rawRoles?.includes("WORKSHOP")) return "catalogue";
+  return "garage";
 }
 
 export default function PlatformDashboardPage() {
@@ -45,7 +47,7 @@ export default function PlatformDashboardPage() {
 
   const currentTab = (selectedTab && selectedTab.role === user?.role)
     ? selectedTab.tab
-    : getDefaultTabForRole(user?.role);
+    : getDefaultTabForRole(user);
 
   if (!isAuthenticated || !user) {
     return (
@@ -62,32 +64,13 @@ export default function PlatformDashboardPage() {
     const map: Record<string, string> = {
       profile: "User Profile (Phase 1 Identity & RBAC)",
       organisations: "Organisations & Teams (Phase 1 RBAC)",
-      garage: "My Garage (Vehicle Master)",
-      orders: "Orders & Escrow Holds",
-      parts_fitment: "Guaranteed Fit Parts",
-      service_bookings: "Workshop Bookings",
-      disputes: "Disputes & Protection",
-      inventory: "Vehicle Inventory",
-      feeds: "DMS Ingestion Feeds",
-      escrow_payouts: "Escrow & Settlements",
-      leads: "Buyer Inquiries",
-      team: "Dealership RBAC",
-      work_orders: "Bay Work Orders",
-      change_orders: "Change-Order Authorizer",
-      service_writeback: "Service History Records",
-      parts_requisitions: "Parts Procurement",
-      fleet_portfolio: "Fleet Portfolio",
-      maintenance_due: "Maintenance Due",
-      drivers: "Driver Assignments",
-      procurement: "Procurement & RFQs",
-      maker_checker: "Maker-Checker Queue",
-      trust_kyb: "Trust & KYB Clearance",
-      disputes_admin: "Dispute Adjudication",
-      jurisdictions: "Jurisdiction Packs",
-      audit_stream: "Immutable Audit Log",
-      default: "Dashboard Overview"
+      garage: "My Garage (Phase 2 Vehicle Master)",
+      catalogue: "Vehicle & Parts Catalogue (Phase 2)",
+      parts_fitment: "Guaranteed Fit Parts & Catalogue (Phase 2)",
+      seller_onboarding: "Seller Onboarding & Verification (Phase 2)",
+      seller_reviews: "Seller Applications Compliance Queue (Phase 2)",
     };
-    return map[tab] || "Dashboard";
+    return map[tab] || "Dashboard Overview";
   };
 
   return (
@@ -112,28 +95,14 @@ export default function PlatformDashboardPage() {
             <Phase1ProfileView />
           ) : currentTab === "organisations" ? (
             <Phase1OrganisationsView />
+          ) : currentTab === "garage" ? (
+            <Phase2GarageView />
+          ) : currentTab === "catalogue" || currentTab === "parts_fitment" ? (
+            <Phase2CatalogueView />
+          ) : currentTab === "seller_onboarding" || currentTab === "seller_reviews" ? (
+            <Phase2SellerOnboardingView key={currentTab} initialTab={currentTab === "seller_reviews" ? "admin_queue" : "my_application"} />
           ) : (
-            <>
-              {user.role === "CONSUMER" && (
-                <ConsumerDashboardView activeTab={currentTab} />
-              )}
-
-              {user.role === "INVENTORY_MANAGER" && (
-                <DealerDashboardView activeTab={currentTab} />
-              )}
-
-              {user.role === "WORKSHOP_MANAGER" && (
-                <WorkshopDashboardView activeTab={currentTab} />
-              )}
-
-              {user.role === "FLEET_MANAGER" && (
-                <FleetDashboardView activeTab={currentTab} />
-              )}
-
-              {user.role === "MARKETPLACE_ADMIN" && (
-                <OperationsDashboardView activeTab={currentTab} />
-              )}
-            </>
+            <Phase2GarageView />
           )}
         </main>
       </div>

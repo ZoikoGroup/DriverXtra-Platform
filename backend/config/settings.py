@@ -66,6 +66,9 @@ INSTALLED_APPS = [
     "common",
     "apps.identity",
     "apps.organisations",
+    "apps.onboarding",
+    "apps.catalogue",
+    "apps.garage",
 ]
 
 

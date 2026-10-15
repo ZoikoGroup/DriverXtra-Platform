@@ -446,4 +446,415 @@ export const api = {
       });
     },
   },
+
+  // Phase 2: Seller Onboarding & Verification
+  seller: {
+    async getMyApplication(): Promise<SellerApplication | null> {
+      const res = await apiRequest<{ status: string; application?: SellerApplication | null } | SellerApplication>("/seller/application/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+      if (res && typeof res === "object") {
+        if ("application" in res) {
+          return res.application || null;
+        }
+        if ("id" in res) {
+          return res as SellerApplication;
+        }
+      }
+      return null;
+    },
+
+    async saveDraft(payload: SellerApplicationCreateUpdatePayload): Promise<SellerApplication> {
+      const res = await apiRequest<{ status: string; application?: SellerApplication } | SellerApplication>("/seller/application/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+      if (res && typeof res === "object" && "application" in res && res.application) {
+        return res.application;
+      }
+      return res as SellerApplication;
+    },
+
+    async submit(): Promise<{ message: string; application: SellerApplication }> {
+      return apiRequest<{ message: string; application: SellerApplication }>("/seller/application/submit/", {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async listAdminApplications(statusFilter?: string): Promise<SellerApplication[]> {
+      const q = statusFilter ? `?status=${encodeURIComponent(statusFilter)}` : "";
+      const res = await apiRequest<SellerApplication[] | { results: SellerApplication[] }>(
+        `/admin/seller-applications/${q}`,
+        {
+          method: "GET",
+          requiresAuth: true,
+        }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getAdminApplication(id: string): Promise<SellerApplication> {
+      return apiRequest<SellerApplication>(`/admin/seller-applications/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async reviewApplication(
+      id: string,
+      payload: {
+        action: "APPROVE" | "REJECT" | "approve" | "reject";
+        reason?: string;
+        rejection_reason?: string;
+        admin_notes?: string;
+      }
+    ): Promise<SellerApplication> {
+      const normalizedAction = payload.action.toUpperCase() as "APPROVE" | "REJECT";
+      const reasonText = payload.reason || payload.rejection_reason || "";
+      const res = await apiRequest<{ status: string; message: string; application: SellerApplication } | SellerApplication>(
+        `/admin/seller-applications/${id}/review/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify({
+            action: normalizedAction,
+            reason: reasonText,
+            rejection_reason: reasonText,
+            admin_notes: payload.admin_notes,
+          }),
+        }
+      );
+      if (res && typeof res === "object" && "application" in res && res.application) {
+        return res.application;
+      }
+      return res as SellerApplication;
+    },
+  },
+
+  // Phase 2: Vehicle & Parts Catalogue
+  catalogue: {
+    async getMakes(): Promise<VehicleMake[]> {
+      const res = await apiRequest<VehicleMake[] | { results: VehicleMake[] }>("/catalogue/makes/", {
+        method: "GET",
+        requiresAuth: false,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getModels(makeId?: string): Promise<VehicleModel[]> {
+      const q = makeId ? `?make=${encodeURIComponent(makeId)}` : "";
+      const res = await apiRequest<VehicleModel[] | { results: VehicleModel[] }>(`/catalogue/models/${q}`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getVariants(modelId?: string): Promise<VehicleVariant[]> {
+      const q = modelId ? `?model=${encodeURIComponent(modelId)}` : "";
+      const res = await apiRequest<VehicleVariant[] | { results: VehicleVariant[] }>(`/catalogue/variants/${q}`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getCategories(): Promise<PartCategory[]> {
+      const res = await apiRequest<PartCategory[] | { results: PartCategory[] }>("/catalogue/categories/", {
+        method: "GET",
+        requiresAuth: false,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getParts(params?: { category?: string; brand?: string; search?: string }): Promise<PartSummary[]> {
+      const query = new URLSearchParams();
+      if (params?.category) query.append("category", params.category);
+      if (params?.brand) query.append("brand", params.brand);
+      if (params?.search) query.append("search", params.search);
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      const res = await apiRequest<PartSummary[] | { results: PartSummary[] }>(`/catalogue/parts/${qs}`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getPart(id: string): Promise<PartDetail> {
+      return apiRequest<PartDetail>(`/catalogue/parts/${id}/`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+
+    async getPartCompatibilities(partId: string): Promise<PartCompatibilityItem[]> {
+      const res = await apiRequest<PartCompatibilityItem[] | { results: PartCompatibilityItem[] }>(
+        `/catalogue/parts/${partId}/compatibilities/`,
+        {
+          method: "GET",
+          requiresAuth: false,
+        }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async evaluateFitment(partId: string, variantId: string): Promise<FitmentEvaluation> {
+      return apiRequest<FitmentEvaluation>("/catalogue/fitment/", {
+        method: "POST",
+        requiresAuth: false,
+        body: JSON.stringify({ part_id: partId, variant_id: variantId }),
+      });
+    },
+  },
+
+  // Phase 2: Personal Vehicle Garage
+  garage: {
+    async listVehicles(): Promise<GarageVehicle[]> {
+      const res = await apiRequest<GarageVehicle[] | { results: GarageVehicle[] }>("/garage/vehicles/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getVehicle(id: string): Promise<GarageVehicle> {
+      return apiRequest<GarageVehicle>(`/garage/vehicles/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async addVehicle(payload: AddGarageVehiclePayload): Promise<GarageVehicle> {
+      return apiRequest<GarageVehicle>("/garage/vehicles/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async updateVehicle(id: string, payload: Partial<AddGarageVehiclePayload>): Promise<GarageVehicle> {
+      return apiRequest<GarageVehicle>(`/garage/vehicles/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async setPrimary(id: string): Promise<GarageVehicle> {
+      return apiRequest<GarageVehicle>(`/garage/vehicles/${id}/set-primary/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async deleteVehicle(id: string): Promise<{ detail: string }> {
+      return apiRequest<{ detail: string }>(`/garage/vehicles/${id}/`, {
+        method: "DELETE",
+        requiresAuth: true,
+      });
+    },
+  },
 };
+
+// ==========================================
+// Phase 2 Type Definitions
+// ==========================================
+
+export interface SellerApplication {
+  id: string;
+  user: string;
+  user_email: string;
+  user_full_name: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  business_name: string;
+  trading_name?: string;
+  business_type: string;
+  business_type_display?: string;
+  registration_number?: string;
+  vat_number?: string;
+  contact_name: string;
+  contact_email: string;
+  contact_phone: string;
+  business_address_line1: string;
+  business_address_line2?: string;
+  business_city: string;
+  business_state_province?: string;
+  business_postal_code: string;
+  business_country: string;
+  bank_account_name?: string;
+  bank_sort_code?: string;
+  bank_account_number?: string;
+  status: "DRAFT" | "PENDING" | "APPROVED" | "REJECTED";
+  status_display?: string;
+  rejection_reason?: string;
+  submitted_at?: string | null;
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
+  reviewed_by_email?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SellerApplicationCreateUpdatePayload {
+  organisation?: string | null;
+  business_name: string;
+  trading_name?: string;
+  business_type?: string;
+  registration_number?: string;
+  vat_number?: string;
+  contact_name?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  business_address_line1?: string;
+  business_address_line2?: string;
+  business_city?: string;
+  business_state_province?: string;
+  business_postal_code?: string;
+  business_country?: string;
+  bank_account_name?: string;
+  bank_sort_code?: string;
+  bank_account_number?: string;
+}
+
+export interface VehicleMake {
+  id: string;
+  name: string;
+  country_of_origin?: string;
+  is_active: boolean;
+  models_count?: number;
+}
+
+export interface VehicleModel {
+  id: string;
+  make: string;
+  make_name?: string;
+  name: string;
+  year_start?: number | null;
+  year_end?: number | null;
+  body_type?: string;
+  is_active: boolean;
+  variants_count?: number;
+}
+
+export interface VehicleVariant {
+  id: string;
+  model: string;
+  model_name?: string;
+  make_name?: string;
+  name: string;
+  display_name?: string;
+  year: number;
+  engine_code?: string;
+  fuel_type: string;
+  transmission: string;
+  power_bhp?: number | null;
+  drivetrain?: string;
+  is_active: boolean;
+}
+
+export interface PartCategory {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  parent?: string | null;
+  parent_name?: string | null;
+  subcategories?: PartCategory[];
+  is_active: boolean;
+}
+
+export interface PartCompatibilityItem {
+  id: string;
+  part: string;
+  vehicle_variant: string;
+  vehicle_display?: string;
+  is_direct_fit: boolean;
+  fitment_notes?: string;
+  position?: string;
+  model_year_from?: number | null;
+  model_year_to?: number | null;
+}
+
+export interface PartSummary {
+  id: string;
+  name: string;
+  part_number: string;
+  category: string;
+  category_name?: string;
+  brand: string;
+  oem_numbers?: string[];
+  is_universal: boolean;
+  is_active: boolean;
+  compatibilities_count?: number;
+}
+
+export interface PartDetail extends PartSummary {
+  description?: string;
+  technical_specs?: Record<string, unknown>;
+  primary_image_url?: string;
+  compatibilities?: PartCompatibilityItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FitmentEvaluation {
+  outcome: "CONFIRMED_FIT" | "CONDITIONAL_FIT" | "DOES_NOT_FIT" | "UNKNOWN";
+  is_compatible: boolean;
+  notes?: string;
+  position?: string;
+  details?: Record<string, unknown>;
+  vehicle_info?: string;
+}
+
+export interface GarageVehicle {
+  id: string;
+  user: string;
+  user_email: string;
+  vehicle_variant?: string | null;
+  variant_display?: string | null;
+  registration_plate?: string;
+  vin?: string;
+  nickname?: string;
+  make: string;
+  model: string;
+  year: number;
+  trim?: string;
+  engine_code?: string;
+  fuel_type?: string;
+  transmission?: string;
+  power_bhp?: number | null;
+  color?: string;
+  current_odometer?: number;
+  odometer_unit: string;
+  mot_status: string;
+  mot_expiry_date?: string | null;
+  active_recalls_count: number;
+  ownership_status: string;
+  primary_image_url?: string;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AddGarageVehiclePayload {
+  vehicle_variant?: string;
+  make?: string;
+  model?: string;
+  year?: number;
+  trim?: string;
+  registration_plate?: string;
+  vin?: string;
+  nickname?: string;
+  engine_code?: string;
+  fuel_type?: string;
+  transmission?: string;
+  power_bhp?: number;
+  color?: string;
+  current_odometer?: number;
+  odometer_unit?: string;
+  is_primary?: boolean;
+}
