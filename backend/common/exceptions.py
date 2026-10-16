@@ -8,8 +8,20 @@ def custom_exception_handler(exc, context):
 
     if response is not None:
         error_message = "Validation or execution error."
-        if isinstance(response.data, dict) and 'detail' in response.data:
-            error_message = str(response.data['detail'])
+        if isinstance(response.data, dict):
+            if 'detail' in response.data:
+                error_message = str(response.data['detail'])
+            elif response.data:
+                field_errors = []
+                for field, errs in response.data.items():
+                    if isinstance(errs, list) and errs:
+                        field_errors.append(f"{field}: {errs[0]}")
+                    elif isinstance(errs, str):
+                        field_errors.append(f"{field}: {errs}")
+                    else:
+                        field_errors.append(f"{field}: {errs}")
+                if field_errors:
+                    error_message = "; ".join(field_errors[:3])
         elif isinstance(response.data, list) and len(response.data) > 0:
             error_message = str(response.data[0])
 

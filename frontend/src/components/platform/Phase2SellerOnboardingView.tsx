@@ -69,9 +69,6 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
   const [stateProvince, setStateProvince] = useState("");
   const [postalCode, setPostalCode] = useState("");
   const [country, setCountry] = useState("United Kingdom");
-  const [bankAccountName, setBankAccountName] = useState("");
-  const [bankSortCode, setBankSortCode] = useState("");
-  const [bankAccountNumber, setBankAccountNumber] = useState("");
   const [selectedOrgId, setSelectedOrgId] = useState<string>("");
 
   // Notification banners
@@ -107,9 +104,6 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
     setStateProvince(app.business_state_province || "");
     setPostalCode(app.business_postal_code || "");
     setCountry(app.business_country || "United Kingdom");
-    setBankAccountName(app.bank_account_name || "");
-    setBankSortCode(app.bank_sort_code || "");
-    setBankAccountNumber(app.bank_account_number || "");
     setSelectedOrgId(app.organisation || "");
   }, []);
 
@@ -214,9 +208,6 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
       business_state_province: stateProvince.trim() || undefined,
       business_postal_code: postalCode.trim(),
       business_country: country.trim(),
-      bank_account_name: bankAccountName.trim() || undefined,
-      bank_sort_code: bankSortCode.trim() || undefined,
-      bank_account_number: bankAccountNumber.trim() || undefined,
       organisation: selectedOrgId || null,
     };
   };
@@ -563,25 +554,36 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
                 </div>
               </div>
 
-              {/* Organisation Link */}
-              {organisations.length > 0 && (
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Associate With Organisation (Optional)</label>
-                  <select
-                    value={selectedOrgId}
-                    onChange={(e) => setSelectedOrgId(e.target.value)}
-                    disabled={isFormLocked}
-                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:bg-slate-100"
-                  >
-                    <option value="">-- Standalone Seller Account --</option>
-                    {organisations.map((org) => (
-                      <option key={org.id} value={org.id}>
-                        {org.name} ({org.type})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              {/* Organisation Link - Filtered to authorized organizations */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Associate With Organisation (Optional)</label>
+                <select
+                  value={selectedOrgId}
+                  onChange={(e) => setSelectedOrgId(e.target.value)}
+                  disabled={isFormLocked}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:bg-slate-100"
+                >
+                  <option value="">-- Standalone Seller Account (Individual / Independent Trader) --</option>
+                  {organisations
+                    .filter((org) => {
+                      if (isStaffOrAdmin) return true;
+                      const userOrg = user?.organisations?.find((o) => o.organisation_id === org.id);
+                      return userOrg?.role === "OWNER" || userOrg?.role === "ADMIN";
+                    })
+                    .map((org) => {
+                      const userOrg = user?.organisations?.find((o) => o.organisation_id === org.id);
+                      const roleTag = userOrg ? ` · ${userOrg.role}` : "";
+                      return (
+                        <option key={org.id} value={org.id}>
+                          {org.name} ({org.type}{roleTag})
+                        </option>
+                      );
+                    })}
+                </select>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Only organisations where you hold an authorized OWNER or ADMIN role can be linked to a seller application.
+                </p>
+              </div>
             </div>
 
             {/* Section 2: Contact Person */}
@@ -716,49 +718,12 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
               </div>
             </div>
 
-            {/* Section 4: Settlement Banking Information */}
-            <div className="space-y-4 pt-2">
-              <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
-                <Landmark className="w-4 h-4 text-amber-500" />
-                <h4 className="text-xs font-black uppercase tracking-wider text-slate-950">
-                  4. Commercial Settlement Account
-                </h4>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Account Holder Name</label>
-                  <input
-                    type="text"
-                    placeholder="Apex Auto Holdings Ltd"
-                    value={bankAccountName}
-                    onChange={(e) => setBankAccountName(e.target.value)}
-                    disabled={isFormLocked}
-                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:bg-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Sort Code</label>
-                  <input
-                    type="text"
-                    placeholder="20-00-00"
-                    value={bankSortCode}
-                    onChange={(e) => setBankSortCode(e.target.value)}
-                    disabled={isFormLocked}
-                    className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:bg-slate-100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Account Number</label>
-                  <input
-                    type="text"
-                    placeholder="8 digits"
-                    value={bankAccountNumber}
-                    onChange={(e) => setBankAccountNumber(e.target.value)}
-                    disabled={isFormLocked}
-                    className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:bg-slate-100"
-                  />
-                </div>
+            {/* Section 4: Settlement Banking Notice (Protected & Deferred) */}
+            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 flex items-start gap-3">
+              <Landmark className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+              <div className="text-xs text-slate-600">
+                <span className="font-bold text-slate-800 block mb-0.5">Commercial Settlement & Payout Information</span>
+                To protect seller financial data and prevent unencrypted retention, banking details are not collected during initial application intake. Dedicated escrow payout and settlement profiles are securely configured after KYB verification approval.
               </div>
             </div>
 

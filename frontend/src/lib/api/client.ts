@@ -211,19 +211,28 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
 
     if (data && typeof data === "object") {
       const dataObj = data as Record<string, unknown>;
-      if (typeof dataObj.message === "string") {
+      if (typeof dataObj.error === "string") {
+        message = dataObj.error;
+      } else if (typeof dataObj.message === "string" && dataObj.message !== "Validation or execution error.") {
         message = dataObj.message;
       } else if (typeof dataObj.detail === "string") {
         message = dataObj.detail;
       }
       details = (dataObj.details || data) as Record<string, string[] | string> | string[] | string;
-      // Extract field errors if present
-      if (dataObj.details && typeof dataObj.details === "object") {
-        const detailsObj = dataObj.details as Record<string, unknown>;
-        const firstKey = Object.keys(detailsObj)[0];
-        if (firstKey && Array.isArray(detailsObj[firstKey]) && detailsObj[firstKey][0]) {
-          message = `${firstKey}: ${detailsObj[firstKey][0]}`;
-        }
+
+      // Extract field errors if present in details or the root payload
+      const candidate = (dataObj.details && typeof dataObj.details === "object" ? dataObj.details : dataObj) as Record<string, unknown>;
+      const fieldKeys = Object.keys(candidate).filter(
+        (k) => !["status", "code", "message", "details", "detail", "error"].includes(k)
+      );
+      if (fieldKeys.length > 0) {
+        const fieldErrors = fieldKeys.map((k) => {
+          const val = candidate[k];
+          if (Array.isArray(val) && val[0]) return `${k}: ${val[0]}`;
+          if (typeof val === "string") return `${k}: ${val}`;
+          return `${k}: ${JSON.stringify(val)}`;
+        });
+        message = fieldErrors.join("; ");
       }
     } else if (typeof data === "string") {
       message = data;
@@ -650,11 +659,177 @@ export const api = {
       });
     },
 
-    async deleteVehicle(id: string): Promise<{ detail: string }> {
-      return apiRequest<{ detail: string }>(`/garage/vehicles/${id}/`, {
+    async archiveVehicle(id: string): Promise<void> {
+      return apiRequest<void>(`/garage/vehicles/${id}/`, {
         method: "DELETE",
         requiresAuth: true,
       });
+    },
+
+    async deleteVehicle(id: string): Promise<void> {
+      return this.archiveVehicle(id);
+    },
+  },
+
+  // Marketplace: Vehicles & Spare Parts Submissions, Approvals & Public Browse
+  marketplace: {
+    // Buyer Public Browse
+    async browseVehicles(params?: Record<string, string>): Promise<MarketplaceVehicleListing[]> {
+      const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
+      const res = await apiRequest<MarketplaceVehicleListing[] | { results: MarketplaceVehicleListing[] }>(
+        `/marketplace/browse/vehicles/${qs}`,
+        { method: "GET", requiresAuth: false }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getVehicle(id: string): Promise<MarketplaceVehicleListing> {
+      return apiRequest<MarketplaceVehicleListing>(`/marketplace/browse/vehicles/${id}/`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+
+    async browseParts(params?: Record<string, string>): Promise<MarketplacePartListing[]> {
+      const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
+      const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
+        `/marketplace/browse/parts/${qs}`,
+        { method: "GET", requiresAuth: false }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getPart(id: string): Promise<MarketplacePartListing> {
+      return apiRequest<MarketplacePartListing>(`/marketplace/browse/parts/${id}/`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+
+    // Seller Inventory Management
+    async listMyVehicles(status?: string): Promise<MarketplaceVehicleListing[]> {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<MarketplaceVehicleListing[] | { results: MarketplaceVehicleListing[] }>(
+        `/marketplace/vehicles/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async createVehicle(payload: CreateVehicleListingPayload): Promise<MarketplaceVehicleListing> {
+      return apiRequest<MarketplaceVehicleListing>("/marketplace/vehicles/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async updateVehicle(id: string, payload: Partial<CreateVehicleListingPayload>): Promise<MarketplaceVehicleListing> {
+      return apiRequest<MarketplaceVehicleListing>(`/marketplace/vehicles/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async submitVehicle(id: string): Promise<MarketplaceVehicleListing> {
+      const res = await apiRequest<{ listing: MarketplaceVehicleListing }>(
+        `/marketplace/vehicles/${id}/submit/`,
+        { method: "POST", requiresAuth: true }
+      );
+      return res.listing;
+    },
+
+    async resubmitVehicle(id: string): Promise<MarketplaceVehicleListing> {
+      const res = await apiRequest<{ listing: MarketplaceVehicleListing }>(
+        `/marketplace/vehicles/${id}/resubmit/`,
+        { method: "POST", requiresAuth: true }
+      );
+      return res.listing;
+    },
+
+    async listMyParts(status?: string): Promise<MarketplacePartListing[]> {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
+        `/marketplace/parts/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async createPart(payload: CreatePartListingPayload): Promise<MarketplacePartListing> {
+      return apiRequest<MarketplacePartListing>("/marketplace/parts/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async updatePart(id: string, payload: Partial<CreatePartListingPayload>): Promise<MarketplacePartListing> {
+      return apiRequest<MarketplacePartListing>(`/marketplace/parts/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async submitPart(id: string): Promise<MarketplacePartListing> {
+      const res = await apiRequest<{ listing: MarketplacePartListing }>(
+        `/marketplace/parts/${id}/submit/`,
+        { method: "POST", requiresAuth: true }
+      );
+      return res.listing;
+    },
+
+    async resubmitPart(id: string): Promise<MarketplacePartListing> {
+      const res = await apiRequest<{ listing: MarketplacePartListing }>(
+        `/marketplace/parts/${id}/resubmit/`,
+        { method: "POST", requiresAuth: true }
+      );
+      return res.listing;
+    },
+
+    // Admin Review Queues
+    async listAdminVehicles(status?: string): Promise<MarketplaceVehicleListing[]> {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<MarketplaceVehicleListing[] | { results: MarketplaceVehicleListing[] }>(
+        `/marketplace/admin/vehicles/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async reviewVehicle(id: string, payload: ReviewListingPayload): Promise<MarketplaceVehicleListing> {
+      const res = await apiRequest<{ listing: MarketplaceVehicleListing }>(
+        `/marketplace/admin/vehicles/${id}/review/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+      return res.listing;
+    },
+
+    async listAdminParts(status?: string): Promise<MarketplacePartListing[]> {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
+        `/marketplace/admin/parts/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async reviewPart(id: string, payload: ReviewListingPayload): Promise<MarketplacePartListing> {
+      const res = await apiRequest<{ listing: MarketplacePartListing }>(
+        `/marketplace/admin/parts/${id}/review/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+      return res.listing;
     },
   },
 };
@@ -685,9 +860,6 @@ export interface SellerApplication {
   business_state_province?: string;
   business_postal_code: string;
   business_country: string;
-  bank_account_name?: string;
-  bank_sort_code?: string;
-  bank_account_number?: string;
   status: "DRAFT" | "PENDING" | "APPROVED" | "REJECTED";
   status_display?: string;
   rejection_reason?: string;
@@ -715,9 +887,6 @@ export interface SellerApplicationCreateUpdatePayload {
   business_state_province?: string;
   business_postal_code?: string;
   business_country?: string;
-  bank_account_name?: string;
-  bank_sort_code?: string;
-  bank_account_number?: string;
 }
 
 export interface VehicleMake {
@@ -804,6 +973,10 @@ export interface PartDetail extends PartSummary {
 export interface FitmentEvaluation {
   outcome: "CONFIRMED_FIT" | "CONDITIONAL_FIT" | "DOES_NOT_FIT" | "UNKNOWN";
   is_compatible: boolean;
+  confidence?: string;
+  evidence_level?: string;
+  reason?: string;
+  qualifications?: string;
   notes?: string;
   position?: string;
   details?: Record<string, unknown>;
@@ -832,10 +1005,14 @@ export interface GarageVehicle {
   odometer_unit: string;
   mot_status: string;
   mot_expiry_date?: string | null;
+  mot_data_source?: string;
   active_recalls_count: number;
+  recalls_data_source?: string;
   ownership_status: string;
   primary_image_url?: string;
   is_primary: boolean;
+  is_archived?: boolean;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -857,4 +1034,132 @@ export interface AddGarageVehiclePayload {
   current_odometer?: number;
   odometer_unit?: string;
   is_primary?: boolean;
+}
+
+// ==========================================
+// Marketplace Types
+// ==========================================
+
+export interface MarketplaceVehicleListing {
+  id: string;
+  seller?: string;
+  seller_name?: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  title: string;
+  make: string;
+  make_name: string;
+  model: string;
+  model_name: string;
+  variant?: string | null;
+  variant_name?: string | null;
+  variant_details?: VehicleVariant | null;
+  year: number;
+  registration_number?: string;
+  vin?: string;
+  masked_vin?: string;
+  masked_registration?: string;
+  mileage: number;
+  fuel_type: string;
+  transmission: string;
+  body_type?: string;
+  price: string | number;
+  currency: string;
+  condition: string;
+  description?: string;
+  primary_image_url?: string;
+  images?: string[];
+  location_city?: string;
+  location_postcode?: string;
+  status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+  submitted_at?: string;
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
+  reviewed_by_name?: string | null;
+  rejection_reason?: string;
+  admin_notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MarketplacePartListing {
+  id: string;
+  seller?: string;
+  seller_name?: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  name: string;
+  brand: string;
+  mpn: string;
+  oem_numbers?: string[];
+  category: string;
+  category_name?: string;
+  category_slug?: string;
+  description?: string;
+  price: string | number;
+  currency: string;
+  stock_quantity: number;
+  condition: string;
+  primary_image_url?: string;
+  images?: string[];
+  compatible_variants?: VehicleVariant[];
+  compatibility_notes?: string;
+  status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+  submitted_at?: string;
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
+  reviewed_by_name?: string | null;
+  rejection_reason?: string;
+  admin_notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateVehicleListingPayload {
+  title: string;
+  make: string;
+  model: string;
+  variant?: string;
+  year: number;
+  registration_number?: string;
+  vin?: string;
+  mileage?: number;
+  fuel_type?: string;
+  transmission?: string;
+  body_type?: string;
+  price: number | string;
+  currency?: string;
+  condition?: string;
+  description?: string;
+  primary_image_url?: string;
+  images?: string[];
+  location_city?: string;
+  location_postcode?: string;
+  organisation?: string | null;
+  status?: "DRAFT" | "PENDING_APPROVAL";
+}
+
+export interface CreatePartListingPayload {
+  name: string;
+  brand: string;
+  mpn: string;
+  oem_numbers?: string[];
+  category: string;
+  description?: string;
+  price: number | string;
+  currency?: string;
+  stock_quantity?: number;
+  condition?: string;
+  primary_image_url?: string;
+  images?: string[];
+  compatible_variants?: string[];
+  compatibility_notes?: string;
+  organisation?: string | null;
+  status?: "DRAFT" | "PENDING_APPROVAL";
+}
+
+export interface ReviewListingPayload {
+  action: "APPROVE" | "REJECT" | "REQUEST_CHANGES";
+  rejection_reason?: string;
+  admin_notes?: string;
 }

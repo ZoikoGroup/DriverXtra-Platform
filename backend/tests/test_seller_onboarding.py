@@ -2,6 +2,7 @@ import pytest
 from rest_framework import status
 from apps.identity.models import RoleChoices, User
 from apps.onboarding.models import SellerApplication, SellerApplicationStatusChoices, BusinessTypeChoices
+from apps.organisations.models import Organisation, OrganisationRoleChoices
 
 
 @pytest.mark.django_db
@@ -215,3 +216,86 @@ class TestSellerOnboarding:
         assert res_submit.status_code == status.HTTP_200_OK
         app.refresh_from_db()
         assert app.status == SellerApplicationStatusChoices.PENDING
+
+    def test_bank_details_not_collected_or_returned(self, buyer_auth_client):
+        # Attempt to submit sensitive banking information
+        payload = {
+            'business_name': 'Secure Automotive Ltd',
+            'business_type': BusinessTypeChoices.DEALER,
+            'contact_email': 'secure@dealers.com',
+            'contact_phone': '+4470006',
+            'city': 'London',
+            'bank_account_name': 'Secret Seller Account',
+            'bank_sort_code': '12-34-56',
+            'bank_account_number': '98765432',
+        }
+        res = buyer_auth_client.post('/api/v1/seller/application/', payload, format='json')
+        assert res.status_code == status.HTTP_201_CREATED
+        data = res.json()
+        assert data['status'] == 'success'
+        app_data = data['application']
+
+        # Verify banking fields are never returned in the API response
+        assert 'bank_account_name' not in app_data
+        assert 'bank_sort_code' not in app_data
+        assert 'bank_account_number' not in app_data
+
+        # Verify banking fields do not exist on the persisted model
+        app_obj = SellerApplication.objects.get(id=app_data['id'])
+        assert not hasattr(app_obj, 'bank_account_number')
+        assert not hasattr(app_obj, 'bank_sort_code')
+
+        # Verify GET /api/v1/seller/application/ also contains zero banking fields
+        res_get = buyer_auth_client.get('/api/v1/seller/application/')
+        assert res_get.status_code == status.HTTP_200_OK
+        get_data = res_get.json()['application']
+        assert 'bank_account_number' not in get_data
+        assert 'bank_sort_code' not in get_data
+
+    def test_organisation_membership_and_authorization(self, buyer_auth_client, buyer_user, seller_user):
+        # Create an organisation owned by seller_user where buyer_user is NOT a member
+        org_unauthorized = Organisation.objects.create(name='Bavarian Heritage Motors', created_by=seller_user)
+        org_unauthorized.add_member(seller_user, role=OrganisationRoleChoices.OWNER)
+
+        # Buyer attempts to attach unauthorized organisation to their application
+        payload = {
+            'business_name': 'Unauthorized Dealership App',
+            'organisation': str(org_unauthorized.id),
+            'contact_email': 'buyer@driverxtra.com',
+            'contact_phone': '+4470007',
+        }
+        res = buyer_auth_client.post('/api/v1/seller/application/', payload, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'not an active member' in str(res.json()).lower()
+
+        # Buyer is added to an organisation, but only as a regular MEMBER (not OWNER or ADMIN)
+        org_member_only = Organisation.objects.create(name='Technicians Union Ltd', created_by=seller_user)
+        org_member_only.add_member(buyer_user, role=OrganisationRoleChoices.MEMBER)
+
+        payload['organisation'] = str(org_member_only.id)
+        res = buyer_auth_client.post('/api/v1/seller/application/', payload, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'owner or admin' in str(res.json()).lower()
+
+        # Buyer creates their own organisation and is granted OWNER role
+        org_owner = Organisation.objects.create(name='Buyer Official Motors', created_by=buyer_user)
+        org_owner.add_member(buyer_user, role=OrganisationRoleChoices.OWNER)
+
+        payload['organisation'] = str(org_owner.id)
+        res = buyer_auth_client.post('/api/v1/seller/application/', payload, format='json')
+        assert res.status_code == status.HTTP_201_CREATED
+        assert res.json()['application']['organisation'] == str(org_owner.id)
+
+    def test_individual_seller_without_organisation_preserved(self, buyer_auth_client):
+        # Individual trader applying with organisation=None
+        payload = {
+            'business_name': 'Solo Independent Trader',
+            'business_type': BusinessTypeChoices.INDIVIDUAL_TRADER,
+            'contact_email': 'solo@trader.com',
+            'contact_phone': '+4470008',
+            'city': 'Birmingham',
+            'organisation': None,
+        }
+        res = buyer_auth_client.post('/api/v1/seller/application/', payload, format='json')
+        assert res.status_code == status.HTTP_201_CREATED
+        assert res.json()['application']['organisation'] is None

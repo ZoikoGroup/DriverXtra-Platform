@@ -139,8 +139,70 @@ class TestVehicleGarage:
         assert v2.is_primary is True
         assert v1.is_primary is False
 
-    def test_delete_vehicle(self, buyer_auth_client, buyer_user):
+    def test_archive_vehicle_preserves_record_and_excludes_from_active_list(self, buyer_auth_client, buyer_user):
         v = GarageVehicle.objects.create(user=buyer_user, make='VW', model='Golf', year=2019)
         res = buyer_auth_client.delete(f'/api/v1/garage/vehicles/{v.id}/')
         assert res.status_code == status.HTTP_204_NO_CONTENT
-        assert not GarageVehicle.objects.filter(id=v.id).exists()
+
+        # Soft-delete audit: verify database record is preserved and marked archived
+        v.refresh_from_db()
+        assert v.is_archived is True
+        assert v.archived_at is not None
+
+        # Verify excluded from default active garage list
+        res_list = buyer_auth_client.get('/api/v1/garage/vehicles/')
+        assert res_list.status_code == status.HTTP_200_OK
+        vehicle_ids = [item['id'] for item in res_list.json()['results']]
+        assert str(v.id) not in vehicle_ids
+
+    def test_vin_masked_in_api_responses(self, buyer_auth_client, buyer_user):
+        # Create vehicle with full 17-character VIN
+        v = GarageVehicle.objects.create(
+            user=buyer_user,
+            make='BMW',
+            model='330i',
+            year=2021,
+            vin='WBA5R1C50M8219420',
+        )
+
+        # GET detail response: full VIN must not be exposed; only last 6 characters visible
+        res_detail = buyer_auth_client.get(f'/api/v1/garage/vehicles/{v.id}/')
+        assert res_detail.status_code == status.HTTP_200_OK
+        masked_vin = res_detail.json()['vin']
+        assert 'WBA5R1C50M' not in masked_vin
+        assert masked_vin.endswith('219420')
+        assert masked_vin.startswith('*')
+
+        # GET list response: full VIN must not be exposed
+        res_list = buyer_auth_client.get('/api/v1/garage/vehicles/')
+        assert res_list.status_code == status.HTTP_200_OK
+        veh_item = next(item for item in res_list.json()['results'] if item['id'] == str(v.id))
+        assert veh_item['vin'] == masked_vin
+
+    def test_mot_and_recalls_labeled_self_reported(self, buyer_auth_client, buyer_user):
+        v = GarageVehicle.objects.create(
+            user=buyer_user,
+            make='Audi',
+            model='A4',
+            year=2020,
+            mot_status='VALID',
+            active_recalls_count=0,
+        )
+        res = buyer_auth_client.get(f'/api/v1/garage/vehicles/{v.id}/')
+        assert res.status_code == status.HTTP_200_OK
+        data = res.json()
+        assert data['mot_data_source'] == 'Self-reported'
+        assert data['recalls_data_source'] == 'Self-reported'
+
+    def test_cross_user_archive_isolation(self, buyer_auth_client, seller_user):
+        v_seller = GarageVehicle.objects.create(
+            user=seller_user,
+            make='Mercedes-Benz',
+            model='C200',
+            year=2021,
+        )
+        # Buyer cannot archive Seller's vehicle
+        res = buyer_auth_client.delete(f'/api/v1/garage/vehicles/{v_seller.id}/')
+        assert res.status_code == status.HTTP_404_NOT_FOUND
+        v_seller.refresh_from_db()
+        assert v_seller.is_archived is False

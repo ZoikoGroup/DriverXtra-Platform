@@ -91,3 +91,17 @@ class TestAuthentication:
             'refresh': refresh_token,
         }, format='json')
         assert refresh_attempt.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_login_unverified_email_denied(self, api_client, buyer_user):
+        buyer_user.is_email_verified = False
+        buyer_user.save()
+
+        payload = {
+            'email': buyer_user.email,
+            'password': 'SecurePassword123!',
+        }
+        response = api_client.post('/api/v1/auth/login/', payload, format='json')
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        data = response.json()
+        assert 'not verified' in str(data).lower()
+        assert 'tokens' not in data

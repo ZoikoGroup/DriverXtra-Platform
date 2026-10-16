@@ -45,9 +45,11 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'phone_number',
             'roles',
             'status',
+            'is_email_verified',
+            'email_verified_at',
             'created_at',
         ]
-        read_only_fields = ['id', 'status', 'created_at']
+        read_only_fields = ['id', 'status', 'is_email_verified', 'email_verified_at', 'created_at']
 
     def validate_email(self, value):
         normalized = value.strip().lower()
@@ -88,6 +90,8 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         user = User.objects.create_user(
             password=password,
             status=AccountStatusChoices.ACTIVE,
+            is_email_verified=False,
+            email_verified_at=None,
             **validated_data
         )
 
@@ -115,6 +119,11 @@ class UserLoginSerializer(serializers.Serializer):
         if not user.is_active or user.status != AccountStatusChoices.ACTIVE:
             raise serializers.ValidationError(
                 f"Account is currently {user.status.lower()}. Please contact support."
+            )
+
+        if not user.is_email_verified:
+            raise serializers.ValidationError(
+                "Email address is not verified. Please verify your email before logging in."
             )
 
         # Generate SimpleJWT tokens with custom claims
@@ -176,6 +185,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'phone_number',
             'full_name',
             'status',
+            'is_email_verified',
+            'email_verified_at',
             'roles',
             'is_staff',
             'is_superuser',
@@ -188,6 +199,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id',
             'email',
             'status',
+            'is_email_verified',
+            'email_verified_at',
             'roles',
             'is_staff',
             'is_superuser',

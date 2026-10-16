@@ -157,17 +157,17 @@ export default function Phase2GarageView() {
     }
   };
 
-  const handleDeleteVehicle = async () => {
+  const handleArchiveVehicle = async () => {
     if (!vehicleToDelete) return;
     try {
       setIsSubmitting(true);
       setErrorMsg(null);
-      await api.garage.deleteVehicle(vehicleToDelete.id);
-      showSuccess(`Vehicle ${vehicleToDelete.year} ${vehicleToDelete.make} ${vehicleToDelete.model} deleted.`);
+      await api.garage.archiveVehicle(vehicleToDelete.id);
+      showSuccess(`Vehicle ${vehicleToDelete.year} ${vehicleToDelete.make} ${vehicleToDelete.model} archived.`);
       setVehicleToDelete(null);
       await loadVehicles();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof ApiError ? err.message : "Failed to delete vehicle.");
+      setErrorMsg(err instanceof ApiError ? err.message : "Failed to archive vehicle.");
     } finally {
       setIsSubmitting(false);
     }
@@ -281,7 +281,7 @@ export default function Phase2GarageView() {
             <h1 className="text-xl font-black text-slate-950">My Personal Garage</h1>
           </div>
           <p className="text-xs text-slate-600 mt-1">
-            Store and manage your vehicles to enable guaranteed parts fitment and specification tracking.
+            Store and manage your vehicles to enable confirmed parts fitment and specification tracking.
           </p>
         </div>
 
@@ -471,8 +471,8 @@ export default function Phase2GarageView() {
                             e.stopPropagation();
                             setVehicleToDelete(veh);
                           }}
-                          className="p-1.5 rounded-lg hover:bg-rose-50 text-rose-500 transition-colors"
-                          title="Delete vehicle"
+                          className="p-1.5 rounded-lg hover:bg-amber-50 text-amber-600 transition-colors"
+                          title="Archive vehicle"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -514,7 +514,10 @@ export default function Phase2GarageView() {
                   </div>
 
                   <div className="flex justify-between py-1.5 border-b border-slate-50">
-                    <span className="text-slate-500">VIN</span>
+                    <div className="flex flex-col">
+                      <span className="text-slate-500">VIN</span>
+                      <span className="text-[10px] text-slate-400">Masked for privacy</span>
+                    </div>
                     <span className="font-mono font-bold text-slate-950 text-[11px]">
                       {selectedVehicle.vin || "Not recorded"}
                     </span>
@@ -556,17 +559,23 @@ export default function Phase2GarageView() {
                   </div>
 
                   <div className="flex justify-between py-1.5 border-b border-slate-50">
-                    <span className="text-slate-500">MOT Status</span>
+                    <div className="flex flex-col">
+                      <span className="text-slate-500">MOT Status</span>
+                      <span className="text-[10px] text-amber-600 font-medium">UK · Self-reported</span>
+                    </div>
                     <span className={`font-bold px-2 py-0.5 rounded text-[10px] uppercase ${
                       selectedVehicle.mot_status === "VALID" ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-700"
                     }`}>
-                      {selectedVehicle.mot_status}
+                      {selectedVehicle.mot_status} (Self-reported)
                     </span>
                   </div>
 
                   <div className="flex justify-between py-1.5">
-                    <span className="text-slate-500">Active Recalls</span>
-                    <span className="font-bold text-slate-800">
+                    <div className="flex flex-col">
+                      <span className="text-slate-500">Active Recalls</span>
+                      <span className="text-[10px] text-amber-600 font-medium">Self-reported</span>
+                    </div>
+                    <span className="font-bold text-slate-800 text-xs">
                       {selectedVehicle.active_recalls_count} pending
                     </span>
                   </div>
@@ -979,18 +988,18 @@ export default function Phase2GarageView() {
       )}
 
       {/* ==================================================== */}
-      {/* Modal: Delete Confirmation                          */}
+      {/* Modal: Archive Confirmation                         */}
       {/* ==================================================== */}
       {vehicleToDelete && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-sm w-full p-6 space-y-4 animate-in fade-in zoom-in-95">
-            <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center mx-auto">
               <Trash2 className="w-5 h-5" />
             </div>
             <div className="text-center">
-              <h3 className="text-base font-black text-slate-950">Remove Vehicle?</h3>
+              <h3 className="text-base font-black text-slate-950">Archive Vehicle</h3>
               <p className="text-xs text-slate-500 mt-1">
-                Are you sure you want to remove <span className="font-bold text-slate-800">{vehicleToDelete.year} {vehicleToDelete.make} {vehicleToDelete.model}</span> ({vehicleToDelete.registration_plate || "No plate"}) from your garage?
+                Are you sure you want to archive <span className="font-bold text-slate-800">{vehicleToDelete.year} {vehicleToDelete.make} {vehicleToDelete.model}</span> ({vehicleToDelete.registration_plate || "No plate"})? It will be removed from your active garage, while preserving historical fitment and order records.
               </p>
             </div>
 
@@ -1004,11 +1013,11 @@ export default function Phase2GarageView() {
               </button>
               <button
                 type="button"
-                onClick={handleDeleteVehicle}
+                onClick={handleArchiveVehicle}
                 disabled={isSubmitting}
-                className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-4 py-2 rounded-xl text-xs transition-colors shadow-sm disabled:opacity-50"
+                className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl text-xs transition-colors shadow-sm disabled:opacity-50"
               >
-                {isSubmitting ? "Deleting..." : "Yes, Remove"}
+                {isSubmitting ? "Archiving..." : "Archive Vehicle"}
               </button>
             </div>
           </div>

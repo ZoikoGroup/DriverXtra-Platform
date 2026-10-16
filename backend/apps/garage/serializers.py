@@ -3,8 +3,20 @@ from apps.garage.models import GarageVehicle
 from apps.catalogue.models import VehicleVariant
 
 
+def mask_vin(vin_str: str) -> str:
+    """Masks a vehicle VIN by default, returning only the last six characters.
+    Example: 'WBA5R1C50M8219420' -> '***********219420'
+    """
+    if not vin_str:
+        return ""
+    clean = str(vin_str).strip()
+    if len(clean) <= 6:
+        return clean
+    return f"{'*' * (len(clean) - 6)}{clean[-6:]}"
+
+
 class GarageVehicleSerializer(serializers.ModelSerializer):
-    """Serializer for managing user's personal vehicles in My Garage."""
+    """Serializer for managing user's personal vehicles in My Garage with data safety & privacy."""
 
     user_email = serializers.EmailField(source='user.email', read_only=True)
     variant_display = serializers.CharField(source='vehicle_variant.display_name', read_only=True, allow_null=True)
@@ -13,6 +25,10 @@ class GarageVehicleSerializer(serializers.ModelSerializer):
     model = serializers.CharField(max_length=80, required=False)
     year = serializers.IntegerField(required=False)
     trim = serializers.CharField(max_length=80, required=False, allow_blank=True)
+
+    # Transparency: clearly indicate telemetry data is self-reported and not authoritative
+    mot_data_source = serializers.CharField(default="Self-reported", read_only=True)
+    recalls_data_source = serializers.CharField(default="Self-reported", read_only=True)
 
     class Meta:
         model = GarageVehicle
@@ -38,14 +54,43 @@ class GarageVehicleSerializer(serializers.ModelSerializer):
             'odometer_unit',
             'mot_status',
             'mot_expiry_date',
+            'mot_data_source',
             'active_recalls_count',
+            'recalls_data_source',
             'ownership_status',
             'primary_image_url',
             'is_primary',
+            'is_archived',
+            'archived_at',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'user', 'user_email', 'variant_display', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id',
+            'user',
+            'user_email',
+            'variant_display',
+            'mot_data_source',
+            'recalls_data_source',
+            'is_archived',
+            'archived_at',
+            'created_at',
+            'updated_at',
+        ]
+
+    def validate_vin(self, value):
+        """Preserve original unmasked VIN if the client resubmitted a masked string."""
+        if value and '*' in value:
+            if self.instance and self.instance.vin:
+                return self.instance.vin
+        return value
+
+    def to_representation(self, instance):
+        """Return masked VIN exposing only the last 6 characters for user privacy."""
+        data = super().to_representation(instance)
+        if instance.vin:
+            data['vin'] = mask_vin(instance.vin)
+        return data
 
     def validate(self, attrs):
         instance = getattr(self, 'instance', None)
@@ -87,6 +132,6 @@ class GarageVehicleSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = self.context['request'].user
         validated_data['user'] = user
-        if not GarageVehicle.objects.filter(user=user).exists():
+        if not GarageVehicle.objects.filter(user=user, is_archived=False).exists():
             validated_data['is_primary'] = True
         return super().create(validated_data)

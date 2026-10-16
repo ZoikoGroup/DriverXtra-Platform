@@ -10,13 +10,16 @@ import Phase1OrganisationsView from "@/components/platform/Phase1OrganisationsVi
 import Phase2GarageView from "@/components/platform/Phase2GarageView";
 import Phase2CatalogueView from "@/components/platform/Phase2CatalogueView";
 import Phase2SellerOnboardingView from "@/components/platform/Phase2SellerOnboardingView";
+import MarketplaceBrowseView from "@/components/platform/MarketplaceBrowseView";
+import SellerInventoryView from "@/components/platform/SellerInventoryView";
+import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
 import {
   Bell,
   X
 } from "lucide-react";
 
 function getDefaultTabForRole(user?: { is_superuser?: boolean; is_staff?: boolean; role?: string; rawRoles?: string[] } | null): string {
-  if (!user) return "garage";
+  if (!user) return "marketplace_browse";
   const isAdmin = Boolean(
     user.is_superuser ||
     user.is_staff ||
@@ -24,10 +27,10 @@ function getDefaultTabForRole(user?: { is_superuser?: boolean; is_staff?: boolea
     user.rawRoles?.includes("ADMIN") ||
     user.rawRoles?.includes("STAFF")
   );
-  if (isAdmin) return "seller_reviews";
-  if (user.role === "INVENTORY_MANAGER" || user.rawRoles?.includes("SELLER")) return "catalogue";
-  if (user.role === "WORKSHOP_MANAGER" || user.rawRoles?.includes("WORKSHOP")) return "catalogue";
-  return "garage";
+  if (isAdmin) return "admin_marketplace_review";
+  if (user.role === "INVENTORY_MANAGER" || user.rawRoles?.includes("SELLER")) return "seller_inventory";
+  if (user.role === "WORKSHOP_MANAGER" || user.rawRoles?.includes("WORKSHOP")) return "seller_inventory";
+  return "marketplace_browse";
 }
 
 export default function PlatformDashboardPage() {
@@ -62,11 +65,14 @@ export default function PlatformDashboardPage() {
 
   const getTabLabel = (tab: string) => {
     const map: Record<string, string> = {
+      marketplace_browse: "Marketplace — Approved Vehicles & Spare Parts",
+      seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
+      admin_marketplace_review: "Admin Moderation — Listing Review Queue",
       profile: "User Profile (Phase 1 Identity & RBAC)",
       organisations: "Organisations & Teams (Phase 1 RBAC)",
       garage: "My Garage (Phase 2 Vehicle Master)",
       catalogue: "Vehicle & Parts Catalogue (Phase 2)",
-      parts_fitment: "Guaranteed Fit Parts & Catalogue (Phase 2)",
+      parts_fitment: "Vehicle Parts & Confirmed Fitment (Phase 2)",
       seller_onboarding: "Seller Onboarding & Verification (Phase 2)",
       seller_reviews: "Seller Applications Compliance Queue (Phase 2)",
     };
@@ -91,7 +97,13 @@ export default function PlatformDashboardPage() {
         />
 
         <main className="flex-1 overflow-y-auto">
-          {currentTab === "profile" ? (
+          {currentTab === "marketplace_browse" ? (
+            <MarketplaceBrowseView />
+          ) : currentTab === "seller_inventory" ? (
+            <SellerInventoryView />
+          ) : currentTab === "admin_marketplace_review" ? (
+            <AdminMarketplaceReviewView />
+          ) : currentTab === "profile" ? (
             <Phase1ProfileView />
           ) : currentTab === "organisations" ? (
             <Phase1OrganisationsView />
@@ -102,7 +114,7 @@ export default function PlatformDashboardPage() {
           ) : currentTab === "seller_onboarding" || currentTab === "seller_reviews" ? (
             <Phase2SellerOnboardingView key={currentTab} initialTab={currentTab === "seller_reviews" ? "admin_queue" : "my_application"} />
           ) : (
-            <Phase2GarageView />
+            <MarketplaceBrowseView />
           )}
         </main>
       </div>
