@@ -211,19 +211,28 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
 
     if (data && typeof data === "object") {
       const dataObj = data as Record<string, unknown>;
-      if (typeof dataObj.message === "string") {
+      if (typeof dataObj.error === "string") {
+        message = dataObj.error;
+      } else if (typeof dataObj.message === "string" && dataObj.message !== "Validation or execution error.") {
         message = dataObj.message;
       } else if (typeof dataObj.detail === "string") {
         message = dataObj.detail;
       }
       details = (dataObj.details || data) as Record<string, string[] | string> | string[] | string;
-      // Extract field errors if present
-      if (dataObj.details && typeof dataObj.details === "object") {
-        const detailsObj = dataObj.details as Record<string, unknown>;
-        const firstKey = Object.keys(detailsObj)[0];
-        if (firstKey && Array.isArray(detailsObj[firstKey]) && detailsObj[firstKey][0]) {
-          message = `${firstKey}: ${detailsObj[firstKey][0]}`;
-        }
+
+      // Extract field errors if present in details or the root payload
+      const candidate = (dataObj.details && typeof dataObj.details === "object" ? dataObj.details : dataObj) as Record<string, unknown>;
+      const fieldKeys = Object.keys(candidate).filter(
+        (k) => !["status", "code", "message", "details", "detail", "error"].includes(k)
+      );
+      if (fieldKeys.length > 0) {
+        const fieldErrors = fieldKeys.map((k) => {
+          const val = candidate[k];
+          if (Array.isArray(val) && val[0]) return `${k}: ${val[0]}`;
+          if (typeof val === "string") return `${k}: ${val}`;
+          return `${k}: ${JSON.stringify(val)}`;
+        });
+        message = fieldErrors.join("; ");
       }
     } else if (typeof data === "string") {
       message = data;
@@ -723,6 +732,14 @@ export const api = {
       });
     },
 
+    async submitVehicle(id: string): Promise<MarketplaceVehicleListing> {
+      const res = await apiRequest<{ listing: MarketplaceVehicleListing }>(
+        `/marketplace/vehicles/${id}/submit/`,
+        { method: "POST", requiresAuth: true }
+      );
+      return res.listing;
+    },
+
     async resubmitVehicle(id: string): Promise<MarketplaceVehicleListing> {
       const res = await apiRequest<{ listing: MarketplaceVehicleListing }>(
         `/marketplace/vehicles/${id}/resubmit/`,
@@ -754,6 +771,14 @@ export const api = {
         requiresAuth: true,
         body: JSON.stringify(payload),
       });
+    },
+
+    async submitPart(id: string): Promise<MarketplacePartListing> {
+      const res = await apiRequest<{ listing: MarketplacePartListing }>(
+        `/marketplace/parts/${id}/submit/`,
+        { method: "POST", requiresAuth: true }
+      );
+      return res.listing;
     },
 
     async resubmitPart(id: string): Promise<MarketplacePartListing> {
@@ -1050,6 +1075,7 @@ export interface MarketplaceVehicleListing {
   submitted_at?: string;
   reviewed_at?: string | null;
   reviewed_by?: string | null;
+  reviewed_by_name?: string | null;
   rejection_reason?: string;
   admin_notes?: string;
   created_at: string;
@@ -1082,6 +1108,7 @@ export interface MarketplacePartListing {
   submitted_at?: string;
   reviewed_at?: string | null;
   reviewed_by?: string | null;
+  reviewed_by_name?: string | null;
   rejection_reason?: string;
   admin_notes?: string;
   created_at: string;

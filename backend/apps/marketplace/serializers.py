@@ -21,6 +21,7 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
     variant_name = serializers.CharField(source='variant.display_name', read_only=True, allow_null=True)
     masked_vin = serializers.CharField(read_only=True)
     masked_registration = serializers.CharField(read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.full_name', read_only=True, allow_null=True)
 
     class Meta:
         model = VehicleListing
@@ -55,6 +56,9 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
             'location_city',
             'location_postcode',
             'status',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
             'rejection_reason',
             'admin_notes',
             'created_at',
@@ -65,6 +69,9 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
             'seller',
             'seller_name',
             'status',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
             'rejection_reason',
             'admin_notes',
             'created_at',
@@ -100,11 +107,22 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Please provide a valid manufacturing year.")
         return value
 
+    def validate(self, attrs):
+        make = attrs.get('make')
+        model = attrs.get('model')
+        if make and model and model.make_id != make.id:
+            raise serializers.ValidationError({"model": "Selected model does not belong to the selected vehicle make."})
+        variant = attrs.get('variant')
+        if variant and model and variant.model_id != model.id:
+            raise serializers.ValidationError({"variant": "Selected variant does not belong to the selected vehicle model."})
+        return attrs
+
 
 class SparePartListingSellerSerializer(serializers.ModelSerializer):
     seller_name = serializers.CharField(source='seller.full_name', read_only=True)
     organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
     category_name = serializers.CharField(source='category.name', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.full_name', read_only=True, allow_null=True)
 
     class Meta:
         model = SparePartListing
@@ -130,6 +148,9 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'compatible_variants',
             'compatibility_notes',
             'status',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
             'rejection_reason',
             'admin_notes',
             'created_at',
@@ -140,6 +161,9 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'seller',
             'seller_name',
             'status',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
             'rejection_reason',
             'admin_notes',
             'created_at',

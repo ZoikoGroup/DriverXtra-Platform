@@ -28,9 +28,11 @@ urlpatterns = [
     # 2. Seller Inventory Management
     path('vehicles/', SellerVehicleListCreateView.as_view(), name='marketplace-seller-vehicles'),
     path('vehicles/<uuid:id>/', SellerVehicleDetailUpdateView.as_view(), name='marketplace-seller-vehicle-detail'),
+    path('vehicles/<uuid:id>/submit/', SellerVehicleResubmitView.as_view(), name='marketplace-seller-vehicle-submit'),
     path('vehicles/<uuid:id>/resubmit/', SellerVehicleResubmitView.as_view(), name='marketplace-seller-vehicle-resubmit'),
     path('parts/', SellerPartListCreateView.as_view(), name='marketplace-seller-parts'),
     path('parts/<uuid:id>/', SellerPartDetailUpdateView.as_view(), name='marketplace-seller-part-detail'),
+    path('parts/<uuid:id>/submit/', SellerPartResubmitView.as_view(), name='marketplace-seller-part-submit'),
     path('parts/<uuid:id>/resubmit/', SellerPartResubmitView.as_view(), name='marketplace-seller-part-resubmit'),
 
     # 3. Admin Moderation & Approval Queues

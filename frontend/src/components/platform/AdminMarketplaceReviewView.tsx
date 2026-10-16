@@ -35,6 +35,7 @@ export default function AdminMarketplaceReviewView() {
   const [actionLoading, setActionLoading] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [modalError, setModalError] = useState("");
 
   const fetchVehicles = useCallback(async () => {
     setLoading(true);
@@ -92,18 +93,19 @@ export default function AdminMarketplaceReviewView() {
   const handleExecuteReview = async () => {
     if (!reviewAction) return;
     if ((reviewAction === "REJECT" || reviewAction === "REQUEST_CHANGES") && !rejectionReason.trim()) {
-      setErrorMessage("Please enter a mandatory rejection / change-request reason.");
+      setModalError("Please enter a mandatory rejection / change-request reason.");
       return;
     }
 
     setActionLoading(true);
+    setModalError("");
     setErrorMessage("");
     try {
       if (inspectVehicle) {
         await api.marketplace.reviewVehicle(inspectVehicle.id, {
           action: reviewAction,
-          rejection_reason: rejectionReason,
-          admin_notes: adminNotes,
+          rejection_reason: rejectionReason.trim(),
+          admin_notes: adminNotes.trim(),
         });
         setSuccessMessage(`Vehicle listing ${reviewAction.toLowerCase()}d successfully.`);
         setInspectVehicle(null);
@@ -111,8 +113,8 @@ export default function AdminMarketplaceReviewView() {
       } else if (inspectPart) {
         await api.marketplace.reviewPart(inspectPart.id, {
           action: reviewAction,
-          rejection_reason: rejectionReason,
-          admin_notes: adminNotes,
+          rejection_reason: rejectionReason.trim(),
+          admin_notes: adminNotes.trim(),
         });
         setSuccessMessage(`Spare part listing ${reviewAction.toLowerCase()}d successfully.`);
         setInspectPart(null);
@@ -122,7 +124,7 @@ export default function AdminMarketplaceReviewView() {
       setRejectionReason("");
       setAdminNotes("");
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : "Review action failed.");
+      setModalError(err instanceof Error ? err.message : "Review action failed.");
     } finally {
       setActionLoading(false);
     }
@@ -190,10 +192,24 @@ export default function AdminMarketplaceReviewView() {
         </div>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="flex items-center justify-between gap-4 bg-white p-3.5 rounded-2xl border border-slate-200">
-        <span className="text-xs font-bold text-slate-600">Filter Queue by Status:</span>
-        <div className="flex items-center gap-2 text-xs">
+      {/* Filter Tabs & Refresh */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-white p-3.5 rounded-2xl border border-slate-200">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold text-slate-600">Filter Queue:</span>
+          <button
+            onClick={() => {
+              if (activeQueue === "vehicles") fetchVehicles();
+              else fetchParts();
+            }}
+            disabled={loading}
+            className="px-3 py-1 rounded-xl font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs transition-colors flex items-center gap-1"
+            title="Refresh review queue"
+          >
+            <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin text-amber-500" : ""}`} />
+            <span>Refresh Queue</span>
+          </button>
+        </div>
+        <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
           {["PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "ALL"].map((st) => (
             <button
               key={st}
@@ -395,12 +411,42 @@ export default function AdminMarketplaceReviewView() {
               </button>
             </div>
 
+            {/* Modal Error Banner */}
+            {modalError && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-xs font-bold text-red-900 flex items-center justify-between">
+                <span>{modalError}</span>
+                <button
+                  type="button"
+                  onClick={() => setModalError("")}
+                  className="text-red-700 hover:text-red-950 p-1"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
             {/* Item Details */}
             {inspectVehicle && (
               <div className="space-y-4 text-xs">
+                {/* Images */}
+                {inspectVehicle.primary_image_url ? (
+                  <div className="rounded-2xl overflow-hidden h-56 bg-slate-900">
+                    <img
+                      src={inspectVehicle.primary_image_url}
+                      alt={inspectVehicle.title}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                ) : (
+                  <div className="rounded-2xl p-6 bg-slate-100 border border-slate-200 text-center text-slate-400">
+                    <Car className="w-10 h-10 mx-auto mb-1 text-slate-300" />
+                    <span>No image uploaded for this vehicle</span>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="p-3 bg-slate-50 rounded-xl">
-                    <span className="text-slate-500">Price</span>
+                    <span className="text-slate-500">Asking Price</span>
                     <p className="font-bold text-slate-900">£{Number(inspectVehicle.price).toLocaleString()}</p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl">
@@ -412,19 +458,31 @@ export default function AdminMarketplaceReviewView() {
                     <p className="font-bold text-slate-900">{inspectVehicle.mileage.toLocaleString()} mi</p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl">
-                    <span className="text-slate-500">Seller</span>
-                    <p className="font-bold text-slate-900 truncate">{inspectVehicle.seller_name}</p>
+                    <span className="text-slate-500">Status</span>
+                    <p className="font-bold text-slate-900">{inspectVehicle.status}</p>
                   </div>
                 </div>
 
                 <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-1">
-                  <span className="font-bold text-slate-800">Verified Identifiers</span>
+                  <span className="font-bold text-slate-800">Verified Identifiers & Ownership</span>
                   <div className="flex flex-wrap gap-4 text-slate-600 text-[11px]">
+                    <span>Seller: <strong className="text-slate-900">{inspectVehicle.seller_name}</strong></span>
+                    <span>Organisation: <strong className="text-slate-900">{inspectVehicle.organisation_name || "Personal Trading"}</strong></span>
                     <span>Masked VIN: <strong className="font-mono">{inspectVehicle.masked_vin}</strong></span>
                     <span>Plate: <strong className="font-mono">{inspectVehicle.masked_registration}</strong></span>
-                    <span>Organisation: <strong>{inspectVehicle.organisation_name || "Personal"}</strong></span>
+                    <span>Location: <strong>{inspectVehicle.location_city || "N/A"}, {inspectVehicle.location_postcode || ""}</strong></span>
                   </div>
                 </div>
+
+                {/* Audit Review History */}
+                {inspectVehicle.reviewed_at && (
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 text-[11px] text-slate-600">
+                    <span>Review History: <strong>Reviewed by {inspectVehicle.reviewed_by_name || "Platform Admin"} on {new Date(inspectVehicle.reviewed_at).toLocaleDateString()}</strong></span>
+                    {inspectVehicle.rejection_reason && (
+                      <p className="text-red-700 mt-1">Previous Reason: {inspectVehicle.rejection_reason}</p>
+                    )}
+                  </div>
+                )}
 
                 {inspectVehicle.description && (
                   <div>
@@ -437,9 +495,25 @@ export default function AdminMarketplaceReviewView() {
 
             {inspectPart && (
               <div className="space-y-4 text-xs">
+                {/* Images */}
+                {inspectPart.primary_image_url ? (
+                  <div className="rounded-2xl overflow-hidden h-48 bg-slate-900">
+                    <img
+                      src={inspectPart.primary_image_url}
+                      alt={inspectPart.name}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                ) : (
+                  <div className="rounded-2xl p-6 bg-slate-100 border border-slate-200 text-center text-slate-400">
+                    <Wrench className="w-10 h-10 mx-auto mb-1 text-slate-300" />
+                    <span>No image uploaded for this spare part</span>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="p-3 bg-slate-50 rounded-xl">
-                    <span className="text-slate-500">Price</span>
+                    <span className="text-slate-500">Retail Price</span>
                     <p className="font-bold text-slate-900">£{Number(inspectPart.price).toFixed(2)}</p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl">
@@ -447,12 +521,21 @@ export default function AdminMarketplaceReviewView() {
                     <p className="font-bold text-slate-900">{inspectPart.brand} ({inspectPart.mpn})</p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl">
-                    <span className="text-slate-500">Stock</span>
+                    <span className="text-slate-500">Stock Quantity</span>
                     <p className="font-bold text-slate-900">{inspectPart.stock_quantity} units</p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl">
-                    <span className="text-slate-500">Seller</span>
-                    <p className="font-bold text-slate-900 truncate">{inspectPart.seller_name}</p>
+                    <span className="text-slate-500">Status</span>
+                    <p className="font-bold text-slate-900">{inspectPart.status}</p>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-1">
+                  <span className="font-bold text-slate-800">Ownership & Category</span>
+                  <div className="flex flex-wrap gap-4 text-slate-600 text-[11px]">
+                    <span>Seller: <strong className="text-slate-900">{inspectPart.seller_name}</strong></span>
+                    <span>Organisation: <strong className="text-slate-900">{inspectPart.organisation_name || "Personal Trading"}</strong></span>
+                    <span>Condition: <strong>{inspectPart.condition}</strong></span>
                   </div>
                 </div>
 
@@ -466,6 +549,16 @@ export default function AdminMarketplaceReviewView() {
                         </span>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Audit Review History */}
+                {inspectPart.reviewed_at && (
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 text-[11px] text-slate-600">
+                    <span>Review History: <strong>Reviewed by {inspectPart.reviewed_by_name || "Platform Admin"} on {new Date(inspectPart.reviewed_at).toLocaleDateString()}</strong></span>
+                    {inspectPart.rejection_reason && (
+                      <p className="text-red-700 mt-1">Previous Reason: {inspectPart.rejection_reason}</p>
+                    )}
                   </div>
                 )}
               </div>
@@ -557,9 +650,10 @@ export default function AdminMarketplaceReviewView() {
                   type="button"
                   onClick={handleExecuteReview}
                   disabled={!reviewAction || actionLoading}
-                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors disabled:opacity-40"
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors disabled:opacity-40 flex items-center gap-1.5"
                 >
-                  Confirm Decision
+                  {actionLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                  <span>Confirm Decision</span>
                 </button>
               </div>
             </div>

@@ -405,3 +405,142 @@ class TestMarketplaceWorkflow:
         price_ids = [p['id'] for p in (data_price if isinstance(data_price, list) else data_price.get('results', []))]
         assert str(part_brembo.id) in price_ids
         assert str(part_bosch.id) not in price_ids
+
+    # =========================================================================
+    # 4. End-to-End Draft Lifecycle & Approval Verification
+    # =========================================================================
+
+    def test_vehicle_draft_lifecycle_and_approval_workflow(
+        self, seller_auth_client, admin_auth_client, api_client, seller_user, admin_user, make_bmw, model_3series, variant_330i
+    ):
+        # 1. Seller saves vehicle as DRAFT
+        draft_payload = {
+            'title': '2021 BMW 330i Draft Listing',
+            'make': str(make_bmw.id),
+            'model': str(model_3series.id),
+            'variant': str(variant_330i.id),
+            'year': 2021,
+            'price': '23500.00',
+            'status': 'DRAFT',
+        }
+        create_res = seller_auth_client.post('/api/v1/marketplace/vehicles/', draft_payload, format='json')
+        assert create_res.status_code == status.HTTP_201_CREATED
+        listing_id = create_res.json()['id']
+        assert create_res.json()['status'] == ListingStatusChoices.DRAFT
+
+        # 2. Draft does NOT appear in public buyer browsing
+        browse_res = api_client.get('/api/v1/marketplace/browse/vehicles/')
+        browse_ids = [v['id'] for v in (browse_res.json() if isinstance(browse_res.json(), list) else browse_res.json()['results'])]
+        assert listing_id not in browse_ids
+
+        # 3. Draft does NOT appear in pending admin queue
+        admin_queue = admin_auth_client.get('/api/v1/marketplace/admin/vehicles/?status=PENDING_APPROVAL')
+        queue_ids = [v['id'] for v in (admin_queue.json() if isinstance(admin_queue.json(), list) else admin_queue.json()['results'])]
+        assert listing_id not in queue_ids
+
+        # 4. Seller submits the draft for approval
+        submit_res = seller_auth_client.post(f'/api/v1/marketplace/vehicles/{listing_id}/submit/', format='json')
+        assert submit_res.status_code == status.HTTP_200_OK
+        assert submit_res.json()['listing']['status'] == ListingStatusChoices.PENDING_APPROVAL
+
+        # 5. Admin now sees vehicle in review queue
+        admin_queue_after = admin_auth_client.get('/api/v1/marketplace/admin/vehicles/?status=PENDING_APPROVAL')
+        queue_after_ids = [v['id'] for v in (admin_queue_after.json() if isinstance(admin_queue_after.json(), list) else admin_queue_after.json()['results'])]
+        assert listing_id in queue_after_ids
+
+        # 6. Admin approves vehicle
+        approve_res = admin_auth_client.post(f'/api/v1/marketplace/admin/vehicles/{listing_id}/review/', {'action': 'APPROVE'}, format='json')
+        assert approve_res.status_code == status.HTTP_200_OK
+        data = approve_res.json()['listing']
+        assert data['status'] == ListingStatusChoices.APPROVED
+        assert data['reviewed_by_name'] == admin_user.full_name
+        assert data['reviewed_at'] is not None
+
+        # 7. Approved vehicle now appears in public buyer browsing
+        browse_approved = api_client.get('/api/v1/marketplace/browse/vehicles/')
+        approved_ids = [v['id'] for v in (browse_approved.json() if isinstance(browse_approved.json(), list) else browse_approved.json()['results'])]
+        assert listing_id in approved_ids
+
+    def test_part_draft_lifecycle_and_approval_workflow(
+        self, seller_auth_client, admin_auth_client, api_client, seller_user, admin_user, brakes_category
+    ):
+        # 1. Seller saves spare part as DRAFT
+        draft_payload = {
+            'name': 'Brembo Track Day Pads',
+            'brand': 'Brembo',
+            'mpn': 'P-06-088T',
+            'category': str(brakes_category.id),
+            'price': '110.00',
+            'stock_quantity': 6,
+            'status': 'DRAFT',
+        }
+        create_res = seller_auth_client.post('/api/v1/marketplace/parts/', draft_payload, format='json')
+        assert create_res.status_code == status.HTTP_201_CREATED
+        part_id = create_res.json()['id']
+        assert create_res.json()['status'] == ListingStatusChoices.DRAFT
+
+        # 2. Draft does NOT appear in public buyer parts browsing
+        browse_res = api_client.get('/api/v1/marketplace/browse/parts/')
+        browse_ids = [p['id'] for p in (browse_res.json() if isinstance(browse_res.json(), list) else browse_res.json().get('results', []))]
+        assert part_id not in browse_ids
+
+        # 3. Seller submits draft
+        submit_res = seller_auth_client.post(f'/api/v1/marketplace/parts/{part_id}/submit/', format='json')
+        assert submit_res.status_code == status.HTTP_200_OK
+        assert submit_res.json()['listing']['status'] == ListingStatusChoices.PENDING_APPROVAL
+
+        # 4. Admin approves part
+        approve_res = admin_auth_client.post(f'/api/v1/marketplace/admin/parts/{part_id}/review/', {'action': 'APPROVE'}, format='json')
+        assert approve_res.status_code == status.HTTP_200_OK
+        assert approve_res.json()['listing']['status'] == ListingStatusChoices.APPROVED
+
+        # 5. Part appears in public buyer browsing
+        browse_after = api_client.get('/api/v1/marketplace/browse/parts/?mpn=P-06-088T')
+        after_ids = [p['id'] for p in (browse_after.json() if isinstance(browse_after.json(), list) else browse_after.json().get('results', []))]
+        assert part_id in after_ids
+
+    def test_admin_part_reject_requires_reason(self, admin_auth_client, seller_user, brakes_category):
+        part = SparePartListing.objects.create(
+            seller=seller_user,
+            name='Faulty Sensor',
+            brand='Generic',
+            mpn='GEN-001',
+            category=brakes_category,
+            price=15.00,
+            status=ListingStatusChoices.PENDING_APPROVAL,
+        )
+
+        # Reject without reason fails
+        bad_res = admin_auth_client.post(f'/api/v1/marketplace/admin/parts/{part.id}/review/', {'action': 'REJECT'}, format='json')
+        assert bad_res.status_code == status.HTTP_400_BAD_REQUEST
+
+        # Reject with reason succeeds
+        ok_res = admin_auth_client.post(f'/api/v1/marketplace/admin/parts/{part.id}/review/', {
+            'action': 'REJECT',
+            'rejection_reason': 'Unverified OEM equivalence; please provide OEM cross-reference.',
+        }, format='json')
+        assert ok_res.status_code == status.HTTP_200_OK
+        part.refresh_from_db()
+        assert part.status == ListingStatusChoices.REJECTED
+        assert 'Unverified OEM' in part.rejection_reason
+
+    def test_self_approval_prevention(self, admin_auth_client, admin_user, make_bmw, model_3series):
+        # Admin user is NOT a superuser
+        admin_user.is_superuser = False
+        admin_user.save()
+
+        # Admin lists their own vehicle
+        own_listing = VehicleListing.objects.create(
+            seller=admin_user,
+            title='Admin Personal Car',
+            make=make_bmw,
+            model=model_3series,
+            year=2021,
+            price=21000,
+            status=ListingStatusChoices.PENDING_APPROVAL,
+        )
+
+        res = admin_auth_client.post(f'/api/v1/marketplace/admin/vehicles/{own_listing.id}/review/', {'action': 'APPROVE'}, format='json')
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'Self-approval violation' in str(res.json())
+

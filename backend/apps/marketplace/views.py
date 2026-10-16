@@ -262,17 +262,27 @@ class SellerVehicleDetailUpdateView(generics.RetrieveUpdateAPIView):
         # Prevent seller from directly changing status to APPROVED
         instance = serializer.instance
         update_data = {}
-        # If updating a rejected or changes-requested item, reset to pending approval upon edit
-        if instance.status in (ListingStatusChoices.REJECTED, ListingStatusChoices.CHANGES_REQUESTED):
+        req_status = self.request.data.get('status')
+        if req_status == ListingStatusChoices.PENDING_APPROVAL and instance.status in (
+            ListingStatusChoices.DRAFT,
+            ListingStatusChoices.REJECTED,
+            ListingStatusChoices.CHANGES_REQUESTED,
+        ):
             update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
             update_data['submitted_at'] = timezone.now()
+            update_data['rejection_reason'] = ""
+        elif instance.status in (ListingStatusChoices.REJECTED, ListingStatusChoices.CHANGES_REQUESTED):
+            update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
+            update_data['submitted_at'] = timezone.now()
+            update_data['rejection_reason'] = ""
         serializer.save(**update_data)
 
 
 class SellerVehicleResubmitView(views.APIView):
-    """Seller endpoint to resubmit a rejected or changes-requested vehicle submission.
+    """Seller endpoint to submit or resubmit a draft/rejected vehicle submission for review.
 
     POST /api/v1/marketplace/vehicles/<id>/resubmit/
+    POST /api/v1/marketplace/vehicles/<id>/submit/
     """
     permission_classes = [IsSellerOrStaff]
 
@@ -284,7 +294,7 @@ class SellerVehicleResubmitView(views.APIView):
 
         if not (user.is_staff or user.has_role('ADMIN') or listing.seller == user):
             return Response(
-                {"error": "You are not authorized to resubmit this vehicle."},
+                {"error": "You are not authorized to submit this vehicle."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -294,16 +304,24 @@ class SellerVehicleResubmitView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if listing.status == ListingStatusChoices.PENDING_APPROVAL:
+            return Response(
+                {"error": "This listing is already pending approval."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        was_draft = listing.status == ListingStatusChoices.DRAFT
         listing.status = ListingStatusChoices.PENDING_APPROVAL
         listing.submitted_at = timezone.now()
         listing.rejection_reason = ""
         listing.save()
 
         serializer = VehicleListingSellerSerializer(listing, context={'request': request})
+        action_msg = "Vehicle listing submitted for approval." if was_draft else "Vehicle listing resubmitted for approval."
         return Response(
             {
                 "status": "success",
-                "message": "Vehicle listing resubmitted for approval.",
+                "message": action_msg,
                 "listing": serializer.data,
             },
             status=status.HTTP_200_OK,
@@ -372,16 +390,27 @@ class SellerPartDetailUpdateView(generics.RetrieveUpdateAPIView):
     def perform_update(self, serializer):
         instance = serializer.instance
         update_data = {}
-        if instance.status in (ListingStatusChoices.REJECTED, ListingStatusChoices.CHANGES_REQUESTED):
+        req_status = self.request.data.get('status')
+        if req_status == ListingStatusChoices.PENDING_APPROVAL and instance.status in (
+            ListingStatusChoices.DRAFT,
+            ListingStatusChoices.REJECTED,
+            ListingStatusChoices.CHANGES_REQUESTED,
+        ):
             update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
             update_data['submitted_at'] = timezone.now()
+            update_data['rejection_reason'] = ""
+        elif instance.status in (ListingStatusChoices.REJECTED, ListingStatusChoices.CHANGES_REQUESTED):
+            update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
+            update_data['submitted_at'] = timezone.now()
+            update_data['rejection_reason'] = ""
         serializer.save(**update_data)
 
 
 class SellerPartResubmitView(views.APIView):
-    """Seller endpoint to resubmit a rejected or changes-requested spare part submission.
+    """Seller endpoint to submit or resubmit a draft/rejected spare part submission.
 
     POST /api/v1/marketplace/parts/<id>/resubmit/
+    POST /api/v1/marketplace/parts/<id>/submit/
     """
     permission_classes = [IsSellerOrStaff]
 
@@ -393,7 +422,7 @@ class SellerPartResubmitView(views.APIView):
 
         if not (user.is_staff or user.has_role('ADMIN') or listing.seller == user):
             return Response(
-                {"error": "You are not authorized to resubmit this spare part."},
+                {"error": "You are not authorized to submit this spare part."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -403,16 +432,24 @@ class SellerPartResubmitView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if listing.status == ListingStatusChoices.PENDING_APPROVAL:
+            return Response(
+                {"error": "This listing is already pending approval."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        was_draft = listing.status == ListingStatusChoices.DRAFT
         listing.status = ListingStatusChoices.PENDING_APPROVAL
         listing.submitted_at = timezone.now()
         listing.rejection_reason = ""
         listing.save()
 
         serializer = SparePartListingSellerSerializer(listing, context={'request': request})
+        action_msg = "Spare part listing submitted for approval." if was_draft else "Spare part listing resubmitted for approval."
         return Response(
             {
                 "status": "success",
-                "message": "Spare part listing resubmitted for approval.",
+                "message": action_msg,
                 "listing": serializer.data,
             },
             status=status.HTTP_200_OK,

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import {
   api,
   MarketplaceVehicleListing,
@@ -55,6 +55,8 @@ export default function SellerInventoryView() {
   const [actionLoading, setActionLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [vehModalError, setVehModalError] = useState("");
+  const [partModalError, setPartModalError] = useState("");
 
   // New Vehicle Form State
   const [vehTitle, setVehTitle] = useState("");
@@ -90,6 +92,45 @@ export default function SellerInventoryView() {
   const [partVariant, setPartVariant] = useState("");
   const [partCompatibilityNotes, setPartCompatibilityNotes] = useState("");
   const [partOrg, setPartOrg] = useState("");
+
+  const resetVehicleForm = () => {
+    setVehTitle("");
+    setVehMake("");
+    setVehModel("");
+    setVehVariant("");
+    setModels([]);
+    setVariants([]);
+    setVehYear("2021");
+    setVehReg("");
+    setVehVin("");
+    setVehMileage("25000");
+    setVehFuel("PETROL");
+    setVehTrans("AUTOMATIC");
+    setVehBody("Saloon");
+    setVehPrice("18500");
+    setVehCondition("VERY_GOOD");
+    setVehDescription("");
+    setVehImageUrl("");
+    setVehCity("London");
+    setVehPostcode("SW1A 1AA");
+    setVehModalError("");
+  };
+
+  const resetPartForm = () => {
+    setPartName("");
+    setPartBrand("");
+    setPartMpn("");
+    setPartOem("");
+    setPartCategory("");
+    setPartPrice("120.00");
+    setPartStock("5");
+    setPartCondition("NEW");
+    setPartDescription("");
+    setPartImageUrl("");
+    setPartVariant("");
+    setPartCompatibilityNotes("");
+    setPartModalError("");
+  };
 
   // Load reference datasets
   useEffect(() => {
@@ -133,51 +174,35 @@ export default function SellerInventoryView() {
     };
   }, [vehModel]);
 
-  // Fetch Seller's Vehicles
-  const fetchMyVehicles = useCallback(async () => {
-    setVehiclesLoading(true);
-    try {
-      const statusParam = statusFilter === "ALL" ? undefined : statusFilter;
-      const data = await api.marketplace.listMyVehicles(statusParam);
-      setVehicles(data);
-    } catch (err) {
-      console.error("Failed to load seller vehicles", err);
-    } finally {
-      setVehiclesLoading(false);
-    }
-  }, [statusFilter]);
-
-  // Fetch Seller's Parts
-  const fetchMyParts = useCallback(async () => {
-    setPartsLoading(true);
-    try {
-      const statusParam = statusFilter === "ALL" ? undefined : statusFilter;
-      const data = await api.marketplace.listMyParts(statusParam);
-      setParts(data);
-    } catch (err) {
-      console.error("Failed to load seller parts", err);
-    } finally {
-      setPartsLoading(false);
-    }
-  }, [statusFilter]);
-
+  // Fetch Seller's Inventory
   useEffect(() => {
     let ignore = false;
-    const loadInventory = async () => {
-      try {
-        const statusParam = statusFilter === "ALL" ? undefined : statusFilter;
-        if (activeSection === "vehicles") {
-          const data = await api.marketplace.listMyVehicles(statusParam);
-          if (!ignore) setVehicles(data);
-        } else {
-          const data = await api.marketplace.listMyParts(statusParam);
-          if (!ignore) setParts(data);
+    const statusParam = statusFilter === "ALL" ? undefined : statusFilter;
+    if (activeSection === "vehicles") {
+      api.marketplace.listMyVehicles(statusParam).then((data) => {
+        if (!ignore) {
+          setVehicles(data);
+          setVehiclesLoading(false);
         }
-      } catch (err) {
-        if (!ignore) console.error("Failed to load inventory", err);
-      }
-    };
-    loadInventory();
+      }).catch((err) => {
+        if (!ignore) {
+          console.error("Failed to load seller vehicles", err);
+          setVehiclesLoading(false);
+        }
+      });
+    } else {
+      api.marketplace.listMyParts(statusParam).then((data) => {
+        if (!ignore) {
+          setParts(data);
+          setPartsLoading(false);
+        }
+      }).catch((err) => {
+        if (!ignore) {
+          console.error("Failed to load seller parts", err);
+          setPartsLoading(false);
+        }
+      });
+    }
     return () => {
       ignore = true;
     };
@@ -185,34 +210,54 @@ export default function SellerInventoryView() {
 
   // Submit New Vehicle
   const handleSubmitVehicle = async (asDraft: boolean) => {
+    setVehModalError("");
     setErrorMessage("");
     setSuccessMessage("");
-    if (!vehTitle || !vehMake || !vehModel || !vehPrice) {
-      setErrorMessage("Please fill in the required fields (Title, Make, Model, Price).");
+
+    if (!vehTitle.trim()) {
+      setVehModalError("Listing Title is required.");
+      return;
+    }
+    if (!vehMake) {
+      setVehModalError("Please select a Vehicle Make.");
+      return;
+    }
+    if (!vehModel) {
+      setVehModalError("Please select a Vehicle Model.");
+      return;
+    }
+    const parsedPrice = parseFloat(vehPrice);
+    if (isNaN(parsedPrice) || parsedPrice <= 0) {
+      setVehModalError("Asking price must be greater than £0.00.");
+      return;
+    }
+    const parsedYear = parseInt(vehYear, 10);
+    if (isNaN(parsedYear) || parsedYear < 1900 || parsedYear > 2050) {
+      setVehModalError("Please provide a valid manufacturing year (1900 - 2050).");
       return;
     }
 
     setActionLoading(true);
     try {
       const payload: CreateVehicleListingPayload = {
-        title: vehTitle,
+        title: vehTitle.trim(),
         make: vehMake,
         model: vehModel,
         variant: vehVariant || undefined,
-        year: parseInt(vehYear, 10) || 2021,
-        registration_number: vehReg,
-        vin: vehVin,
+        year: parsedYear,
+        registration_number: vehReg.trim(),
+        vin: vehVin.trim(),
         mileage: parseInt(vehMileage, 10) || 0,
         fuel_type: vehFuel,
         transmission: vehTrans,
-        body_type: vehBody,
-        price: parseFloat(vehPrice) || 0,
+        body_type: vehBody.trim(),
+        price: parsedPrice,
         currency: "GBP",
         condition: vehCondition,
-        description: vehDescription,
-        primary_image_url: vehImageUrl,
-        location_city: vehCity,
-        location_postcode: vehPostcode,
+        description: vehDescription.trim(),
+        primary_image_url: vehImageUrl.trim(),
+        location_city: vehCity.trim(),
+        location_postcode: vehPostcode.trim(),
         organisation: vehOrg || null,
         status: asDraft ? "DRAFT" : "PENDING_APPROVAL",
       };
@@ -224,10 +269,14 @@ export default function SellerInventoryView() {
           : "Vehicle submitted successfully! It is now Pending Approval by marketplace compliance."
       );
       setAddVehicleOpen(false);
-      fetchMyVehicles();
+      resetVehicleForm();
+      const targetFilter = asDraft ? "DRAFT" : "PENDING_APPROVAL";
+      setStatusFilter(targetFilter);
+      const data = await api.marketplace.listMyVehicles(targetFilter);
+      setVehicles(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to submit vehicle.";
-      setErrorMessage(msg);
+      setVehModalError(msg);
     } finally {
       setActionLoading(false);
     }
@@ -235,10 +284,34 @@ export default function SellerInventoryView() {
 
   // Submit New Spare Part
   const handleSubmitPart = async (asDraft: boolean) => {
+    setPartModalError("");
     setErrorMessage("");
     setSuccessMessage("");
-    if (!partName || !partBrand || !partMpn || !partCategory || !partPrice) {
-      setErrorMessage("Please fill in required fields (Name, Brand, MPN, Category, Price).");
+
+    if (!partName.trim()) {
+      setPartModalError("Part Name is required.");
+      return;
+    }
+    if (!partBrand.trim()) {
+      setPartModalError("Brand / Manufacturer is required.");
+      return;
+    }
+    if (!partMpn.trim()) {
+      setPartModalError("MPN (Manufacturer Part Number) is required.");
+      return;
+    }
+    if (!partCategory) {
+      setPartModalError("Please select a Taxonomy Category.");
+      return;
+    }
+    const parsedPrice = parseFloat(partPrice);
+    if (isNaN(parsedPrice) || parsedPrice <= 0) {
+      setPartModalError("Part price must be greater than £0.00.");
+      return;
+    }
+    const parsedStock = parseInt(partStock, 10);
+    if (isNaN(parsedStock) || parsedStock < 0) {
+      setPartModalError("Stock quantity cannot be negative.");
       return;
     }
 
@@ -249,19 +322,19 @@ export default function SellerInventoryView() {
         : [];
 
       const payload: CreatePartListingPayload = {
-        name: partName,
-        brand: partBrand,
-        mpn: partMpn,
+        name: partName.trim(),
+        brand: partBrand.trim(),
+        mpn: partMpn.trim(),
         oem_numbers: oemList,
         category: partCategory,
-        price: parseFloat(partPrice) || 0,
+        price: parsedPrice,
         currency: "GBP",
-        stock_quantity: parseInt(partStock, 10) || 1,
+        stock_quantity: parsedStock,
         condition: partCondition,
-        description: partDescription,
-        primary_image_url: partImageUrl,
+        description: partDescription.trim(),
+        primary_image_url: partImageUrl.trim(),
         compatible_variants: partVariant ? [partVariant] : [],
-        compatibility_notes: partCompatibilityNotes,
+        compatibility_notes: partCompatibilityNotes.trim(),
         organisation: partOrg || null,
         status: asDraft ? "DRAFT" : "PENDING_APPROVAL",
       };
@@ -273,10 +346,48 @@ export default function SellerInventoryView() {
           : "Spare part submitted successfully! It is now Pending Approval by compliance."
       );
       setAddPartOpen(false);
-      fetchMyParts();
+      resetPartForm();
+      const targetFilter = asDraft ? "DRAFT" : "PENDING_APPROVAL";
+      setStatusFilter(targetFilter);
+      const data = await api.marketplace.listMyParts(targetFilter);
+      setParts(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to submit spare part.";
-      setErrorMessage(msg);
+      setPartModalError(msg);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Submit Draft Vehicle For Approval
+  const handlePublishDraftVehicle = async (id: string) => {
+    setActionLoading(true);
+    setErrorMessage("");
+    try {
+      await api.marketplace.submitVehicle(id);
+      setSuccessMessage("Draft vehicle submitted for marketplace compliance approval!");
+      setStatusFilter("PENDING_APPROVAL");
+      const data = await api.marketplace.listMyVehicles("PENDING_APPROVAL");
+      setVehicles(data);
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to submit draft vehicle.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Submit Draft Part For Approval
+  const handlePublishDraftPart = async (id: string) => {
+    setActionLoading(true);
+    setErrorMessage("");
+    try {
+      await api.marketplace.submitPart(id);
+      setSuccessMessage("Draft spare part submitted for marketplace compliance approval!");
+      setStatusFilter("PENDING_APPROVAL");
+      const data = await api.marketplace.listMyParts("PENDING_APPROVAL");
+      setParts(data);
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : "Failed to submit draft spare part.");
     } finally {
       setActionLoading(false);
     }
@@ -289,7 +400,9 @@ export default function SellerInventoryView() {
     try {
       await api.marketplace.resubmitVehicle(id);
       setSuccessMessage("Vehicle resubmitted for admin review.");
-      fetchMyVehicles();
+      setStatusFilter("PENDING_APPROVAL");
+      const data = await api.marketplace.listMyVehicles("PENDING_APPROVAL");
+      setVehicles(data);
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : "Resubmission failed.");
     } finally {
@@ -304,7 +417,9 @@ export default function SellerInventoryView() {
     try {
       await api.marketplace.resubmitPart(id);
       setSuccessMessage("Spare part resubmitted for admin review.");
-      fetchMyParts();
+      setStatusFilter("PENDING_APPROVAL");
+      const data = await api.marketplace.listMyParts("PENDING_APPROVAL");
+      setParts(data);
     } catch (err: unknown) {
       setErrorMessage(err instanceof Error ? err.message : "Resubmission failed.");
     } finally {
@@ -547,6 +662,47 @@ export default function SellerInventoryView() {
                     </div>
                   </div>
 
+                  {/* Draft Notice & Publish Button */}
+                  {v.status === "DRAFT" && (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs">
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                        <span>This listing is saved as a <strong>Draft</strong>. It is not visible to buyers or sent for review until submitted.</span>
+                      </div>
+                      <button
+                        onClick={() => handlePublishDraftVehicle(v.id)}
+                        disabled={actionLoading}
+                        className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0"
+                      >
+                        {actionLoading ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
+                        <span>Submit For Approval</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Pending Approval Notice */}
+                  {v.status === "PENDING_APPROVAL" && (
+                    <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-2xl text-xs flex items-center gap-2 text-amber-900">
+                      <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Submitted on {v.submitted_at ? new Date(v.submitted_at).toLocaleDateString() : "recently"}. Awaiting administrative compliance verification before public marketplace release.</span>
+                    </div>
+                  )}
+
+                  {/* Approved Notice */}
+                  {v.status === "APPROVED" && (
+                    <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-2xl text-xs flex items-center justify-between gap-2 text-emerald-900">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>Published and actively live in the buyer marketplace!</span>
+                      </div>
+                      {v.reviewed_at && (
+                        <span className="text-[10px] text-emerald-700">
+                          Approved: {new Date(v.reviewed_at).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {/* Rejection / Action Required Notice */}
                   {(v.status === "REJECTED" || v.status === "CHANGES_REQUESTED") && (
                     <div className="p-4 bg-red-50/70 border border-red-200 rounded-2xl space-y-2">
@@ -646,6 +802,47 @@ export default function SellerInventoryView() {
                     </div>
                   </div>
 
+                  {/* Draft Notice & Publish Button */}
+                  {p.status === "DRAFT" && (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs">
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                        <span>This spare part is saved as a <strong>Draft</strong>. It is not published or sent for review until submitted.</span>
+                      </div>
+                      <button
+                        onClick={() => handlePublishDraftPart(p.id)}
+                        disabled={actionLoading}
+                        className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0"
+                      >
+                        {actionLoading ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
+                        <span>Submit For Approval</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Pending Approval Notice */}
+                  {p.status === "PENDING_APPROVAL" && (
+                    <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-2xl text-xs flex items-center gap-2 text-amber-900">
+                      <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Submitted on {p.submitted_at ? new Date(p.submitted_at).toLocaleDateString() : "recently"}. Awaiting administrative compliance review before public catalogue release.</span>
+                    </div>
+                  )}
+
+                  {/* Approved Notice */}
+                  {p.status === "APPROVED" && (
+                    <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-2xl text-xs flex items-center justify-between gap-2 text-emerald-900">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>Published and actively live in the Parts Catalogue!</span>
+                      </div>
+                      {p.reviewed_at && (
+                        <span className="text-[10px] text-emerald-700">
+                          Approved: {new Date(p.reviewed_at).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {/* Rejection notice */}
                   {(p.status === "REJECTED" || p.status === "CHANGES_REQUESTED") && (
                     <div className="p-4 bg-red-50/70 border border-red-200 rounded-2xl space-y-2">
@@ -700,6 +897,20 @@ export default function SellerInventoryView() {
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* Modal Error Banner */}
+            {vehModalError && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-xs font-bold text-red-900 flex items-center justify-between">
+                <span>{vehModalError}</span>
+                <button
+                  type="button"
+                  onClick={() => setVehModalError("")}
+                  className="text-red-700 hover:text-red-950 p-1"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
 
             <div className="space-y-4 text-xs">
               <div>
@@ -965,17 +1176,19 @@ export default function SellerInventoryView() {
                 type="button"
                 onClick={() => handleSubmitVehicle(true)}
                 disabled={actionLoading}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors disabled:opacity-50"
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors disabled:opacity-50 flex items-center gap-1.5"
               >
-                Save as Draft
+                {actionLoading && <div className="w-3.5 h-3.5 border-2 border-slate-600 border-t-transparent rounded-full animate-spin" />}
+                <span>Save as Draft</span>
               </button>
               <button
                 type="button"
                 onClick={() => handleSubmitVehicle(false)}
                 disabled={actionLoading}
-                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50"
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
               >
-                Submit For Approval
+                {actionLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                <span>Submit For Approval</span>
               </button>
             </div>
           </div>
@@ -1002,6 +1215,20 @@ export default function SellerInventoryView() {
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* Modal Error Banner */}
+            {partModalError && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-xs font-bold text-red-900 flex items-center justify-between">
+                <span>{partModalError}</span>
+                <button
+                  type="button"
+                  onClick={() => setPartModalError("")}
+                  className="text-red-700 hover:text-red-950 p-1"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
 
             <div className="space-y-4 text-xs">
               <div>
@@ -1182,17 +1409,19 @@ export default function SellerInventoryView() {
                 type="button"
                 onClick={() => handleSubmitPart(true)}
                 disabled={actionLoading}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors disabled:opacity-50"
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors disabled:opacity-50 flex items-center gap-1.5"
               >
-                Save as Draft
+                {actionLoading && <div className="w-3.5 h-3.5 border-2 border-slate-600 border-t-transparent rounded-full animate-spin" />}
+                <span>Save as Draft</span>
               </button>
               <button
                 type="button"
                 onClick={() => handleSubmitPart(false)}
                 disabled={actionLoading}
-                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50"
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
               >
-                Submit For Approval
+                {actionLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                <span>Submit For Approval</span>
               </button>
             </div>
           </div>
