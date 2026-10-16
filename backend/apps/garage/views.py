@@ -14,12 +14,15 @@ class GarageVehicleListCreateView(generics.ListCreateAPIView):
     serializer_class = GarageVehicleSerializer
 
     def get_queryset(self):
-        # Strict user-isolation: only retrieve vehicles owned by authenticated user
-        return GarageVehicle.objects.filter(user=self.request.user).select_related('vehicle_variant', 'vehicle_variant__model', 'vehicle_variant__model__make')
+        # Strict user-isolation & active vehicle filtering: only retrieve non-archived vehicles
+        return GarageVehicle.objects.filter(
+            user=self.request.user,
+            is_archived=False,
+        ).select_related('vehicle_variant', 'vehicle_variant__model', 'vehicle_variant__model__make')
 
 
 class GarageVehicleDetailView(generics.RetrieveUpdateDestroyAPIView):
-    """Retrieve, update, or delete a specific vehicle in the user's garage.
+    """Retrieve, update, or archive a specific vehicle in the user's garage.
 
     GET /api/v1/garage/vehicles/<id>/
     PATCH /api/v1/garage/vehicles/<id>/
@@ -30,19 +33,26 @@ class GarageVehicleDetailView(generics.RetrieveUpdateDestroyAPIView):
     lookup_field = 'id'
 
     def get_queryset(self):
-        # Strict user-isolation: User A cannot retrieve/update/delete User B's vehicle
-        return GarageVehicle.objects.filter(user=self.request.user).select_related('vehicle_variant')
+        # Strict user-isolation: User A cannot retrieve/update/archive User B's vehicle
+        return GarageVehicle.objects.filter(
+            user=self.request.user,
+            is_archived=False,
+        ).select_related('vehicle_variant')
+
+    def perform_destroy(self, instance):
+        # Soft-delete: Archive the vehicle while preserving historical records
+        instance.archive()
 
 
 class GarageVehicleSetPrimaryView(views.APIView):
-    """Set a specific garage vehicle as the user's primary vehicle.
+    """Set a specific active garage vehicle as the user's primary vehicle.
 
     POST /api/v1/garage/vehicles/<id>/set-primary/
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, id):
-        vehicle = generics.get_object_or_404(GarageVehicle, id=id, user=request.user)
+        vehicle = generics.get_object_or_404(GarageVehicle, id=id, user=request.user, is_archived=False)
         vehicle.set_as_primary()
         return Response(
             {

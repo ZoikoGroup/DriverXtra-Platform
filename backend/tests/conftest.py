@@ -17,6 +17,7 @@ def buyer_user(db):
         first_name='John',
         last_name='Buyer',
         phone_number='+447000000001',
+        is_email_verified=True,
     )
     user.add_role(RoleChoices.BUYER)
     return user
@@ -30,6 +31,7 @@ def seller_user(db):
         first_name='Sarah',
         last_name='Seller',
         phone_number='+447000000002',
+        is_email_verified=True,
     )
     user.add_role(RoleChoices.SELLER)
     return user
@@ -43,6 +45,7 @@ def workshop_user(db):
         first_name='David',
         last_name='Workshop',
         phone_number='+447000000003',
+        is_email_verified=True,
     )
     user.add_role(RoleChoices.WORKSHOP)
     return user
@@ -56,6 +59,7 @@ def staff_user(db):
         first_name='Operations',
         last_name='Staff',
         is_staff=True,
+        is_email_verified=True,
     )
     user.add_role(RoleChoices.STAFF)
     return user

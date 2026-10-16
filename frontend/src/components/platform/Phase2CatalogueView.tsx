@@ -225,7 +225,7 @@ export default function Phase2CatalogueView() {
         </button>
       </div>
 
-      {/* Guaranteed Fitment Selector Banner */}
+      {/* Confirmed Fitment Selector Banner */}
       <div className="bg-slate-950 text-white rounded-2xl p-5 border border-slate-800 shadow-md flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-amber-400 text-slate-950 flex items-center justify-center font-black shrink-0">
@@ -233,7 +233,7 @@ export default function Phase2CatalogueView() {
           </div>
           <div>
             <span className="text-[10px] uppercase font-bold tracking-wider text-amber-400">
-              Guaranteed Fitment Context
+              Confirmed Fitment Context
             </span>
             <h4 className="text-sm font-black text-white">
               Evaluate Compatibility for Your Vehicle
@@ -476,7 +476,7 @@ export default function Phase2CatalogueView() {
           )}
         </div>
 
-        {/* Part Detail & Guaranteed Fitment Inspector (Right col) */}
+        {/* Part Detail & Confirmed Fitment Inspector (Right col) */}
         <div className="space-y-4">
           {isLoadingPartDetail ? (
             <div className="p-12 bg-white rounded-2xl border border-slate-200 text-center space-y-3">
@@ -546,7 +546,7 @@ export default function Phase2CatalogueView() {
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-black uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
                     <Wrench className="w-3.5 h-3.5 text-amber-500" />
-                    Guaranteed Fitment Check
+                    Confirmed Fitment Check
                   </span>
                 </div>
 
@@ -571,7 +571,7 @@ export default function Phase2CatalogueView() {
                   ) : (
                     <>
                       <FileCheck2 className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Check Guaranteed Fitment</span>
+                      <span>Check Fitment Compatibility</span>
                     </>
                   )}
                 </button>
@@ -580,13 +580,20 @@ export default function Phase2CatalogueView() {
                 {fitmentResult && fitmentResult.partId === selectedPart.id && (
                   <div className="mt-3 pt-3 border-t border-slate-200 space-y-2">
                     {fitmentResult.evaluation.outcome === "CONFIRMED_FIT" && (
-                      <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-xs space-y-1">
-                        <div className="flex items-center gap-2 font-black">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                          <span>CONFIRMED FIT</span>
+                      <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-xs space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 font-black">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                            <span>CONFIRMED FIT</span>
+                          </div>
+                          {fitmentResult.evaluation.evidence_level && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-200/60 text-emerald-950">
+                              Evidence: {fitmentResult.evaluation.evidence_level.replace(/_/g, " ")}
+                            </span>
+                          )}
                         </div>
                         <p className="text-[11px] font-medium text-emerald-800">
-                          This part is guaranteed compatible with your selected vehicle variant.
+                          {fitmentResult.evaluation.reason || "This part has verified engineering compatibility with your selected vehicle."}
                         </p>
                         {fitmentResult.evaluation.position && (
                           <div className="text-[10px] font-semibold text-emerald-700">
@@ -597,37 +604,56 @@ export default function Phase2CatalogueView() {
                     )}
 
                     {fitmentResult.evaluation.outcome === "CONDITIONAL_FIT" && (
-                      <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs space-y-1">
-                        <div className="flex items-center gap-2 font-black">
-                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                          <span>CONDITIONAL FIT</span>
+                      <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 font-black">
+                            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                            <span>CONDITIONAL FIT</span>
+                          </div>
+                          {fitmentResult.evaluation.evidence_level && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-200/70 text-amber-950">
+                              Evidence: {fitmentResult.evaluation.evidence_level.replace(/_/g, " ")}
+                            </span>
+                          )}
                         </div>
                         <p className="text-[11px] font-medium text-amber-800">
-                          {fitmentResult.evaluation.notes || "Fitment is conditional based on vehicle chassis or year bounds."}
+                          {fitmentResult.evaluation.reason || fitmentResult.evaluation.notes || "Fitment requires verification against chassis or year bounds."}
                         </p>
                       </div>
                     )}
 
                     {fitmentResult.evaluation.outcome === "DOES_NOT_FIT" && (
-                      <div className="p-3 bg-rose-50 border border-rose-300 rounded-xl text-rose-900 text-xs space-y-1">
-                        <div className="flex items-center gap-2 font-black">
-                          <XCircle className="w-4 h-4 text-rose-600 shrink-0" />
-                          <span>DOES NOT FIT</span>
+                      <div className="p-3 bg-rose-50 border border-rose-300 rounded-xl text-rose-900 text-xs space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 font-black">
+                            <XCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                            <span>DOES NOT FIT</span>
+                          </div>
+                          {fitmentResult.evaluation.evidence_level && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-rose-200/60 text-rose-950">
+                              Evidence: {fitmentResult.evaluation.evidence_level.replace(/_/g, " ")}
+                            </span>
+                          )}
                         </div>
                         <p className="text-[11px] font-medium text-rose-800">
-                          Explicit engineering exclusion: this part is incompatible with this vehicle variant.
+                          {fitmentResult.evaluation.reason || "Explicit engineering exclusion: this component is incompatible with this vehicle variant."}
                         </p>
                       </div>
                     )}
 
                     {fitmentResult.evaluation.outcome === "UNKNOWN" && (
-                      <div className="p-3 bg-slate-100 border border-slate-300 rounded-xl text-slate-800 text-xs space-y-1">
-                        <div className="flex items-center gap-2 font-black">
-                          <HelpCircle className="w-4 h-4 text-slate-500 shrink-0" />
-                          <span>UNKNOWN COMPATIBILITY</span>
+                      <div className="p-3 bg-slate-100 border border-slate-300 rounded-xl text-slate-800 text-xs space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 font-black">
+                            <HelpCircle className="w-4 h-4 text-slate-500 shrink-0" />
+                            <span>UNKNOWN COMPATIBILITY</span>
+                          </div>
+                          <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-200 text-slate-700">
+                            No Verified Record
+                          </span>
                         </div>
                         <p className="text-[11px] font-medium text-slate-600">
-                          No compatibility record exists in the DriverXtra catalogue for this part and vehicle. Do not assume compatibility.
+                          {fitmentResult.evaluation.reason || "No verified compatibility record exists for this part and vehicle combination. Do not assume compatibility."}
                         </p>
                       </div>
                     )}
@@ -673,7 +699,7 @@ export default function Phase2CatalogueView() {
             </div>
           ) : (
             <div className="p-8 bg-white rounded-2xl border border-slate-200 text-center text-xs text-slate-500">
-              Select a part from the catalogue to inspect specifications, OEM cross-references, and run guaranteed fitment evaluation.
+              Select a part from the catalogue to inspect specifications, OEM cross-references, and run confirmed fitment evaluation.
             </div>
           )}
         </div>

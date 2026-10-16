@@ -149,15 +149,20 @@ class TestCompatibilityAndFitment:
         assert data['confidence'] == 'NONE'
         assert 'No verified compatibility' in data['qualifications']
 
-    def test_universal_part_confirmed_fit(self, api_client, fitment_catalogue):
+    def test_universal_part_conditional_fit_and_evidence_level(self, api_client, fitment_catalogue):
         part_id = fitment_catalogue['part_universal'].id
         audi_variant_id = fitment_catalogue['audi_variant'].id
 
         res = api_client.get(f'/api/v1/catalogue/fitment/?part_id={part_id}&vehicle_variant_id={audi_variant_id}')
         assert res.status_code == status.HTTP_200_OK
         data = res.json()
-        assert data['status'] == FitmentTypeChoices.CONFIRMED_FIT
+        # Universal parts must NOT receive an automatic CONFIRMED_FIT or HIGH confidence guarantee
+        assert data['status'] == FitmentTypeChoices.CONDITIONAL_FIT
         assert data['is_compatible'] is True
+        assert data['confidence'] == 'LOW'
+        assert data['evidence_level'] == 'UNVERIFIED_UNIVERSAL_DECLARATION'
+        assert 'reason' in data
+        assert 'universal' in data['reason'].lower()
 
     def test_fitment_check_post_endpoint(self, api_client, fitment_catalogue):
         payload = {

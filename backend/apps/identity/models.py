@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
@@ -54,6 +55,8 @@ class UserManager(BaseUserManager):
         email = self.normalize_email(email).lower()
         extra_fields.setdefault('status', AccountStatusChoices.ACTIVE)
         extra_fields.setdefault('is_active', True)
+        extra_fields.setdefault('is_email_verified', False)
+        extra_fields.setdefault('email_verified_at', None)
 
         user = self.model(email=email, **extra_fields)
         if password:
@@ -68,6 +71,8 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('status', AccountStatusChoices.ACTIVE)
         extra_fields.setdefault('is_active', True)
+        extra_fields.setdefault('is_email_verified', True)
+        extra_fields.setdefault('email_verified_at', timezone.now())
 
         if extra_fields.get('is_staff') is not True:
             raise ValueError('Superuser must have is_staff=True.')
@@ -96,6 +101,16 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(default=timezone.now)
+    email_verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the email address was verified.",
+    )
+    is_email_verified = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Designates whether the user has verified ownership of their email address.",
+    )
 
     objects = UserManager()
 
@@ -161,3 +176,57 @@ class UserRole(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.user.email} - {self.role}"
+
+
+class EmailVerificationToken(BaseUUIDModel):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='email_verification_tokens',
+    )
+    token_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text="SHA-256 hash of the verification token.",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Email Verification Token'
+        verbose_name_plural = 'Email Verification Tokens'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'consumed_at', 'expires_at'], name='identity_em_user_id_a3831a_idx'),
+        ]
+
+    def __str__(self):
+        return f"EmailVerificationToken({self.user.email})"
+
+
+class PasswordResetToken(BaseUUIDModel):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='password_reset_tokens',
+    )
+    token_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text="SHA-256 hash of the password reset token.",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Password Reset Token'
+        verbose_name_plural = 'Password Reset Tokens'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'consumed_at', 'expires_at'], name='identity_pa_user_id_ebb33f_idx'),
+        ]
+
+    def __str__(self):
+        return f"PasswordResetToken({self.user.email})"

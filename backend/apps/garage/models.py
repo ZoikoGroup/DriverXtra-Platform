@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 from common.models import BaseUUIDModel
 from apps.identity.models import User
 from apps.catalogue.models import VehicleVariant
@@ -48,6 +49,10 @@ class GarageVehicle(BaseUUIDModel):
     # Primary Garage Vehicle Toggle
     is_primary = models.BooleanField(default=False)
 
+    # Archival / Soft-Delete
+    is_archived = models.BooleanField(default=False, db_index=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         verbose_name = 'Garage Vehicle'
         verbose_name_plural = 'Garage Vehicles'
@@ -55,6 +60,7 @@ class GarageVehicle(BaseUUIDModel):
         indexes = [
             models.Index(fields=['user', 'is_primary']),
             models.Index(fields=['user', 'registration_plate']),
+            models.Index(fields=['user', 'is_archived']),
         ]
 
     def __str__(self):
@@ -81,8 +87,8 @@ class GarageVehicle(BaseUUIDModel):
             if self.power_bhp is None and self.vehicle_variant.power_bhp:
                 self.power_bhp = self.vehicle_variant.power_bhp
 
-        # If this is the user's only vehicle, ensure it is marked primary
-        if not GarageVehicle.objects.filter(user=self.user).exclude(pk=self.pk).exists():
+        # If this is the user's only non-archived vehicle, ensure it is marked primary
+        if not self.is_archived and not GarageVehicle.objects.filter(user=self.user, is_archived=False).exclude(pk=self.pk).exists():
             self.is_primary = True
 
         # If set as primary, unmark any other primary vehicle for this user
@@ -92,6 +98,24 @@ class GarageVehicle(BaseUUIDModel):
         super().save(*args, **kwargs)
 
     def set_as_primary(self):
+        if self.is_archived:
+            raise ValueError('Archived vehicles cannot be designated as primary.')
         GarageVehicle.objects.filter(user=self.user, is_primary=True).exclude(pk=self.pk).update(is_primary=False)
         self.is_primary = True
         self.save(update_fields=['is_primary', 'updated_at'])
+
+    def archive(self):
+        """Soft-deletes the vehicle by setting is_archived=True and clearing primary status."""
+        self.is_archived = True
+        self.archived_at = timezone.now()
+        was_primary = self.is_primary
+        self.is_primary = False
+        self.save(update_fields=['is_archived', 'archived_at', 'is_primary', 'updated_at'])
+
+        if was_primary:
+            next_vehicle = GarageVehicle.objects.filter(
+                user=self.user,
+                is_archived=False,
+            ).exclude(pk=self.pk).order_by('-created_at').first()
+            if next_vehicle:
+                next_vehicle.set_as_primary()

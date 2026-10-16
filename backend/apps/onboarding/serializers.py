@@ -5,7 +5,7 @@ from apps.onboarding.models import (
     SellerApplicationStatusChoices,
     BusinessTypeChoices,
 )
-from apps.organisations.models import Organisation
+from apps.organisations.models import Organisation, OrganisationRoleChoices
 
 
 class SellerApplicationSerializer(serializers.ModelSerializer):
@@ -88,11 +88,37 @@ class SellerApplicationCreateUpdateSerializer(serializers.ModelSerializer):
             'submit_now',
         ]
 
+    def to_internal_value(self, data):
+        # Security: Strip any banking details to prevent collecting or logging unencrypted financial details
+        sensitive_bank_keys = [
+            'bank_account_name',
+            'bank_sort_code',
+            'bank_account_number',
+            'bank_name',
+            'iban',
+            'swift',
+        ]
+        if any(k in data for k in sensitive_bank_keys):
+            if hasattr(data, '_mutable') and not data._mutable:
+                data = data.copy()
+            elif isinstance(data, dict):
+                data = dict(data)
+            for k in sensitive_bank_keys:
+                data.pop(k, None)
+        return super().to_internal_value(data)
+
     def validate_organisation(self, value):
         if value:
             user = self.context['request'].user
+            # Strict authorization: must be an active member
             if not value.is_member(user):
-                raise serializers.ValidationError('You must be a member of the selected organisation.')
+                raise serializers.ValidationError('You are not an active member of the selected organisation.')
+            # Strict role check: must be OWNER or ADMIN of the organisation
+            member_role = value.get_member_role(user)
+            if not (user.is_platform_admin or member_role in (OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN)):
+                raise serializers.ValidationError(
+                    f'You must hold an OWNER or ADMIN role within {value.name} to apply on its behalf (current role: {member_role}).'
+                )
         return value
 
     def validate(self, attrs):

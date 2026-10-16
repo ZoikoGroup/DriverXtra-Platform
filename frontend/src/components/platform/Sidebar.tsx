@@ -10,7 +10,8 @@ import {
   Building2,
   User,
   LogOut,
-  ChevronRight
+  ChevronRight,
+  ShoppingBag
 } from "lucide-react";
 
 interface SidebarProps {
@@ -58,13 +59,17 @@ export default function Sidebar({
 
   if (isAdmin) {
     roleNavItems = [
-      { id: "seller_reviews", label: "Seller Compliance Queue", icon: ShieldCheck, badge: "Review" },
+      { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
+      { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Management" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else if (isSeller) {
     roleNavItems = [
+      { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
+      { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "seller_onboarding", label: "Seller Verification Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Teams", icon: Building2, badge: "Organisation" },
@@ -73,6 +78,8 @@ export default function Sidebar({
     ];
   } else if (isWorkshop) {
     roleNavItems = [
+      { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
+      { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
       { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
       { id: "seller_onboarding", label: "Partner Status", icon: FileCheck2, badge: "Workshop" },
@@ -80,8 +87,9 @@ export default function Sidebar({
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else {
-    // Default: Buyer / Consumer
+    // Default: Buyer / Consumer (Search & Browse only)
     roleNavItems = [
+      { id: "marketplace_browse", label: "Marketplace (Vehicles & Parts)", icon: ShoppingBag, badge: "Browse" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
       { id: "seller_onboarding", label: "Become a Seller", icon: FileCheck2, badge: "Apply" },

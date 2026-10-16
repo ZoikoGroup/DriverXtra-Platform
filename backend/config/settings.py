@@ -69,6 +69,10 @@ INSTALLED_APPS = [
     "apps.onboarding",
     "apps.catalogue",
     "apps.garage",
+    "apps.marketplace",
+
+    # Platform audit
+    "platform_core.audit.apps.AuditConfig",
 ]
 
 

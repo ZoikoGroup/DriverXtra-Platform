@@ -25,4 +25,7 @@ urlpatterns = [
 
     # Phase 2: Personal Vehicle Garage
     path('api/v1/', include('apps.garage.urls')),
+
+    # Marketplace: Vehicle & Spare Parts Submissions, Approvals & Public Browse
+    path('api/v1/marketplace/', include('apps.marketplace.urls')),
 ]
