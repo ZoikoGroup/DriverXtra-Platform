@@ -16,4 +16,13 @@ urlpatterns = [
 
     # Phase 1: Organisations & Tenant Management
     path('api/v1/', include('apps.organisations.urls')),
+
+    # Phase 2: Seller Onboarding & Verification
+    path('api/v1/', include('apps.onboarding.urls')),
+
+    # Phase 2: Vehicle & Parts Catalogue
+    path('api/v1/', include('apps.catalogue.urls')),
+
+    # Phase 2: Personal Vehicle Garage
+    path('api/v1/', include('apps.garage.urls')),
 ]
