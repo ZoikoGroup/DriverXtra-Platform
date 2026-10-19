@@ -137,6 +137,32 @@ class TestSellerOnboarding:
         buyer_user.refresh_from_db()
         assert buyer_user.has_role(RoleChoices.SELLER)
 
+    def test_admin_approve_workshop_application_grants_both_seller_and_workshop_roles(self, admin_auth_client, buyer_user, admin_user):
+        assert not buyer_user.has_role(RoleChoices.SELLER)
+        assert not buyer_user.has_role(RoleChoices.WORKSHOP)
+
+        app = SellerApplication.objects.create(
+            user=buyer_user,
+            business_name='Apex Performance Workshop Ltd',
+            business_type=BusinessTypeChoices.WORKSHOP,
+            contact_email='garage@apex.com',
+            contact_phone='+44700029',
+            status=SellerApplicationStatusChoices.PENDING,
+        )
+        res = admin_auth_client.post(
+            f'/api/v1/admin/seller-applications/{app.id}/review/',
+            {'action': 'APPROVE', 'admin_notes': 'Workshop facilities and certifications verified.'},
+            format='json',
+        )
+        assert res.status_code == status.HTTP_200_OK
+        app.refresh_from_db()
+        assert app.status == SellerApplicationStatusChoices.APPROVED
+
+        # Verify applicant now holds both SELLER and WORKSHOP roles
+        buyer_user.refresh_from_db()
+        assert buyer_user.has_role(RoleChoices.SELLER)
+        assert buyer_user.has_role(RoleChoices.WORKSHOP)
+
     def test_admin_reject_requires_reason(self, admin_auth_client, buyer_user):
         app = SellerApplication.objects.create(
             user=buyer_user,

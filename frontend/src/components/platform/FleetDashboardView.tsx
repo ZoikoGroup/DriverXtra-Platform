@@ -25,6 +25,18 @@ export default function FleetDashboardView({ activeTab }: { activeTab: string })
 
   return (
     <div className="p-6 max-w-[1440px] mx-auto space-y-6">
+      {/* Demo Data Notice */}
+      <div className="flex items-center justify-between pb-1">
+        <div className="inline-flex items-center gap-2">
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-300">
+            Demo data
+          </span>
+          <span className="text-xs text-slate-500 font-medium">
+            Commercial Fleet Management (Doc 16) • Simulated Prototype Data
+          </span>
+        </div>
+      </div>
+
       {/* Top Fleet KPIs */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">

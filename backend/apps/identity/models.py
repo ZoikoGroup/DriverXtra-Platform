@@ -141,14 +141,40 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
             return True
         return self.user_roles.filter(role=normalized).exists()
 
-    def add_role(self, role_name: str):
+    def add_role(self, role_name: str, actor_id=None, correlation_id=""):
+        from platform_core.audit.writer import record_audit_entry
+        from common.middleware import get_current_correlation_id
+
         normalized = RoleChoices.normalize_role(role_name)
-        role_obj, _ = UserRole.objects.get_or_create(user=self, role=normalized)
+        role_obj, created = UserRole.objects.get_or_create(user=self, role=normalized)
+        if created:
+            record_audit_entry(
+                event_type="user.role.granted",
+                action="identity:role.grant",
+                resource_type="UserRole",
+                resource_id=str(role_obj.id),
+                actor_id=actor_id or self.id,
+                correlation_id=correlation_id or get_current_correlation_id(),
+                metadata={"user_id": str(self.id), "role": normalized, "email": self.email},
+            )
         return role_obj
 
-    def remove_role(self, role_name: str):
+    def remove_role(self, role_name: str, actor_id=None, correlation_id=""):
+        from platform_core.audit.writer import record_audit_entry
+        from common.middleware import get_current_correlation_id
+
         normalized = RoleChoices.normalize_role(role_name)
-        self.user_roles.filter(role=normalized).delete()
+        deleted_count, _ = self.user_roles.filter(role=normalized).delete()
+        if deleted_count > 0:
+            record_audit_entry(
+                event_type="user.role.revoked",
+                action="identity:role.revoke",
+                resource_type="UserRole",
+                resource_id=str(self.id),
+                actor_id=actor_id or self.id,
+                correlation_id=correlation_id or get_current_correlation_id(),
+                metadata={"user_id": str(self.id), "role": normalized, "email": self.email},
+            )
 
     @property
     def is_platform_admin(self) -> bool:
@@ -157,6 +183,48 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
     @property
     def is_platform_staff(self) -> bool:
         return self.is_staff or self.has_role(RoleChoices.STAFF) or self.is_platform_admin
+
+    def get_default_role(self) -> str:
+        """Returns the highest priority role held by the user."""
+        priority = [
+            RoleChoices.ADMIN,
+            RoleChoices.STAFF,
+            RoleChoices.SELLER,
+            RoleChoices.WORKSHOP,
+            RoleChoices.BUYER,
+        ]
+        if self.is_superuser:
+            return RoleChoices.ADMIN
+        user_roles = self.roles
+        for r in priority:
+            if r in user_roles:
+                return r
+        return RoleChoices.BUYER
+
+    def has_permission(self, perm_code: str) -> bool:
+        """Checks if user has a platform permission. Platform admins have all permissions."""
+        if self.is_superuser or self.has_role(RoleChoices.ADMIN):
+            return True
+        try:
+            profile = getattr(self, 'staff_profile', None)
+            if profile and profile.staff_role:
+                return profile.staff_role.role_permissions.filter(permission__code=perm_code).exists()
+            elif self.is_staff or self.has_role(RoleChoices.STAFF):
+                from apps.identity.models import StaffRole
+                default_role = StaffRole.objects.filter(code='VERIFICATION_OFFICER').first()
+                if default_role:
+                    return default_role.role_permissions.filter(permission__code=perm_code).exists()
+        except Exception:
+            pass
+        return False
+
+    @property
+    def has_mfa_enabled(self) -> bool:
+        try:
+            profile = getattr(self, 'staff_profile', None)
+            return bool(profile and profile.totp_enabled)
+        except Exception:
+            return False
 
 
 class UserRole(BaseUUIDModel):
@@ -230,3 +298,184 @@ class PasswordResetToken(BaseUUIDModel):
 
     def __str__(self):
         return f"PasswordResetToken({self.user.email})"
+
+
+class Permission(BaseUUIDModel):
+    code = models.CharField(max_length=64, unique=True, db_index=True)
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default='')
+
+    class Meta:
+        verbose_name = 'Platform Permission'
+        verbose_name_plural = 'Platform Permissions'
+        ordering = ['code']
+
+    def __str__(self):
+        return f"{self.code} ({self.name})"
+
+
+class StaffRoleChoices(models.TextChoices):
+    SUPPORT_AGENT = 'SUPPORT_AGENT', 'Support Agent'
+    VERIFICATION_OFFICER = 'VERIFICATION_OFFICER', 'Verification Officer'
+    DISPUTE_MANAGER = 'DISPUTE_MANAGER', 'Dispute Manager'
+    FINANCE_OFFICER = 'FINANCE_OFFICER', 'Finance Officer'
+
+
+class StaffRole(BaseUUIDModel):
+    code = models.CharField(max_length=64, choices=StaffRoleChoices.choices, unique=True, db_index=True)
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default='')
+
+    class Meta:
+        verbose_name = 'Staff Sub-Role'
+        verbose_name_plural = 'Staff Sub-Roles'
+        ordering = ['code']
+
+    def __str__(self):
+        return self.name
+
+
+class StaffRolePermission(BaseUUIDModel):
+    staff_role = models.ForeignKey(StaffRole, on_delete=models.CASCADE, related_name='role_permissions')
+    permission = models.ForeignKey(Permission, on_delete=models.CASCADE, related_name='role_permissions')
+
+    class Meta:
+        verbose_name = 'Staff Role Permission'
+        verbose_name_plural = 'Staff Role Permissions'
+        unique_together = ('staff_role', 'permission')
+
+    def __str__(self):
+        return f"{self.staff_role.code} -> {self.permission.code}"
+
+
+class StaffProfile(BaseUUIDModel):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='staff_profile',
+    )
+    staff_role = models.ForeignKey(
+        StaffRole,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='staff_members',
+    )
+    department = models.CharField(max_length=128, blank=True, default='')
+    totp_secret = models.TextField(blank=True, default='', help_text="Fernet encrypted base32 secret")
+    totp_enabled = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = 'Staff Profile'
+        verbose_name_plural = 'Staff Profiles'
+
+    def __str__(self):
+        role_name = self.staff_role.name if self.staff_role else "Unassigned"
+        return f"StaffProfile({self.user.email} - {role_name})"
+
+    def set_totp_secret(self, plain_secret: str):
+        from .security import encrypt_totp_secret
+        self.totp_secret = encrypt_totp_secret(plain_secret)
+
+    def get_totp_secret(self) -> str:
+        from .security import decrypt_totp_secret
+        if not self.totp_secret:
+            return ""
+        try:
+            return decrypt_totp_secret(self.totp_secret)
+        except Exception:
+            return ""
+
+    def verify_totp(self, code: str) -> bool:
+        from .security import verify_totp_code
+        secret = self.get_totp_secret()
+        if not secret:
+            return False
+        return verify_totp_code(secret, code)
+
+
+class StaffInviteToken(BaseUUIDModel):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='staff_invite_tokens',
+    )
+    token_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text="SHA-256 hash of single-use staff set-password token.",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Staff Invite Token'
+        verbose_name_plural = 'Staff Invite Tokens'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"StaffInviteToken({self.user.email})"
+
+
+class ApprovalStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    APPROVED = 'APPROVED', 'Approved'
+    REJECTED = 'REJECTED', 'Rejected'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class ApprovalRequest(BaseUUIDModel):
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='approval_requests_created',
+    )
+    approver = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approval_requests_reviewed',
+    )
+    action_type = models.CharField(max_length=64, db_index=True)
+    target_type = models.CharField(max_length=64, db_index=True)
+    target_id = models.CharField(max_length=128, db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=32,
+        choices=ApprovalStatusChoices.choices,
+        default=ApprovalStatusChoices.PENDING,
+        db_index=True,
+    )
+    rejection_reason = models.TextField(blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    requested_at = models.DateTimeField(default=timezone.now)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Approval Request'
+        verbose_name_plural = 'Approval Requests'
+        ordering = ['-requested_at']
+
+    def __str__(self):
+        return f"ApprovalRequest({self.action_type} - {self.target_type}:{self.target_id} - {self.status})"
+
+    def approve(self, approver, notes=''):
+        if approver.id == self.requester_id:
+            raise ValueError("Maker-checker violation: Requester cannot approve their own request.")
+        self.approver = approver
+        self.status = ApprovalStatusChoices.APPROVED
+        self.notes = notes
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=['approver', 'status', 'notes', 'reviewed_at', 'updated_at'])
+
+    def reject(self, approver, reason, notes=''):
+        if approver.id == self.requester_id:
+            raise ValueError("Maker-checker violation: Requester cannot review their own request.")
+        self.approver = approver
+        self.status = ApprovalStatusChoices.REJECTED
+        self.rejection_reason = reason
+        self.notes = notes
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=['approver', 'status', 'rejection_reason', 'notes', 'reviewed_at', 'updated_at'])

@@ -27,6 +27,13 @@ class BusinessTypeChoices(models.TextChoices):
     LLP = 'LLP', 'Limited Liability Partnership (LLP)'
 
 
+def grant_roles_for_application(user: User, business_type: str):
+    """Grants canonical platform roles upon seller application approval."""
+    user.add_role(RoleChoices.SELLER)
+    if business_type == BusinessTypeChoices.WORKSHOP:
+        user.add_role(RoleChoices.WORKSHOP)
+
+
 class SellerApplication(BaseUUIDModel):
     """Workflow model for onboarding and vetting seller / dealer applicants."""
 
@@ -132,8 +139,8 @@ class SellerApplication(BaseUUIDModel):
             self.admin_notes = notes
         self.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'admin_notes', 'updated_at'])
 
-        # Grant verified seller platform role to applicant
-        self.user.add_role(RoleChoices.SELLER)
+        # Grant verified platform roles to applicant
+        grant_roles_for_application(self.user, self.business_type)
 
     def reject(self, reviewer: User, reason: str, notes: str = ''):
         """Rejects the application with mandatory rejection reason."""

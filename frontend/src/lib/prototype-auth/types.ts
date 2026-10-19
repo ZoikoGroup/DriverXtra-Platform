@@ -28,6 +28,9 @@ export interface PrototypeUser {
   phone_number?: string;
   status?: string;
   rawRoles?: string[];
+  activeRole?: string;
+  has_mfa_enabled?: boolean;
+  staff_role?: { code: string; name: string; department?: string } | null;
   is_staff?: boolean;
   is_superuser?: boolean;
   organisations?: BackendOrganisationSummary[];
@@ -38,13 +41,17 @@ export interface PrototypeUser {
 export interface AuthContextType {
   user: PrototypeUser | null;
   isAuthenticated: boolean;
+  isInitialized: boolean;
   isLoading: boolean;
   authError: string | null;
+  mfaChallenge: { preAuthToken: string; email: string } | null;
+  clearMfaChallenge: () => void;
   clearAuthError: () => void;
-  login: (email: string, password?: string) => Promise<boolean>;
+  login: (email: string, password?: string, code?: string) => Promise<{ success: boolean; mfaRequired?: boolean }>;
+  verifyMfaLogin: (code: string) => Promise<boolean>;
   register: (payload: RegisterPayload) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
-  switchRole: (role: CanonicalRole) => void;
+  switchRole: (role: CanonicalRole | string) => Promise<boolean>;
   availablePrototypeUsers: PrototypeUser[];
   refreshProfile: () => Promise<void>;
   updateProfile: (data: { first_name?: string; last_name?: string; phone_number?: string }) => Promise<boolean>;

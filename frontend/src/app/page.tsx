@@ -6,15 +6,16 @@ import { useAuth } from "@/lib/prototype-auth/auth-context";
 
 export default function RootPage() {
   const router = useRouter();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isInitialized } = useAuth();
 
   useEffect(() => {
+    if (!isInitialized) return;
     if (isAuthenticated) {
       router.replace("/platform");
     } else {
       router.replace("/login");
     }
-  }, [isAuthenticated, router]);
+  }, [isInitialized, isAuthenticated, router]);
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white">

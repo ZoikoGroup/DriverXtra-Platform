@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
+import { PrototypeUser } from "@/lib/prototype-auth/types";
 import Sidebar from "@/components/platform/Sidebar";
 import TopBar from "@/components/platform/TopBar";
 import Phase1ProfileView from "@/components/platform/Phase1ProfileView";
@@ -13,29 +14,27 @@ import Phase2SellerOnboardingView from "@/components/platform/Phase2SellerOnboar
 import MarketplaceBrowseView from "@/components/platform/MarketplaceBrowseView";
 import SellerInventoryView from "@/components/platform/SellerInventoryView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
+import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import {
   Bell,
   X
 } from "lucide-react";
 
-function getDefaultTabForRole(user?: { is_superuser?: boolean; is_staff?: boolean; role?: string; rawRoles?: string[] } | null): string {
+function getDefaultTabForRole(user?: PrototypeUser | null): string {
   if (!user) return "marketplace_browse";
-  const isAdmin = Boolean(
-    user.is_superuser ||
-    user.is_staff ||
-    user.role === "MARKETPLACE_ADMIN" ||
-    user.rawRoles?.includes("ADMIN") ||
-    user.rawRoles?.includes("STAFF")
-  );
-  if (isAdmin) return "admin_marketplace_review";
-  if (user.role === "INVENTORY_MANAGER" || user.rawRoles?.includes("SELLER")) return "seller_inventory";
-  if (user.role === "WORKSHOP_MANAGER" || user.rawRoles?.includes("WORKSHOP")) return "seller_inventory";
+  const activeRole = user.activeRole || (user.rawRoles && user.rawRoles[0]) || "BUYER";
+  if (activeRole === "ADMIN" || activeRole === "STAFF") {
+    return "admin_marketplace_review";
+  }
+  if (activeRole === "SELLER" || activeRole === "WORKSHOP") {
+    return "seller_inventory";
+  }
   return "marketplace_browse";
 }
 
 export default function PlatformDashboardPage() {
   const router = useRouter();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, isInitialized } = useAuth();
 
   const [collapsed, setCollapsed] = useState(false);
   const [selectedTab, setSelectedTab] = useState<{ role: string; tab: string } | null>(null);
@@ -43,12 +42,14 @@ export default function PlatformDashboardPage() {
 
   // Protected route check
   useEffect(() => {
-    if (!isAuthenticated) {
-      router.push("/login");
+    if (isInitialized && !isAuthenticated) {
+      router.replace("/login");
     }
-  }, [isAuthenticated, router]);
+  }, [isInitialized, isAuthenticated, router]);
 
-  const currentTab = (selectedTab && selectedTab.role === user?.role)
+  const activeRole = user?.activeRole || (user?.rawRoles && user?.rawRoles[0]) || "BUYER";
+
+  const currentTab = (selectedTab && selectedTab.role === activeRole)
     ? selectedTab.tab
     : getDefaultTabForRole(user);
 
@@ -68,23 +69,27 @@ export default function PlatformDashboardPage() {
       marketplace_browse: "Marketplace — Approved Vehicles & Spare Parts",
       seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
       admin_marketplace_review: "Admin Moderation — Listing Review Queue",
+      admin_staff_management: "Staff Administration & Access Control",
       profile: "User Profile (Phase 1 Identity & RBAC)",
       organisations: "Organisations & Teams (Phase 1 RBAC)",
       garage: "My Garage (Phase 2 Vehicle Master)",
       catalogue: "Vehicle & Parts Catalogue (Phase 2)",
       parts_fitment: "Vehicle Parts & Confirmed Fitment (Phase 2)",
-      seller_onboarding: "Seller Onboarding & Verification (Phase 2)",
+      seller_onboarding: "Apply to sell / Apply as workshop (Seller Verification)",
       seller_reviews: "Seller Applications Compliance Queue (Phase 2)",
     };
     return map[tab] || "Dashboard Overview";
   };
+
+  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
+  const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP" || isAdmin;
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-row">
       {/* Role-Governed Sidebar */}
       <Sidebar
         currentTab={currentTab}
-        onTabChange={(tab) => setSelectedTab({ role: user.role, tab })}
+        onTabChange={(tab) => setSelectedTab({ role: activeRole, tab })}
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed(!collapsed)}
       />
@@ -100,9 +105,23 @@ export default function PlatformDashboardPage() {
           {currentTab === "marketplace_browse" ? (
             <MarketplaceBrowseView />
           ) : currentTab === "seller_inventory" ? (
-            <SellerInventoryView />
+            isSellerOrWorkshop ? (
+              <SellerInventoryView />
+            ) : (
+              <Phase2SellerOnboardingView initialTab="my_application" />
+            )
           ) : currentTab === "admin_marketplace_review" ? (
-            <AdminMarketplaceReviewView />
+            isAdmin ? (
+              <AdminMarketplaceReviewView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_staff_management" ? (
+            isAdmin ? (
+              <AdminStaffManagementView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
           ) : currentTab === "profile" ? (
             <Phase1ProfileView />
           ) : currentTab === "organisations" ? (
@@ -111,8 +130,14 @@ export default function PlatformDashboardPage() {
             <Phase2GarageView />
           ) : currentTab === "catalogue" || currentTab === "parts_fitment" ? (
             <Phase2CatalogueView />
-          ) : currentTab === "seller_onboarding" || currentTab === "seller_reviews" ? (
-            <Phase2SellerOnboardingView key={currentTab} initialTab={currentTab === "seller_reviews" ? "admin_queue" : "my_application"} />
+          ) : currentTab === "seller_onboarding" ? (
+            <Phase2SellerOnboardingView initialTab="my_application" />
+          ) : currentTab === "seller_reviews" ? (
+            isAdmin ? (
+              <Phase2SellerOnboardingView initialTab="admin_queue" />
+            ) : (
+              <Phase2SellerOnboardingView initialTab="my_application" />
+            )
           ) : (
             <MarketplaceBrowseView />
           )}

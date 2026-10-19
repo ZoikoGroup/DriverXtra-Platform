@@ -12,6 +12,7 @@ import {
   BackendOrganisation,
   CreateVehicleListingPayload,
   CreatePartListingPayload,
+  StockMovement,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
@@ -27,6 +28,9 @@ import {
   X,
   Building2,
   FileText,
+  Pencil,
+  Sliders,
+  History,
 } from "lucide-react";
 
 export default function SellerInventoryView() {
@@ -44,12 +48,55 @@ export default function SellerInventoryView() {
   const [partsLoading, setPartsLoading] = useState(false);
   const [addPartOpen, setAddPartOpen] = useState(false);
 
+  // Edit Vehicle State
+  const [editingVehicle, setEditingVehicle] = useState<MarketplaceVehicleListing | null>(null);
+  const [editVehPrice, setEditVehPrice] = useState("");
+  const [editVehMileage, setEditVehMileage] = useState("");
+  const [editVehDescription, setEditVehDescription] = useState("");
+
+  // Edit Part State
+  const [editingPart, setEditingPart] = useState<MarketplacePartListing | null>(null);
+  const [editPartPrice, setEditPartPrice] = useState("");
+  const [editPartDescription, setEditPartDescription] = useState("");
+
+  // Stock Adjust State (Phase 3 Part A)
+  const [adjustingPart, setAdjustingPart] = useState<MarketplacePartListing | null>(null);
+  const [adjustDelta, setAdjustDelta] = useState<string>("");
+  const [adjustReason, setAdjustReason] = useState<"ADJUSTMENT" | "CORRECTION">("ADJUSTMENT");
+  const [adjustNote, setAdjustNote] = useState<string>("");
+  const [adjustModalError, setAdjustModalError] = useState<string>("");
+
+  // Stock History State (Phase 3 Part A)
+  const [historyPart, setHistoryPart] = useState<MarketplacePartListing | null>(null);
+  const [stockMovements, setStockMovements] = useState<StockMovement[]>([]);
+  const [historyLoading, setHistoryLoading] = useState<boolean>(false);
+
   // Reference data
   const [makes, setMakes] = useState<VehicleMake[]>([]);
   const [models, setModels] = useState<VehicleModel[]>([]);
   const [variants, setVariants] = useState<VehicleVariant[]>([]);
   const [categories, setCategories] = useState<PartCategory[]>([]);
   const [userOrgs, setUserOrgs] = useState<BackendOrganisation[]>([]);
+
+  // Helpers for Org Roles and Permissions (Phase 4)
+  const canManageListing = (item: { organisation?: string | null; seller?: string }) => {
+    if (user?.is_superuser || user?.rawRoles?.includes("ADMIN") || user?.role === "MARKETPLACE_ADMIN") return true;
+    if (item.organisation) {
+      const org = userOrgs.find((o) => o.id === item.organisation);
+      return org?.user_role === "OWNER" || org?.user_role === "ADMIN";
+    }
+    return item.seller === user?.id || !item.seller;
+  };
+
+  const canResubmitListing = (item: { organisation?: string | null; seller?: string }) => {
+    if (user?.is_superuser || user?.rawRoles?.includes("ADMIN") || user?.role === "MARKETPLACE_ADMIN") return true;
+    if (item.seller === user?.id) return true;
+    if (item.organisation) {
+      const org = userOrgs.find((o) => o.id === item.organisation);
+      return org?.user_role === "OWNER" || org?.user_role === "ADMIN";
+    }
+    return true;
+  };
 
   // Feedback states
   const [actionLoading, setActionLoading] = useState(false);
@@ -191,17 +238,31 @@ export default function SellerInventoryView() {
         }
       });
     } else {
-      api.marketplace.listMyParts(statusParam).then((data) => {
-        if (!ignore) {
-          setParts(data);
-          setPartsLoading(false);
-        }
-      }).catch((err) => {
-        if (!ignore) {
-          console.error("Failed to load seller parts", err);
-          setPartsLoading(false);
-        }
-      });
+      if (statusFilter === "LOW_STOCK") {
+        api.marketplace.listLowStockParts().then((data) => {
+          if (!ignore) {
+            setParts(data);
+            setPartsLoading(false);
+          }
+        }).catch((err) => {
+          if (!ignore) {
+            console.error("Failed to load low stock parts", err);
+            setPartsLoading(false);
+          }
+        });
+      } else {
+        api.marketplace.listMyParts(statusParam).then((data) => {
+          if (!ignore) {
+            setParts(data);
+            setPartsLoading(false);
+          }
+        }).catch((err) => {
+          if (!ignore) {
+            console.error("Failed to load seller parts", err);
+            setPartsLoading(false);
+          }
+        });
+      }
     }
     return () => {
       ignore = true;
@@ -427,6 +488,119 @@ export default function SellerInventoryView() {
     }
   };
 
+  // Save Edit Vehicle (Phase 4)
+  const handleSaveEditVehicle = async () => {
+    if (!editingVehicle) return;
+    setActionLoading(true);
+    setVehModalError("");
+    try {
+      await api.marketplace.updateVehicle(editingVehicle.id, {
+        price: parseFloat(editVehPrice),
+        mileage: parseInt(editVehMileage, 10),
+        description: editVehDescription,
+      });
+      setSuccessMessage(
+        editingVehicle.status === "APPROVED"
+          ? "Vehicle updated! Material fields were modified, so it has been returned to Pending Approval for review."
+          : "Vehicle details updated successfully."
+      );
+      setEditingVehicle(null);
+      const data = await api.marketplace.listMyVehicles(statusFilter === "ALL" ? undefined : statusFilter);
+      setVehicles(data);
+    } catch (err: unknown) {
+      setVehModalError(err instanceof Error ? err.message : "Failed to update vehicle.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Save Edit Part (Phase 4 / Phase 3: stock_quantity removed from update payload)
+  const handleSaveEditPart = async () => {
+    if (!editingPart) return;
+    setActionLoading(true);
+    setPartModalError("");
+    try {
+      await api.marketplace.updatePart(editingPart.id, {
+        price: parseFloat(editPartPrice),
+        description: editPartDescription,
+      });
+      const isMaterial =
+        parseFloat(editPartPrice) !== Number(editingPart.price) ||
+        editPartDescription !== (editingPart.description || "");
+      setSuccessMessage(
+        editingPart.status === "APPROVED" && isMaterial
+          ? "Spare part updated! Material fields were modified, so it has been returned to Pending Approval for review."
+          : "Spare part details updated successfully."
+      );
+      setEditingPart(null);
+      const data = await api.marketplace.listMyParts(statusFilter === "ALL" ? undefined : statusFilter);
+      setParts(data);
+    } catch (err: unknown) {
+      setPartModalError(err instanceof Error ? err.message : "Failed to update spare part.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Stock Adjustment Handlers (Phase 3 Part A)
+  const handleOpenStockAdjust = (part: MarketplacePartListing) => {
+    setAdjustingPart(part);
+    setAdjustDelta("");
+    setAdjustReason("ADJUSTMENT");
+    setAdjustNote("");
+    setAdjustModalError("");
+  };
+
+  const handleSubmitStockAdjust = async () => {
+    if (!adjustingPart) return;
+    setAdjustModalError("");
+    const deltaNum = parseInt(adjustDelta, 10);
+    if (isNaN(deltaNum) || deltaNum === 0) {
+      setAdjustModalError("Adjustment delta cannot be zero. Enter a positive or negative integer.");
+      return;
+    }
+    const resultingStock = adjustingPart.stock_quantity + deltaNum;
+    if (resultingStock < 0) {
+      setAdjustModalError(`Adjustment would result in negative stock (${resultingStock}). Current stock is ${adjustingPart.stock_quantity}.`);
+      return;
+    }
+
+    setActionLoading(true);
+    try {
+      const res = await api.marketplace.adjustPartStock(adjustingPart.id, {
+        delta: deltaNum,
+        reason: adjustReason,
+        note: adjustNote.trim(),
+      });
+      setSuccessMessage(
+        `Stock for ${adjustingPart.name} adjusted successfully (${deltaNum > 0 ? `+${deltaNum}` : deltaNum}). New stock: ${res.listing.stock_quantity} units.`
+      );
+      setAdjustingPart(null);
+      const data = await api.marketplace.listMyParts(statusFilter === "ALL" ? undefined : statusFilter);
+      setParts(data);
+    } catch (err: unknown) {
+      setAdjustModalError(err instanceof Error ? err.message : "Failed to adjust stock.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Stock History Handler (Phase 3 Part A)
+  const handleOpenStockHistory = async (part: MarketplacePartListing) => {
+    setHistoryPart(part);
+    setHistoryLoading(true);
+    try {
+      const movements = await api.marketplace.getPartStockHistory(part.id);
+      setStockMovements(movements);
+    } catch (err: unknown) {
+      console.error("Failed to load stock history", err);
+      setStockMovements([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+
   const renderStatusBadge = (status: string) => {
     switch (status) {
       case "APPROVED":
@@ -566,18 +740,25 @@ export default function SellerInventoryView() {
 
         {/* Status Pills */}
         <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
-          {["ALL", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"].map((st) => (
+          {(activeSection === "parts"
+            ? ["ALL", "LOW_STOCK", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
+            : ["ALL", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
+          ).map((st) => (
             <button
               key={st}
               onClick={() => setStatusFilter(st)}
               className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors ${
                 statusFilter === st
                   ? "bg-slate-900 text-white"
+                  : st === "LOW_STOCK"
+                  ? "bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200"
                   : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
               }`}
             >
               {st === "ALL"
                 ? "All Statuses"
+                : st === "LOW_STOCK"
+                ? "⚠ Low Stock Only"
                 : st === "PENDING_APPROVAL"
                 ? "Pending"
                 : st === "CHANGES_REQUESTED"
@@ -659,6 +840,27 @@ export default function SellerInventoryView() {
                       <span className="text-xl font-black text-slate-950">
                         £{Number(v.price).toLocaleString()}
                       </span>
+                      <div className="mt-2">
+                        {canManageListing(v) ? (
+                          <button
+                            onClick={() => {
+                              setEditingVehicle(v);
+                              setEditVehPrice(String(v.price));
+                              setEditVehMileage(String(v.mileage));
+                              setEditVehDescription(v.description || "");
+                              setVehModalError("");
+                            }}
+                            className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors inline-flex items-center gap-1"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            <span>Edit Listing</span>
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-slate-400 font-medium px-2 py-0.5 bg-slate-50 border border-slate-200 rounded">
+                            Read-only org role
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -719,14 +921,20 @@ export default function SellerInventoryView() {
                         {v.rejection_reason || "Please address feedback before resubmitting."}
                       </p>
                       <div className="flex justify-end pt-1">
-                        <button
-                          onClick={() => handleResubmitVehicle(v.id)}
-                          disabled={actionLoading}
-                          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          <span>Resubmit Vehicle For Approval</span>
-                        </button>
+                        {canResubmitListing(v) ? (
+                          <button
+                            onClick={() => handleResubmitVehicle(v.id)}
+                            disabled={actionLoading}
+                            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Resubmit Vehicle For Approval</span>
+                          </button>
+                        ) : (
+                          <span className="text-xs text-slate-400 font-medium italic">
+                            Resubmit disabled: Read-only organisation role (requires listing seller or organisation OWNER/ADMIN).
+                          </span>
+                        )}
                       </div>
                     </div>
                   )}
@@ -776,6 +984,23 @@ export default function SellerInventoryView() {
                           {p.brand}
                         </span>
                         {renderStatusBadge(p.status)}
+                        {/* Availability Badge (Phase 3 Part A) */}
+                        {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
+                          <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
+                            <XCircle className="w-3 h-3" />
+                            <span>Out of Stock</span>
+                          </span>
+                        ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3" />
+                            <span>Low Stock ({p.stock_quantity} left)</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>In Stock ({p.stock_quantity})</span>
+                          </span>
+                        )}
                       </div>
                       <h4 className="text-base font-black text-slate-950">{p.name}</h4>
                       <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
@@ -783,7 +1008,7 @@ export default function SellerInventoryView() {
                           MPN: {p.mpn}
                         </span>
                         <span>Category: {p.category_name || "General"}</span>
-                        <span>Stock: {p.stock_quantity} units</span>
+                        <span>Stock: <strong className="text-slate-900">{p.stock_quantity}</strong> units (Threshold: {p.low_stock_threshold ?? 3})</span>
                         <span>Condition: {p.condition}</span>
                         {p.organisation_name && (
                           <span className="flex items-center gap-1 text-slate-700 font-medium">
@@ -799,6 +1024,54 @@ export default function SellerInventoryView() {
                       <span className="text-xl font-black text-slate-950">
                         £{Number(p.price).toFixed(2)}
                       </span>
+                      <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+                        {/* Adjust Stock Button (Phase 3 Part A) */}
+                        {canManageListing(p) ? (
+                          <button
+                            onClick={() => handleOpenStockAdjust(p)}
+                            className="px-2.5 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-900 border border-amber-300 text-xs font-bold rounded-lg transition-colors inline-flex items-center gap-1"
+                          >
+                            <Sliders className="w-3 h-3" />
+                            <span>Adjust Stock</span>
+                          </button>
+                        ) : (
+                          <span
+                            className="text-[10px] text-slate-400 font-medium px-2 py-0.5 bg-slate-50 border border-slate-200 rounded cursor-not-allowed"
+                            title="Stock adjustments restricted for read-only organisation role"
+                          >
+                            Adjust: Read-only
+                          </span>
+                        )}
+
+                        {/* Stock History Button (Phase 3 Part A) */}
+                        <button
+                          onClick={() => handleOpenStockHistory(p)}
+                          className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors inline-flex items-center gap-1"
+                        >
+                          <History className="w-3 h-3" />
+                          <span>History</span>
+                        </button>
+
+                        {/* Edit Listing Button */}
+                        {canManageListing(p) ? (
+                          <button
+                            onClick={() => {
+                              setEditingPart(p);
+                              setEditPartPrice(String(p.price));
+                              setEditPartDescription(p.description || "");
+                              setPartModalError("");
+                            }}
+                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors inline-flex items-center gap-1"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            <span>Edit</span>
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-slate-400 font-medium px-2 py-0.5 bg-slate-50 border border-slate-200 rounded">
+                            Edit: Read-only
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -859,14 +1132,20 @@ export default function SellerInventoryView() {
                         {p.rejection_reason || "Please correct the listed issues and resubmit."}
                       </p>
                       <div className="flex justify-end pt-1">
-                        <button
-                          onClick={() => handleResubmitPart(p.id)}
-                          disabled={actionLoading}
-                          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          <span>Resubmit Part For Approval</span>
-                        </button>
+                        {canResubmitListing(p) ? (
+                          <button
+                            onClick={() => handleResubmitPart(p.id)}
+                            disabled={actionLoading}
+                            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Resubmit Part For Approval</span>
+                          </button>
+                        ) : (
+                          <span className="text-xs text-slate-400 font-medium italic">
+                            Resubmit disabled: Read-only organisation role (requires listing seller or organisation OWNER/ADMIN).
+                          </span>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1422,6 +1701,439 @@ export default function SellerInventoryView() {
               >
                 {actionLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
                 <span>Submit For Approval</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: EDIT VEHICLE LISTING (Phase 4)
+      ========================================================================= */}
+      {editingVehicle && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Car className="w-4 h-4 text-amber-500" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Edit Vehicle: {editingVehicle.title}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingVehicle(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Warning banner when approved */}
+            {editingVehicle.status === "APPROVED" && (
+              <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 font-semibold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>Editing will send this listing back for review</span>
+              </div>
+            )}
+
+            {vehModalError && (
+              <div className="p-3 bg-rose-50 border border-rose-300 text-rose-900 text-xs font-semibold rounded-xl">
+                {vehModalError}
+              </div>
+            )}
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Asking Price (£)</label>
+                <input
+                  type="number"
+                  value={editVehPrice}
+                  onChange={(e) => setEditVehPrice(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Mileage</label>
+                <input
+                  type="number"
+                  value={editVehMileage}
+                  onChange={(e) => setEditVehMileage(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Description</label>
+                <textarea
+                  rows={3}
+                  value={editVehDescription}
+                  onChange={(e) => setEditVehDescription(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditingVehicle(null)}
+                className="px-4 py-2 text-slate-600 hover:text-slate-900 text-xs font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveEditVehicle}
+                disabled={actionLoading}
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {actionLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                <span>Save Changes</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: EDIT PART LISTING (Phase 4)
+      ========================================================================= */}
+      {editingPart && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Wrench className="w-4 h-4 text-amber-500" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Edit Spare Part: {editingPart.name}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingPart(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Warning banner when approved */}
+            {editingPart.status === "APPROVED" && (
+              <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 font-semibold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>Editing material fields will send this listing back for review. Stock-only changes stay live immediately.</span>
+              </div>
+            )}
+
+            {partModalError && (
+              <div className="p-3 bg-rose-50 border border-rose-300 text-rose-900 text-xs font-semibold rounded-xl">
+                {partModalError}
+              </div>
+            )}
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Retail Price (£)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={editPartPrice}
+                  onChange={(e) => setEditPartPrice(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Stock Quantity</label>
+                <div className="w-full px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-slate-700 font-bold flex items-center justify-between">
+                  <span>{editingPart.stock_quantity} units</span>
+                  <span className="text-[10px] font-bold text-slate-500 bg-slate-200 px-2 py-0.5 rounded">Read-only on edit</span>
+                </div>
+                <span className="text-[10px] text-slate-500 mt-1 block">
+                  Direct stock edits via update are disabled. Use the dedicated <strong>Adjust Stock</strong> button on the inventory card to record an audit-logged adjustment.
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Technical Description</label>
+                <textarea
+                  rows={3}
+                  value={editPartDescription}
+                  onChange={(e) => setEditPartDescription(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditingPart(null)}
+                className="px-4 py-2 text-slate-600 hover:text-slate-900 text-xs font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveEditPart}
+                disabled={actionLoading}
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {actionLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                <span>Save Changes</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: STOCK ADJUSTMENT DIALOG (Phase 3 Part A)
+      ========================================================================= */}
+      {adjustingPart && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-amber-500" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Adjust Inventory Stock
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAdjustingPart(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 text-xs space-y-1">
+              <div className="font-bold text-slate-900">{adjustingPart.name}</div>
+              <div className="text-slate-500 flex justify-between">
+                <span>Current Stock: <strong className="text-slate-900 font-mono">{adjustingPart.stock_quantity} units</strong></span>
+                <span>Low Stock Threshold: <strong className="text-slate-900 font-mono">{adjustingPart.low_stock_threshold ?? 3} units</strong></span>
+              </div>
+            </div>
+
+            {adjustModalError && (
+              <div className="p-3 bg-rose-50 border border-rose-300 text-rose-900 text-xs font-semibold rounded-xl">
+                {adjustModalError}
+              </div>
+            )}
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Stock Delta (+ or -) *</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    placeholder="e.g. +5 or -2"
+                    value={adjustDelta}
+                    onChange={(e) => setAdjustDelta(e.target.value)}
+                    className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-500 font-mono text-sm"
+                  />
+                  <div className="flex gap-1">
+                    {["+1", "+5", "+10", "-1", "-5"].map((btn) => (
+                      <button
+                        key={btn}
+                        type="button"
+                        onClick={() => setAdjustDelta(btn)}
+                        className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold rounded-lg"
+                      >
+                        {btn}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <span className="text-[10px] text-slate-400 mt-1 block">
+                  Positive delta adds stock; negative delta deducts stock. Cannot be 0.
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Adjustment Reason *</label>
+                <select
+                  value={adjustReason}
+                  onChange={(e) => setAdjustReason(e.target.value as "ADJUSTMENT" | "CORRECTION")}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-500"
+                >
+                  <option value="ADJUSTMENT">ADJUSTMENT - Manual Stock Delivery / Shrinkage</option>
+                  <option value="CORRECTION">CORRECTION - Inventory Audit / Reconciliation Correction</option>
+                </select>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Note: INITIAL, SALE, and RETURN movements are reserved for system workflows.
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Internal Note (Optional)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Received shipment PO-4912 / recount discrepancy"
+                  value={adjustNote}
+                  onChange={(e) => setAdjustNote(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+
+              {/* Projected Result Preview */}
+              {adjustDelta && !isNaN(parseInt(adjustDelta, 10)) && (
+                <div className="p-3 bg-slate-100 rounded-xl border border-slate-200 flex items-center justify-between">
+                  <span className="text-slate-600 font-medium">Resulting Stock:</span>
+                  <span
+                    className={`font-black text-sm font-mono ${
+                      adjustingPart.stock_quantity + parseInt(adjustDelta, 10) < 0
+                        ? "text-red-600"
+                        : adjustingPart.stock_quantity + parseInt(adjustDelta, 10) <= (adjustingPart.low_stock_threshold ?? 3)
+                        ? "text-amber-600"
+                        : "text-emerald-700"
+                    }`}
+                  >
+                    {adjustingPart.stock_quantity + parseInt(adjustDelta, 10)} units
+                    {adjustingPart.stock_quantity + parseInt(adjustDelta, 10) < 0 && " (Invalid: Negative stock prohibited)"}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setAdjustingPart(null)}
+                className="px-4 py-2 text-slate-600 hover:text-slate-900 text-xs font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitStockAdjust}
+                disabled={
+                  actionLoading ||
+                  !adjustDelta ||
+                  isNaN(parseInt(adjustDelta, 10)) ||
+                  parseInt(adjustDelta, 10) === 0 ||
+                  adjustingPart.stock_quantity + parseInt(adjustDelta, 10) < 0
+                }
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {actionLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                <span>Apply Stock Adjustment</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: STOCK LEDGER HISTORY (Phase 3 Part A)
+      ========================================================================= */}
+      {historyPart && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-2xl max-h-[85vh] flex flex-col space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-slate-700" />
+                <div>
+                  <h3 className="text-sm font-black text-slate-900">
+                    Stock Movement Audit Ledger
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-mono">
+                    {historyPart.name} · Current Stock: {historyPart.stock_quantity} units
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryPart(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              {historyLoading ? (
+                <div className="py-12 text-center">
+                  <div className="w-6 h-6 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                  <p className="text-xs text-slate-500">Loading audit ledger...</p>
+                </div>
+              ) : stockMovements.length === 0 ? (
+                <div className="py-12 text-center text-slate-500 text-xs">
+                  No stock movements recorded for this listing yet.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-12 text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 py-1">
+                    <span className="col-span-3">Timestamp</span>
+                    <span className="col-span-2">Reason</span>
+                    <span className="col-span-2 text-right">Delta</span>
+                    <span className="col-span-2 text-right">Balance</span>
+                    <span className="col-span-3 text-right">Actor / Note</span>
+                  </div>
+
+                  {stockMovements.map((m) => (
+                    <div
+                      key={m.id}
+                      className="grid grid-cols-12 items-center text-xs p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors"
+                    >
+                      <span className="col-span-3 text-[11px] text-slate-500">
+                        {new Date(m.created_at).toLocaleString()}
+                      </span>
+                      <span className="col-span-2">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            m.reason === "INITIAL"
+                              ? "bg-blue-50 text-blue-700 border border-blue-200"
+                              : m.reason === "CORRECTION"
+                              ? "bg-purple-50 text-purple-700 border border-purple-200"
+                              : m.reason === "SALE"
+                              ? "bg-orange-50 text-orange-700 border border-orange-200"
+                              : m.reason === "RETURN"
+                              ? "bg-teal-50 text-teal-700 border border-teal-200"
+                              : "bg-slate-200 text-slate-800"
+                          }`}
+                        >
+                          {m.reason}
+                        </span>
+                      </span>
+                      <span
+                        className={`col-span-2 text-right font-mono font-bold ${
+                          m.delta > 0 ? "text-emerald-700" : "text-rose-700"
+                        }`}
+                      >
+                        {m.delta > 0 ? `+${m.delta}` : m.delta}
+                      </span>
+                      <span className="col-span-2 text-right font-mono font-bold text-slate-900">
+                        {m.resulting_quantity}
+                      </span>
+                      <div className="col-span-3 text-right truncate">
+                        <span className="text-[11px] font-medium text-slate-700 block truncate">
+                          {m.actor_name || "System"}
+                        </span>
+                        {m.note && (
+                          <span className="text-[10px] text-slate-400 italic block truncate" title={m.note}>
+                            {m.note}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+              <span>Immutable Ledger · Rows locked with row-level mutex</span>
+              <button
+                type="button"
+                onClick={() => setHistoryPart(null)}
+                className="px-4 py-2 bg-slate-900 text-white rounded-xl font-bold hover:bg-slate-800"
+              >
+                Close Ledger
               </button>
             </div>
           </div>

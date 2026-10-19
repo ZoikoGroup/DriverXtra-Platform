@@ -33,4 +33,34 @@ def custom_exception_handler(exc, context):
         }
         response.data = formatted_payload
 
+        # Phase 3 Audit: Record denied audit entries on 403 Forbidden
+        if response.status_code == status.HTTP_403_FORBIDDEN:
+            try:
+                from platform_core.audit.writer import record_denied_audit_entry
+                from common.middleware import get_current_correlation_id
+
+                request = context.get('request') if context else None
+                view = context.get('view') if context else None
+                user = getattr(request, 'user', None) if request else None
+                actor_id = getattr(user, 'id', None) if (user and user.is_authenticated) else None
+                corr_id = getattr(request, 'correlation_id', '') if request else ''
+                if not corr_id:
+                    corr_id = get_current_correlation_id()
+
+                path = getattr(request, 'path', '') if request else ''
+                method = getattr(request, 'method', '') if request else ''
+                view_name = view.__class__.__name__ if view else ''
+
+                record_denied_audit_entry(
+                    action=f"permission:{method.lower()}" if method else "permission:access",
+                    resource_type="APIEndpoint",
+                    resource_id=path,
+                    reason_code="PERMISSION_DENIED",
+                    correlation_id=corr_id,
+                    actor_id=actor_id,
+                    metadata={"view": view_name, "path": path, "method": method, "detail": error_message},
+                )
+            except Exception:
+                pass
+
     return response

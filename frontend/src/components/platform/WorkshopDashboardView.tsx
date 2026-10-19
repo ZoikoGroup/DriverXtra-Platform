@@ -73,6 +73,17 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
 
   return (
     <div className="p-6 max-w-[1440px] mx-auto space-y-6">
+      {/* Demo Data Notice */}
+      <div className="flex items-center justify-between pb-1">
+        <div className="inline-flex items-center gap-2">
+          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-300">
+            Demo data
+          </span>
+          <span className="text-xs text-slate-500 font-medium">
+            Workshop Work Orders & Bay Capacity (Doc 15) • Simulated Prototype Data
+          </span>
+        </div>
+      </div>
       {/* Top Banner */}
       <div className="bg-purple-900 text-white rounded-3xl p-6 shadow-md border border-purple-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>

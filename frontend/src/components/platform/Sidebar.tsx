@@ -11,7 +11,8 @@ import {
   User,
   LogOut,
   ChevronRight,
-  ShoppingBag
+  ShoppingBag,
+  UserPlus
 } from "lucide-react";
 
 interface SidebarProps {
@@ -31,24 +32,11 @@ export default function Sidebar({
 
   if (!user) return null;
 
-  // Strictly role-governed navigation items
-  const isAdmin = Boolean(
-    user.is_superuser ||
-    user.is_staff ||
-    user.role === "MARKETPLACE_ADMIN" ||
-    user.rawRoles?.includes("ADMIN") ||
-    user.rawRoles?.includes("STAFF")
-  );
-
-  const isSeller = !isAdmin && Boolean(
-    user.role === "INVENTORY_MANAGER" ||
-    user.rawRoles?.includes("SELLER")
-  );
-
-  const isWorkshop = !isAdmin && !isSeller && Boolean(
-    user.role === "WORKSHOP_MANAGER" ||
-    user.rawRoles?.includes("WORKSHOP")
-  );
+  // Render navigation strictly according to active_role claim
+  const activeRole = user.activeRole || (user.rawRoles && user.rawRoles[0]) || "BUYER";
+  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
+  const isSeller = activeRole === "SELLER";
+  const isWorkshop = activeRole === "WORKSHOP";
 
   let roleNavItems: {
     id: string;
@@ -60,6 +48,7 @@ export default function Sidebar({
   if (isAdmin) {
     roleNavItems = [
       { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
+      { id: "admin_staff_management", label: "Staff Invitations & Roles", icon: UserPlus, badge: "Admin" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
@@ -92,7 +81,7 @@ export default function Sidebar({
       { id: "marketplace_browse", label: "Marketplace (Vehicles & Parts)", icon: ShoppingBag, badge: "Browse" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
-      { id: "seller_onboarding", label: "Become a Seller", icon: FileCheck2, badge: "Apply" },
+      { id: "seller_onboarding", label: "Apply to sell / Apply as workshop", icon: FileCheck2, badge: "Apply" },
       { id: "profile", label: "My Profile", icon: User },
       { id: "organisations", label: "Organisations & Teams", icon: Building2 },
     ];
@@ -143,7 +132,7 @@ export default function Sidebar({
             </div>
             <div className="mt-1 flex items-center gap-1.5 text-[10px] text-amber-400 font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-              <span>Role: {user.roleLabel?.split("(")[0] || user.role}</span>
+              <span>Active Role: <strong className="font-bold">{activeRole}</strong></span>
             </div>
           </div>
         )}
@@ -199,7 +188,7 @@ export default function Sidebar({
           <div className="mb-2 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800/80">
             <div className="text-xs font-bold text-white truncate">{user.fullName}</div>
             <div className="text-[10px] text-amber-400 font-semibold truncate mt-0.5">
-              {user.roleLabel}
+              {activeRole} • {user.email}
             </div>
           </div>
         )}

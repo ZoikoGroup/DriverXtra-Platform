@@ -32,7 +32,8 @@ class TestUserRegistration:
         assert user.email_verified_at is None
         assert data['user']['is_email_verified'] is False
 
-    def test_registration_with_custom_public_roles(self, api_client):
+    def test_registration_with_seller_or_workshop_role_rejected(self, api_client):
+        """Intentionally updated for Phase 1: Requesting SELLER or WORKSHOP on registration must return HTTP 400 with a clear message."""
         payload = {
             'email': 'mechanic@example.co.uk',
             'password': 'StrongPassword2026!',
@@ -41,12 +42,22 @@ class TestUserRegistration:
             'roles': ['WORKSHOP', 'SELLER'],
         }
         response = api_client.post('/api/v1/auth/register/', payload, format='json')
-        assert response.status_code == status.HTTP_201_CREATED
-
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
         data = response.json()
-        roles = data['user']['roles']
-        assert RoleChoices.WORKSHOP in roles
-        assert RoleChoices.SELLER in roles
+        assert 'BUYER' in str(data) and 'Seller Onboarding' in str(data)
+
+    def test_registration_with_explicit_buyer_role_allowed(self, api_client):
+        payload = {
+            'email': 'explicitbuyer@example.co.uk',
+            'password': 'StrongPassword2026!',
+            'first_name': 'Explicit',
+            'last_name': 'Buyer',
+            'roles': ['BUYER'],
+        }
+        response = api_client.post('/api/v1/auth/register/', payload, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        data = response.json()
+        assert data['user']['roles'] == [RoleChoices.BUYER]
 
     def test_registration_ignores_client_supplied_email_verified_bypass(self, api_client):
         """Ensure client cannot self-verify during registration by injecting email verification fields."""

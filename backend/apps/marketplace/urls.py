@@ -10,6 +10,9 @@ from apps.marketplace.views import (
     SellerPartListCreateView,
     SellerPartDetailUpdateView,
     SellerPartResubmitView,
+    PartStockAdjustmentView,
+    PartStockHistoryView,
+    LowStockPartListView,
     AdminVehicleListingListView,
     AdminVehicleListingDetailView,
     AdminVehicleListingReviewView,
@@ -31,9 +34,12 @@ urlpatterns = [
     path('vehicles/<uuid:id>/submit/', SellerVehicleResubmitView.as_view(), name='marketplace-seller-vehicle-submit'),
     path('vehicles/<uuid:id>/resubmit/', SellerVehicleResubmitView.as_view(), name='marketplace-seller-vehicle-resubmit'),
     path('parts/', SellerPartListCreateView.as_view(), name='marketplace-seller-parts'),
+    path('parts/low-stock/', LowStockPartListView.as_view(), name='marketplace-parts-low-stock'),
     path('parts/<uuid:id>/', SellerPartDetailUpdateView.as_view(), name='marketplace-seller-part-detail'),
     path('parts/<uuid:id>/submit/', SellerPartResubmitView.as_view(), name='marketplace-seller-part-submit'),
     path('parts/<uuid:id>/resubmit/', SellerPartResubmitView.as_view(), name='marketplace-seller-part-resubmit'),
+    path('parts/<uuid:id>/stock/', PartStockAdjustmentView.as_view(), name='marketplace-part-stock-adjust'),
+    path('parts/<uuid:id>/stock-history/', PartStockHistoryView.as_view(), name='marketplace-part-stock-history'),
 
     # 3. Admin Moderation & Approval Queues
     path('admin/vehicles/', AdminVehicleListingListView.as_view(), name='marketplace-admin-vehicles'),

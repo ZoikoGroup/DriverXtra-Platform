@@ -2,6 +2,8 @@ from rest_framework import serializers
 from apps.marketplace.models import (
     VehicleListing,
     SparePartListing,
+    StockMovement,
+    StockMovementReasonChoices,
     ListingStatusChoices,
 )
 from apps.organisations.models import Organisation, OrganisationRoleChoices
@@ -91,7 +93,8 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
             OrganisationRoleChoices.OWNER,
             OrganisationRoleChoices.ADMIN,
         ):
-            raise serializers.ValidationError(
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(
                 "You are not authorized to create inventory for this organisation. "
                 "Must be an active OWNER or ADMIN."
             )
@@ -123,6 +126,7 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
     organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
     category_name = serializers.CharField(source='category.name', read_only=True)
     reviewed_by_name = serializers.CharField(source='reviewed_by.full_name', read_only=True, allow_null=True)
+    availability = serializers.SerializerMethodField()
 
     class Meta:
         model = SparePartListing
@@ -142,6 +146,8 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'price',
             'currency',
             'stock_quantity',
+            'low_stock_threshold',
+            'availability',
             'condition',
             'primary_image_url',
             'images',
@@ -170,6 +176,30 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance is not None and 'stock_quantity' in self.fields:
+            self.fields['stock_quantity'].read_only = True
+
+    def get_availability(self, obj) -> str:
+        if obj.stock_quantity == 0:
+            return 'OUT_OF_STOCK'
+        if obj.stock_quantity <= obj.low_stock_threshold:
+            return 'LOW_STOCK'
+        return 'IN_STOCK'
+
+    def validate(self, attrs):
+        if self.instance is not None:
+            initial_data = getattr(self, 'initial_data', {})
+            if 'stock_quantity' in initial_data:
+                raise serializers.ValidationError({
+                    'stock_quantity': (
+                        "Direct modification of stock_quantity via update is disabled. "
+                        "Please use the dedicated stock adjustment endpoint: POST /api/v1/marketplace/parts/<id>/stock/."
+                    )
+                })
+        return attrs
+
     def validate_organisation(self, value):
         if not value:
             return None
@@ -182,7 +212,8 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             OrganisationRoleChoices.OWNER,
             OrganisationRoleChoices.ADMIN,
         ):
-            raise serializers.ValidationError(
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(
                 "You are not authorized to submit spare parts for this organisation. "
                 "Must be an active OWNER or ADMIN."
             )
@@ -196,6 +227,59 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
     def validate_stock_quantity(self, value):
         if value < 0:
             raise serializers.ValidationError("Available stock quantity cannot be negative.")
+        return value
+
+    def validate_low_stock_threshold(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Low stock threshold cannot be negative.")
+        return value
+
+
+class StockMovementSerializer(serializers.ModelSerializer):
+    """Serializer for immutable stock movement records."""
+    actor_name = serializers.CharField(source='actor.full_name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = StockMovement
+        fields = [
+            'id',
+            'listing',
+            'delta',
+            'resulting_quantity',
+            'reason',
+            'actor',
+            'actor_name',
+            'note',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class StockAdjustmentSerializer(serializers.Serializer):
+    """Serializer for requesting manual stock adjustments."""
+    delta = serializers.IntegerField(required=True)
+    reason = serializers.ChoiceField(
+        choices=[
+            ('ADJUSTMENT', 'Manual Adjustment'),
+            ('CORRECTION', 'Inventory Audit / Correction'),
+        ],
+        required=True,
+        error_messages={
+            'invalid_choice': "Reason must be either 'ADJUSTMENT' or 'CORRECTION'. 'INITIAL', 'SALE', and 'RETURN' cannot be submitted to this endpoint."
+        }
+    )
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_delta(self, value):
+        if value == 0:
+            raise serializers.ValidationError("Stock adjustment delta cannot be zero.")
+        return value
+
+    def validate_reason(self, value):
+        if value not in ('ADJUSTMENT', 'CORRECTION'):
+            raise serializers.ValidationError(
+                f"Reason '{value}' is not allowed for manual stock adjustments. Must be 'ADJUSTMENT' or 'CORRECTION'."
+            )
         return value
 
 
@@ -269,6 +353,7 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
     seller_name = serializers.CharField(source='seller.full_name', read_only=True)
     organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
     compatible_variants = VehicleVariantSerializer(many=True, read_only=True)
+    availability = serializers.SerializerMethodField()
 
     class Meta:
         model = SparePartListing
@@ -285,6 +370,8 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'price',
             'currency',
             'stock_quantity',
+            'low_stock_threshold',
+            'availability',
             'condition',
             'primary_image_url',
             'images',
@@ -295,3 +382,10 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'status',
             'created_at',
         ]
+
+    def get_availability(self, obj) -> str:
+        if obj.stock_quantity == 0:
+            return 'OUT_OF_STOCK'
+        if obj.stock_quantity <= obj.low_stock_threshold:
+            return 'LOW_STOCK'
+        return 'IN_STOCK'

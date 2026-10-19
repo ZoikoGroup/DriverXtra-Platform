@@ -82,6 +82,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
+    "common.middleware.CorrelationIdMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -243,7 +244,31 @@ REST_FRAMEWORK = {
     ),
     "PAGE_SIZE": 20,
     "EXCEPTION_HANDLER": "common.exceptions.custom_exception_handler",
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "120/minute",
+        "user": "300/minute",
+        "resend_verification": "5/minute",
+        "password_reset": "5/minute",
+        "staff_password_reset": "3/minute",
+        "login": "10/minute",
+        "staff_login": "5/minute",
+    },
 }
+
+if "test" in sys.argv or "pytest" in sys.modules:
+    REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+        "anon": "10000/minute",
+        "user": "10000/minute",
+        "resend_verification": "10000/minute",
+        "password_reset": "10000/minute",
+        "staff_password_reset": "10000/minute",
+        "login": "10000/minute",
+        "staff_login": "10000/minute",
+    }
 
 
 # =========================================================
@@ -283,3 +308,14 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+
+# =========================================================
+# EMAIL & NOTIFICATION CONFIGURATION
+# =========================================================
+
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@driverxtra.com")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")

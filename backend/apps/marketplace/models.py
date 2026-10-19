@@ -29,6 +29,17 @@ class VehicleConditionChoices(models.TextChoices):
     FAIR = 'FAIR', 'Fair'
 
 
+from django.core.validators import MinValueValidator
+
+
+class StockMovementReasonChoices(models.TextChoices):
+    INITIAL = 'INITIAL', 'Initial Stock'
+    ADJUSTMENT = 'ADJUSTMENT', 'Manual Adjustment'
+    SALE = 'SALE', 'Customer Order / Sale'
+    RETURN = 'RETURN', 'Customer Return / Restock'
+    CORRECTION = 'CORRECTION', 'Inventory Audit / Correction'
+
+
 class PartConditionChoices(models.TextChoices):
     NEW = 'NEW', 'Brand New (OEM/Aftermarket)'
     REFURBISHED = 'REFURBISHED', 'Remanufactured / Refurbished'
@@ -176,6 +187,11 @@ class SparePartListing(BaseUUIDModel):
     price = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=10, default='GBP')
     stock_quantity = models.PositiveIntegerField(default=1)
+    low_stock_threshold = models.PositiveIntegerField(
+        default=3,
+        validators=[MinValueValidator(0)],
+        help_text="Stock count threshold below which an alert or low-stock badge is triggered.",
+    )
     condition = models.CharField(
         max_length=20,
         choices=PartConditionChoices.choices,
@@ -225,3 +241,50 @@ class SparePartListing(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.brand} {self.mpn} - {self.name} (£{self.price}) - {self.status}"
+
+
+class StockMovement(BaseUUIDModel):
+    """Immutable ledger of inventory stock movements for SparePartListing."""
+
+    listing = models.ForeignKey(
+        SparePartListing,
+        on_delete=models.CASCADE,
+        related_name='stock_movements',
+    )
+    delta = models.IntegerField(help_text="Stock quantity change (+/-)")
+    resulting_quantity = models.PositiveIntegerField(help_text="Stock quantity following movement")
+    reason = models.CharField(
+        max_length=20,
+        choices=StockMovementReasonChoices.choices,
+    )
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='stock_movements',
+    )
+    note = models.TextField(blank=True, default='')
+
+    class Meta:
+        verbose_name = 'Stock Movement'
+        verbose_name_plural = 'Stock Movements'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['listing', '-created_at']),
+            models.Index(fields=['reason']),
+        ]
+
+    def __str__(self):
+        sign = '+' if self.delta > 0 else ''
+        return f"{self.listing.mpn}: {sign}{self.delta} -> {self.resulting_quantity} ({self.reason})"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and self.pk and not getattr(self, '_allow_update', False):
+            raise ValueError("StockMovement records are append-only and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if not getattr(self, '_allow_delete', False):
+            raise ValueError("StockMovement records are immutable and cannot be deleted.")
+        super().delete(*args, **kwargs)

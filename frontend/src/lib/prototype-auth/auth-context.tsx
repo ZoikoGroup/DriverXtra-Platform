@@ -102,6 +102,8 @@ export const PROTOTYPE_USERS: PrototypeUser[] = [
 
 export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): PrototypeUser {
   const rawRoles = backendUser.roles || [];
+  const activeBackendRole = backendUser.active_role || (rawRoles[0] || "BUYER");
+
   let role: CanonicalRole = "CONSUMER";
   let roleLabel = "Consumer & Vehicle Owner";
   let tenantType: PrototypeUser["tenantType"] = "INDIVIDUAL";
@@ -114,8 +116,7 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
     "dispute:create"
   ];
 
-  // Strictly enforce least privilege role mapping based on inspected backend roles
-  if (backendUser.is_superuser || rawRoles.includes("ADMIN")) {
+  if (activeBackendRole === "ADMIN" || backendUser.is_superuser) {
     role = "MARKETPLACE_ADMIN";
     roleLabel = "Marketplace Administrator (Operations Lead)";
     tenantType = "INTERNAL_OPS";
@@ -126,7 +127,16 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
       "trust:kyb_review",
       "policy:evaluate"
     ];
-  } else if (rawRoles.includes("SELLER")) {
+  } else if (activeBackendRole === "STAFF" || backendUser.is_staff) {
+    role = "MARKETPLACE_ADMIN";
+    roleLabel = backendUser.staff_role ? `${backendUser.staff_role.name}` : "Operations Staff Member";
+    tenantType = "INTERNAL_OPS";
+    permissions = [
+      "ops:queue.view",
+      "ops:maker_checker.approve",
+      "policy:evaluate"
+    ];
+  } else if (activeBackendRole === "SELLER") {
     role = "INVENTORY_MANAGER";
     roleLabel = "Dealer Principal / Inventory Manager";
     tenantType = "DEALER_GROUP";
@@ -139,7 +149,7 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
       "payout:view",
       "payout:request"
     ];
-  } else if (rawRoles.includes("WORKSHOP")) {
+  } else if (activeBackendRole === "WORKSHOP") {
     role = "WORKSHOP_MANAGER";
     roleLabel = "Workshop Bay Manager";
     tenantType = "WORKSHOP";
@@ -150,27 +160,10 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
       "servicerecord:write",
       "capacity:manage"
     ];
-  } else if (backendUser.is_staff || rawRoles.includes("STAFF")) {
-    role = "MARKETPLACE_ADMIN";
-    roleLabel = "Operations Staff Member";
-    tenantType = "INTERNAL_OPS";
-    permissions = [
-      "ops:queue.view",
-      "ops:maker_checker.approve",
-      "policy:evaluate"
-    ];
-  } else if (rawRoles.includes("BUYER")) {
+  } else {
     role = "CONSUMER";
     roleLabel = "Consumer & Vehicle Owner";
     tenantType = "INDIVIDUAL";
-    permissions = [
-      "garage:view",
-      "garage:manage",
-      "order:create",
-      "order:view",
-      "booking:create",
-      "dispute:create"
-    ];
   }
 
   // Active organisation context from real backend data
@@ -188,18 +181,45 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
     organizationName: orgName,
     jurisdiction: "GB-ENG",
     tenantType,
-    permissions,
+    permissions: backendUser.permissions && backendUser.permissions.length > 0 ? backendUser.permissions : permissions,
     first_name: backendUser.first_name,
     last_name: backendUser.last_name,
     phone_number: backendUser.phone_number,
     status: backendUser.status,
     rawRoles: backendUser.roles,
+    activeRole: activeBackendRole,
+    has_mfa_enabled: backendUser.has_mfa_enabled,
+    staff_role: backendUser.staff_role,
     is_staff: backendUser.is_staff,
     is_superuser: backendUser.is_superuser,
     organisations: backendUser.organisations,
     date_joined: backendUser.date_joined,
     created_at: backendUser.created_at,
   };
+}
+
+function parseJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return null;
+    const base64Url = parts[1];
+    const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+    let json: string;
+    if (typeof window !== "undefined" && typeof window.atob === "function") {
+      json = decodeURIComponent(
+        window
+          .atob(base64)
+          .split("")
+          .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+          .join("")
+      );
+    } else {
+      json = Buffer.from(base64, "base64").toString("utf-8");
+    }
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -209,15 +229,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [mfaChallenge, setMfaChallenge] = useState<{ preAuthToken: string; email: string } | null>(null);
 
   const clearAuthError = useCallback(() => {
     setAuthError(null);
   }, []);
 
+  const clearMfaChallenge = useCallback(() => {
+    setMfaChallenge(null);
+  }, []);
+
   // Restore authenticated session on mount from Django backend token
   const refreshProfile = useCallback(async () => {
-    const token = tokenStorage.getAccessToken();
-    if (!token) {
+    const accessToken = tokenStorage.getAccessToken();
+    const refreshToken = tokenStorage.getRefreshToken();
+    if (!accessToken && !refreshToken) {
       setUser(null);
       return;
     }
@@ -225,60 +251,149 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setIsLoading(true);
       const profile = await api.users.getMe();
+      const token = tokenStorage.getAccessToken();
+      if (token) {
+        const tokenClaims = parseJwtPayload(token);
+        if (tokenClaims && typeof tokenClaims.active_role === "string") {
+          profile.active_role = tokenClaims.active_role;
+        }
+      }
       const mappedUser = mapBackendUserToPrototypeUser(profile);
       setUser(mappedUser);
       setAuthError(null);
-    } catch {
-      tokenStorage.clearTokens();
-      setUser(null);
+    } catch (err: unknown) {
+      const statusCode = err instanceof ApiError ? err.code : undefined;
+      const errorMessage = err instanceof Error ? err.message : "Profile refresh failed";
+
+      console.warn("[Auth] Profile refresh failed:", {
+        status: statusCode,
+        message: errorMessage,
+      });
+
+      if (statusCode === 401) {
+        tokenStorage.clearTokens();
+        setUser(null);
+        setAuthError("Session expired. Please log in again.");
+      } else {
+        setUser(null);
+        setAuthError(errorMessage);
+      }
     } finally {
       setIsLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+
     const initSession = async () => {
-      const token = tokenStorage.getAccessToken();
-      if (token) {
+      const accessToken = tokenStorage.getAccessToken();
+      const refreshToken = tokenStorage.getRefreshToken();
+
+      if (accessToken || refreshToken) {
         try {
+          setIsLoading(true);
           const profile = await api.users.getMe();
-          setUser(mapBackendUserToPrototypeUser(profile));
-        } catch {
-          tokenStorage.clearTokens();
-          setUser(null);
+          if (mounted) {
+            const token = tokenStorage.getAccessToken();
+            if (token) {
+              const tokenClaims = parseJwtPayload(token);
+              if (tokenClaims && typeof tokenClaims.active_role === "string") {
+                profile.active_role = tokenClaims.active_role;
+              }
+            }
+            setUser(mapBackendUserToPrototypeUser(profile));
+            setAuthError(null);
+          }
+        } catch (err: unknown) {
+          const statusCode = err instanceof ApiError ? err.code : undefined;
+          const errorMessage = err instanceof Error ? err.message : "Session restoration failed";
+
+          console.warn("[Auth] Session restoration failed:", {
+            status: statusCode,
+            message: errorMessage,
+          });
+
+          if (mounted) {
+            if (statusCode === 401) {
+              tokenStorage.clearTokens();
+              setUser(null);
+              setAuthError("Session expired. Please log in again.");
+            } else {
+              setUser(null);
+              setAuthError(errorMessage);
+            }
+          }
+        } finally {
+          if (mounted) {
+            setIsLoading(false);
+          }
         }
       }
-      setIsInitialized(true);
+
+      if (mounted) {
+        setIsInitialized(true);
+      }
     };
 
     initSession();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  const login = async (email: string, password?: string): Promise<boolean> => {
+  const login = async (email: string, password?: string, code?: string): Promise<{ success: boolean; mfaRequired?: boolean }> => {
     setIsLoading(true);
     setAuthError(null);
 
-    // Require password for authentication and disallow prototype fallback for login attempts
     if (!password) {
       setIsLoading(false);
       setAuthError("Password is required for platform authentication.");
-      return false;
+      return { success: false };
     }
 
     try {
-      const response = await api.auth.login(email, password);
+      const response = await api.auth.login(email, password, code);
+      if (response.mfa_required && response.pre_auth_token) {
+        setMfaChallenge({ preAuthToken: response.pre_auth_token, email: response.email || email });
+        setIsLoading(false);
+        return { success: true, mfaRequired: true };
+      }
+
       if (!response?.tokens?.access || !response?.tokens?.refresh) {
         throw new ApiError("Authentication failed: server did not return both access and refresh tokens.", 500);
       }
-      const mappedUser = mapBackendUserToPrototypeUser(response.user);
+      const profile = response.user || await api.users.getMe();
+      const mappedUser = mapBackendUserToPrototypeUser(profile);
       setUser(mappedUser);
+      setMfaChallenge(null);
       setIsLoading(false);
-      return true;
+      return { success: true, mfaRequired: false };
     } catch (err: unknown) {
       setIsLoading(false);
       const msg = err instanceof ApiError ? err.message : "Authentication failed. Please verify credentials.";
       setAuthError(msg);
+      return { success: false };
+    }
+  };
+
+  const verifyMfaLogin = async (code: string): Promise<boolean> => {
+    if (!mfaChallenge) return false;
+    setIsLoading(true);
+    setAuthError(null);
+    try {
+      const response = await api.auth.verifyMfa(code, mfaChallenge.preAuthToken);
+      const profile = response.user || await api.users.getMe();
+      setUser(mapBackendUserToPrototypeUser(profile));
+      setMfaChallenge(null);
+      return true;
+    } catch (err: unknown) {
+      const msg = err instanceof ApiError ? err.message : "Invalid MFA code. Please try again.";
+      setAuthError(msg);
       return false;
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -304,22 +419,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       tokenStorage.clearTokens();
       setUser(null);
+      setMfaChallenge(null);
       setIsLoading(false);
     }
   };
 
-  const switchRole = (role: CanonicalRole) => {
-    if (!user) return;
-    // When real user is authenticated, keep backend fields and adjust view role
-    const updatedUser: PrototypeUser = {
-      ...user,
-      role,
-      roleLabel: role === "MARKETPLACE_ADMIN" ? "Marketplace Administrator" :
-                 role === "INVENTORY_MANAGER" ? "Dealer Principal" :
-                 role === "WORKSHOP_MANAGER" ? "Workshop Bay Manager" :
-                 role === "FLEET_MANAGER" ? "Fleet Manager" : "Consumer & Vehicle Owner"
-    };
-    setUser(updatedUser);
+  const switchRole = async (targetRole: CanonicalRole | string): Promise<boolean> => {
+    if (!user) return false;
+    let backendRole = targetRole;
+    if (targetRole === "MARKETPLACE_ADMIN") backendRole = user.is_superuser || user.rawRoles?.includes("ADMIN") ? "ADMIN" : "STAFF";
+    else if (targetRole === "INVENTORY_MANAGER") backendRole = "SELLER";
+    else if (targetRole === "WORKSHOP_MANAGER") backendRole = "WORKSHOP";
+    else if (targetRole === "CONSUMER") backendRole = "BUYER";
+    else if (targetRole === "FLEET_MANAGER") backendRole = "BUYER";
+
+    setIsLoading(true);
+    setAuthError(null);
+    try {
+      const switchRes = await api.auth.switchRole(backendRole);
+      const profile = await api.users.getMe();
+      if (switchRes?.active_role) {
+        profile.active_role = switchRes.active_role;
+      }
+      setUser(mapBackendUserToPrototypeUser(profile));
+      return true;
+    } catch (err: unknown) {
+      const msg = err instanceof ApiError ? err.message : "Failed to switch role.";
+      setAuthError(msg);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const updateProfile = async (data: { first_name?: string; last_name?: string; phone_number?: string }): Promise<boolean> => {
@@ -338,20 +468,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // Avoid flash before hydration/token inspection
-  if (!isInitialized) {
-    return null;
-  }
 
   return (
     <AuthContext.Provider
       value={{
         user,
         isAuthenticated: !!user,
+        isInitialized,
         isLoading,
         authError,
+        mfaChallenge,
+        clearMfaChallenge,
         clearAuthError,
         login,
+        verifyMfaLogin,
         register,
         logout,
         switchRole,

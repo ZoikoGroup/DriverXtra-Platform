@@ -11,6 +11,7 @@ from .serializers import (
 )
 from apps.identity.models import User
 from common.permissions import IsOrganisationMember, IsOrganisationAdminOrOwner
+from platform_core.audit.writer import record_audit_entry
 
 
 class OrganisationListCreateView(generics.ListCreateAPIView):
@@ -94,7 +95,23 @@ class OrganisationMemberListCreateView(generics.GenericAPIView):
         role_to_assign = serializer.validated_data['role']
         target_user = User.objects.get(email=target_email)
 
+        corr_id = getattr(request, 'correlation_id', '')
         membership = organisation.add_member(user=target_user, role=role_to_assign)
+        record_audit_entry(
+            event_type="org.member.added",
+            action="org:member.add",
+            resource_type="OrganisationMembership",
+            resource_id=str(membership.id),
+            actor_id=request.user.id,
+            operating_org_id=organisation.id,
+            correlation_id=corr_id,
+            metadata={
+                "organisation_id": str(organisation.id),
+                "target_user_id": str(target_user.id),
+                "target_email": target_email,
+                "role": role_to_assign,
+            },
+        )
         response_serializer = OrganisationMemberSerializer(membership)
 
         return Response(

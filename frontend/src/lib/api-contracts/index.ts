@@ -22,6 +22,60 @@ export const DOCUMENTED_API_CONTRACTS: Record<string, ApiContractDescriptor> = {
     sourceDoc: "Doc 04 §8",
     description: "Return authenticated person, organization memberships, and active tenant."
   },
+  VERIFY_EMAIL: {
+    method: "POST",
+    path: "/api/v1/auth/verify-email/",
+    sourceDoc: "Doc 04 §12",
+    description: "Verify email address ownership with raw token."
+  },
+  RESEND_VERIFICATION: {
+    method: "POST",
+    path: "/api/v1/auth/resend-verification/",
+    sourceDoc: "Doc 04 §13",
+    description: "Request a fresh email verification token (rate limited, enumeration safe)."
+  },
+  PASSWORD_RESET_REQUEST: {
+    method: "POST",
+    path: "/api/v1/auth/password-reset/request/",
+    sourceDoc: "Doc 04 §14",
+    description: "Request password reset link and token (enumeration safe)."
+  },
+  PASSWORD_RESET_CONFIRM: {
+    method: "POST",
+    path: "/api/v1/auth/password-reset/confirm/",
+    sourceDoc: "Doc 04 §15",
+    description: "Confirm password reset using single-use 1h token and invalidate active sessions."
+  },
+  SWITCH_ROLE: {
+    method: "POST",
+    path: "/api/v1/auth/switch-role/",
+    sourceDoc: "Doc 04 §16",
+    description: "Switch active platform role in JWT tokens and session context."
+  },
+  MFA_ENROL: {
+    method: "POST",
+    path: "/api/v1/auth/mfa/enrol/",
+    sourceDoc: "Doc 04 §17",
+    description: "Generate TOTP secret and QR code URI for staff/admin two-factor authentication."
+  },
+  MFA_VERIFY: {
+    method: "POST",
+    path: "/api/v1/auth/mfa/verify/",
+    sourceDoc: "Doc 04 §18",
+    description: "Verify TOTP code for MFA enrolment activation or login challenge completion."
+  },
+  STAFF_INVITE: {
+    method: "POST",
+    path: "/api/v1/admin/staff/invite/",
+    sourceDoc: "Doc 04 §19",
+    description: "Admin-only invitation for pending staff member with single-use set-password token."
+  },
+  STAFF_SET_PASSWORD: {
+    method: "POST",
+    path: "/api/v1/auth/staff/set-password/",
+    sourceDoc: "Doc 04 §20",
+    description: "Set initial password for invited staff member using single-use invite token."
+  },
 
   // Vehicle Master & Garage (Doc 05)
   RESOLVE_VEHICLE_VIN: {
@@ -63,6 +117,24 @@ export const DOCUMENTED_API_CONTRACTS: Record<string, ApiContractDescriptor> = {
     path: "/api/v1/inventory/reservations",
     sourceDoc: "Doc 07 §25",
     description: "Place atomic reservation lock during checkout."
+  },
+  ADJUST_PART_STOCK: {
+    method: "POST",
+    path: "/api/v1/marketplace/parts/{id}/stock/",
+    sourceDoc: "Doc 07 §26",
+    description: "Record manual stock adjustment or inventory correction under row lock."
+  },
+  GET_PART_STOCK_HISTORY: {
+    method: "GET",
+    path: "/api/v1/marketplace/parts/{id}/stock-history/",
+    sourceDoc: "Doc 07 §26",
+    description: "Fetch immutable audit movement ledger for a spare part listing."
+  },
+  LIST_LOW_STOCK_PARTS: {
+    method: "GET",
+    path: "/api/v1/marketplace/parts/low-stock/",
+    sourceDoc: "Doc 07 §26",
+    description: "List seller spare part inventory at or below low stock threshold."
   },
 
   // Commerce & Orders (Doc 09)
