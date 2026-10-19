@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 import sys
 from datetime import timedelta
+from decimal import Decimal
 
 from dotenv import load_dotenv
 
@@ -319,3 +320,11 @@ EMAIL_BACKEND = os.getenv(
 )
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@driverxtra.com")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+
+# =========================================================
+# MARKETPLACE PRICING & REVIEW CONFIGURATION
+# =========================================================
+
+MAX_LISTING_PRICE = Decimal(os.getenv("MAX_LISTING_PRICE", "100000"))
+PRICE_OUTLIER_THRESHOLD = Decimal(os.getenv("PRICE_OUTLIER_THRESHOLD", "0.5"))

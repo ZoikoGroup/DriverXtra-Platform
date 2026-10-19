@@ -136,6 +136,18 @@ export const DOCUMENTED_API_CONTRACTS: Record<string, ApiContractDescriptor> = {
     sourceDoc: "Doc 07 §26",
     description: "List seller spare part inventory at or below low stock threshold."
   },
+  GET_CATALOGUE_PART_OFFERS: {
+    method: "GET",
+    path: "/api/v1/marketplace/browse/parts/catalogue/{catalogue_part_id}/offers/",
+    sourceDoc: "Doc 07 §27",
+    description: "Public competitive offers for a canonical catalogue part sorted by price ascending."
+  },
+  GET_PART_PRICE_HISTORY: {
+    method: "GET",
+    path: "/api/v1/marketplace/parts/{id}/price-history/",
+    sourceDoc: "Doc 07 §28",
+    description: "Fetch immutable audit ledger of price modifications for a spare part listing."
+  },
 
   // Commerce & Orders (Doc 09)
   PLACE_ORDER: {

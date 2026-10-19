@@ -15,6 +15,7 @@ import {
   Eye,
   X,
   RotateCcw,
+  AlertTriangle,
 } from "lucide-react";
 
 export default function AdminMarketplaceReviewView() {
@@ -514,7 +515,14 @@ export default function AdminMarketplaceReviewView() {
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="p-3 bg-slate-50 rounded-xl">
                     <span className="text-slate-500">Retail Price</span>
-                    <p className="font-bold text-slate-900">£{Number(inspectPart.price).toFixed(2)}</p>
+                    <div className="flex items-baseline gap-1.5 mt-0.5">
+                      {inspectPart.compare_at_price && Number(inspectPart.compare_at_price) > Number(inspectPart.price) && (
+                        <span className="text-xs text-slate-400 line-through">
+                          £{Number(inspectPart.compare_at_price).toFixed(2)}
+                        </span>
+                      )}
+                      <p className="font-bold text-slate-900">£{Number(inspectPart.price).toFixed(2)}</p>
+                    </div>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl">
                     <span className="text-slate-500">Brand / MPN</span>
@@ -530,11 +538,62 @@ export default function AdminMarketplaceReviewView() {
                   </div>
                 </div>
 
+                {/* Price Flags Advisory (Phase 3 Part B) */}
+                {inspectPart.price_flags && (
+                  <div className="p-3.5 rounded-2xl border text-xs space-y-1.5 transition-colors">
+                    {inspectPart.price_flags.flag === "OUTLIER_VS_MEDIAN" ? (
+                      <div className="flex items-start gap-2.5 text-amber-900 bg-amber-50 p-3 rounded-xl border border-amber-300">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold block">Advisory Flag: Potential Price Outlier (vs Catalogue Median)</span>
+                          <p className="text-[11px] text-amber-800 leading-relaxed mt-0.5">
+                            This listing price (£{Number(inspectPart.price).toFixed(2)}) deviates by{" "}
+                            <strong>{Math.round(Number(inspectPart.price_flags.deviation ?? 0) * 100)}%</strong> from the
+                            median of comparable listings (£{Number(inspectPart.price_flags.median).toFixed(2)}) across{" "}
+                            {inspectPart.price_flags.comparable_count} active comparable offers.
+                          </p>
+                          <span className="text-[10px] text-amber-700 italic block mt-1 font-medium">
+                            Note: This is an advisory compliance signal. Price flags do NOT block approval or reject submissions.
+                          </span>
+                        </div>
+                      </div>
+                    ) : inspectPart.price_flags.flag === "INSUFFICIENT_COMPARABLES" ? (
+                      <div className="flex items-center gap-2 text-slate-700 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-slate-200 px-2 py-0.5 rounded">
+                          Benchmark
+                        </span>
+                        <span className="text-[11px]">
+                          Insufficient comparables ({inspectPart.price_flags.comparable_count} found; minimum 3 required for outlier detection).
+                        </span>
+                      </div>
+                    ) : inspectPart.price_flags.flag === "MEDIAN_UNAVAILABLE" ? (
+                      <div className="flex items-center gap-2 text-slate-700 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-slate-200 px-2 py-0.5 rounded">
+                          Benchmark
+                        </span>
+                        <span className="text-[11px]">
+                          Median benchmark price unavailable for this catalogue part.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-emerald-800 bg-emerald-50 p-2.5 rounded-xl border border-emerald-200">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span className="text-[11px]">
+                          Price within normal expected range (Catalogue median: £{Number(inspectPart.price_flags.median).toFixed(2)}, {inspectPart.price_flags.comparable_count} comparables).
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-1">
                   <span className="font-bold text-slate-800">Ownership & Category</span>
                   <div className="flex flex-wrap gap-4 text-slate-600 text-[11px]">
                     <span>Seller: <strong className="text-slate-900">{inspectPart.seller_name}</strong></span>
                     <span>Organisation: <strong className="text-slate-900">{inspectPart.organisation_name || "Personal Trading"}</strong></span>
+                    {inspectPart.catalogue_part_name && (
+                      <span>Catalogue Part: <strong className="text-amber-800">{inspectPart.catalogue_part_name}</strong></span>
+                    )}
                     <span>Condition: <strong>{inspectPart.condition}</strong></span>
                   </div>
                 </div>

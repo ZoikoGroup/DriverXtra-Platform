@@ -207,16 +207,18 @@ export default function LoginPage() {
                   6-Digit Authenticator Code
                 </label>
                 <div className="relative">
-                  <input
-                    type="text"
-                    maxLength={6}
-                    value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
-                    required
-                    autoFocus
-                    placeholder="000000"
-                    className="w-full h-12 px-3.5 pl-10 bg-slate-950 border border-slate-700 rounded-xl text-center text-lg tracking-[0.5em] font-mono text-white placeholder:text-slate-700 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
-                  />
+
+<input
+  type="email"
+  name="login-email"
+  autoComplete="off"
+  value={email}
+  onChange={(e) => setEmail(e.target.value)}
+  required
+  placeholder="name@organization.com"
+  className="w-full h-11 px-3.5 pl-10 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder:text-slate-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+/>
+
                   <KeyRound className="w-4 h-4 text-slate-500 absolute left-3.5 top-4 pointer-events-none" />
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 text-center">

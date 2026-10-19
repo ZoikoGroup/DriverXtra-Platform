@@ -918,6 +918,22 @@ export const api = {
       return Array.isArray(res) ? res : res.results || [];
     },
 
+    async getPartPriceHistory(id: string): Promise<PriceChange[]> {
+      const res = await apiRequest<PriceChange[] | { results: PriceChange[] }>(
+        `/marketplace/parts/${id}/price-history/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getCataloguePartOffers(cataloguePartId: string): Promise<CataloguePartOffer[]> {
+      const res = await apiRequest<CataloguePartOffer[] | { results: CataloguePartOffer[] }>(
+        `/marketplace/browse/parts/catalogue/${cataloguePartId}/offers/`,
+        { method: "GET", requiresAuth: false }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
     async listLowStockParts(status?: string): Promise<MarketplacePartListing[]> {
       const qs = status ? `?status=${encodeURIComponent(status)}` : "";
       const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
@@ -1090,6 +1106,7 @@ export interface PartSummary {
   id: string;
   name: string;
   part_number: string;
+  mpn?: string;
   category: string;
   category_name?: string;
   brand: string;
@@ -1233,8 +1250,17 @@ export interface MarketplacePartListing {
   category: string;
   category_name?: string;
   category_slug?: string;
+  catalogue_part?: string | null;
+  catalogue_part_name?: string | null;
   description?: string;
   price: string | number;
+  compare_at_price?: string | number | null;
+  price_flags?: {
+    flag: string;
+    median?: string | number | null;
+    comparable_count?: number;
+    deviation?: string | number | null;
+  };
   currency: string;
   stock_quantity: number;
   low_stock_threshold?: number;
@@ -1285,8 +1311,10 @@ export interface CreatePartListingPayload {
   mpn: string;
   oem_numbers?: string[];
   category: string;
+  catalogue_part?: string | null;
   description?: string;
   price: number | string;
+  compare_at_price?: number | string | null;
   currency?: string;
   stock_quantity?: number;
   low_stock_threshold?: number;
@@ -1328,4 +1356,32 @@ export interface StockAdjustmentResponse {
   message: string;
   movement: StockMovement;
   listing: MarketplacePartListing;
+}
+
+export interface PriceChange {
+  id: string;
+  listing: string;
+  old_price: string | number;
+  new_price: string | number;
+  old_compare_at_price?: string | number | null;
+  new_compare_at_price?: string | number | null;
+  actor?: string | null;
+  actor_name?: string | null;
+  note?: string;
+  created_at: string;
+}
+
+export interface CataloguePartOffer {
+  id: string;
+  price: string | number;
+  compare_at_price?: string | number | null;
+  currency: string;
+  condition: string;
+  stock_quantity: number;
+  low_stock_threshold?: number;
+  availability: "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK";
+  seller_name?: string;
+  organisation_name?: string | null;
+  primary_image_url?: string;
+  created_at: string;
 }

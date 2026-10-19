@@ -182,13 +182,15 @@ The JWT carries an `active_role` claim indicating the user's current execution c
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | `GET` | `/api/v1/marketplace/vehicles/` | Public | List approved public vehicle listings. |
-| `GET` | `/api/v1/marketplace/parts/` | Public | List approved public spare part listings. |
+| `GET` | `/api/v1/marketplace/browse/parts/` | Public | List approved public spare part listings. |
+| `GET` | `/api/v1/marketplace/browse/parts/catalogue/{catalogue_part_id}/offers/` | Public | List approved offers for a catalogue part sorted by price ascending, then newest. |
 | `GET` | `/api/v1/marketplace/seller/vehicles/` | Seller | List seller's own vehicle listings. |
 | `POST` | `/api/v1/marketplace/seller/vehicles/` | Seller | Create vehicle listing (enforces org OWNER/ADMIN). |
 | `PATCH` | `/api/v1/marketplace/seller/vehicles/{id}/` | Seller | Edit listing. Material changes demote to `PENDING_APPROVAL`. |
 | `POST` | `/api/v1/marketplace/seller/vehicles/{id}/resubmit/` | Seller | Resubmit rejected listing (creator or org OWNER/ADMIN). |
 | `POST` | `/api/v1/marketplace/parts/{id}/stock/` | Seller | Adjust part stock (`delta`, `reason`, `note`). Atomic row-lock protected; accepts ADJUSTMENT/CORRECTION. |
 | `GET` | `/api/v1/marketplace/parts/{id}/stock-history/` | Seller | Retrieve immutable audit ledger of stock movements for part. |
+| `GET` | `/api/v1/marketplace/parts/{id}/price-history/` | Seller | Retrieve immutable audit ledger of price changes for part (seller or org OWNER/ADMIN). |
 | `GET` | `/api/v1/marketplace/parts/low-stock/` | Seller | List seller's part listings at or below `low_stock_threshold`. |
 | `GET` | `/api/v1/admin/marketplace/vehicles/` | Staff (`listing.review`) | List vehicles in admin moderation queue. |
 | `POST` | `/api/v1/admin/marketplace/vehicles/{id}/review/` | Staff (`listing.review`) | Approve, reject, or request changes on vehicle. |
@@ -200,7 +202,7 @@ The JWT carries an `active_role` claim indicating the user's current execution c
 
 The test suite validates compliance with all architectural requirements:
 
-- **147 Tests Passing** (3 database trigger tests skipped when running under SQLite test configuration).
+- **160 Tests Passing** (3 database trigger tests skipped when running under SQLite test configuration).
 - Complete coverage across:
   - `tests/test_authentication.py`: Login, token refresh, logout revocation, suspended accounts.
   - `tests/test_registration.py`: BUYER-only enforcement, SELLER/WORKSHOP rejection, hashing.
@@ -210,6 +212,7 @@ The test suite validates compliance with all architectural requirements:
   - `tests/test_seller_onboarding.py`: Application lifecycle, role granting on approval, self-approval prevention.
   - `tests/test_marketplace.py`: Material field demotion, org OWNER/ADMIN rules, resubmit permissions, stock adjustments.
   - `tests/test_inventory_management.py`: Inventory service row-locking, negative stock prevention, zero-delta rejection, forbidden reason rejection, availability computation, low-stock filtering, audit logging, and migration backfill idempotency.
+  - `tests/test_offers_and_pricing.py`: Price validation, compare-at validation, MAX_LISTING_PRICE, active catalogue_part validation, atomic change_price with select_for_update and audit logging, approved demotion on price/compare_at/catalogue_part changes, immutable PriceChange ledger blocking update/delete, public catalogue offers endpoint, seller price-history permissions, and reviewer price flags (median, deviation, outlier warning, non-blocking).
   - `tests/test_roles_and_permissions.py`: Staff sub-roles, `HasPermission`, staff invite & set password, active role JWT, TOTP MFA, 15-minute access tokens, maker-checker `ApprovalRequest`.
   - `tests/test_garage.py` & `tests/test_catalogue.py`: Vehicle master and catalog endpoints.
 
@@ -222,7 +225,7 @@ cd backend
 
 Expected result:
 ```text
-======================= 147 passed, 3 skipped in 47.50s =======================
+======================= 160 passed, 3 skipped in 51.76s =======================
 ```
 
 ---
