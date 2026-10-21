@@ -1,14 +1,26 @@
+import uuid
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied, ValidationError as DRFValidationError
+from rest_framework.exceptions import (
+    PermissionDenied,
+    ValidationError as DRFValidationError,
+    NotAuthenticated,
+    NotFound,
+)
 from django.http import Http404
 from django.db import transaction
 from django.db.models import Q, F
 from django.utils import timezone
 from django.core.exceptions import ValidationError as DjangoValidationError
 from common.permissions import IsPlatformStaff, HasPermission
-from platform_core.audit.writer import record_audit_entry
+from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
 from apps.catalogue.models import Part
+from apps.garage.models import GarageVehicle
+from apps.marketplace.fitment import (
+    get_conflicting_variants,
+    batch_evaluate_listings_fitment,
+    evaluate_listing_single_variant,
+)
 from apps.marketplace.models import (
     VehicleListing,
     SparePartListing,
@@ -138,6 +150,7 @@ class MarketplacePartListView(generics.ListAPIView):
     """Public / Buyer endpoint to search and browse approved spare parts for sale.
 
     GET /api/v1/marketplace/browse/parts/
+    Optional ?fits_vehicle=<garage_vehicle_id> annotates results with fitment evaluation.
     """
     permission_classes = [permissions.AllowAny]
     serializer_class = SparePartListingPublicSerializer
@@ -146,7 +159,7 @@ class MarketplacePartListView(generics.ListAPIView):
         queryset = SparePartListing.objects.filter(
             status=ListingStatusChoices.APPROVED,
             is_active=True,
-        ).select_related('category', 'seller', 'organisation').prefetch_related('compatible_variants')
+        ).select_related('category', 'seller', 'organisation', 'catalogue_part').prefetch_related('compatible_variants')
 
         params = self.request.query_params
 
@@ -189,11 +202,60 @@ class MarketplacePartListView(generics.ListAPIView):
 
         return queryset.distinct()
 
+    def list(self, request, *args, **kwargs):
+        fits_vehicle = request.query_params.get('fits_vehicle')
+        target_variant = None
+        no_variant = False
+
+        if fits_vehicle:
+            if not (request.user and request.user.is_authenticated):
+                raise NotAuthenticated("Authentication credentials were not provided.")
+            try:
+                v_uuid = uuid.UUID(str(fits_vehicle))
+            except (ValueError, AttributeError, TypeError):
+                raise DRFValidationError({"fits_vehicle": "Invalid vehicle UUID format."})
+
+            garage_vehicle = GarageVehicle.objects.filter(
+                id=v_uuid,
+                user=request.user,
+                is_archived=False,
+            ).select_related('vehicle_variant').first()
+            if not garage_vehicle:
+                raise NotFound("Garage vehicle not found.")
+
+            if garage_vehicle.vehicle_variant:
+                target_variant = garage_vehicle.vehicle_variant
+            else:
+                no_variant = True
+
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        listings_to_evaluate = page if page is not None else list(queryset)
+
+        if fits_vehicle and target_variant and listings_to_evaluate:
+            eval_map = batch_evaluate_listings_fitment(listings_to_evaluate, target_variant)
+            for listing in listings_to_evaluate:
+                listing._annotated_fitment = eval_map.get(listing.id)
+
+        serializer_context = self.get_serializer_context()
+        if fits_vehicle:
+            serializer_context['fits_vehicle'] = True
+            serializer_context['fits_vehicle_variant'] = target_variant
+            serializer_context['fits_vehicle_no_variant'] = no_variant
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context=serializer_context)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True, context=serializer_context)
+        return Response(serializer.data)
+
 
 class MarketplacePartDetailView(generics.RetrieveAPIView):
     """Public / Buyer endpoint to view full details of an approved spare part for sale.
 
     GET /api/v1/marketplace/browse/parts/<id>/
+    Optional ?fits_vehicle=<garage_vehicle_id> annotates response with fitment evaluation.
     """
     permission_classes = [permissions.AllowAny]
     serializer_class = SparePartListingPublicSerializer
@@ -203,7 +265,43 @@ class MarketplacePartDetailView(generics.RetrieveAPIView):
         return SparePartListing.objects.filter(
             status=ListingStatusChoices.APPROVED,
             is_active=True,
-        ).select_related('category', 'seller', 'organisation').prefetch_related('compatible_variants')
+        ).select_related('category', 'seller', 'organisation', 'catalogue_part').prefetch_related('compatible_variants')
+
+    def retrieve(self, request, *args, **kwargs):
+        fits_vehicle = request.query_params.get('fits_vehicle')
+        target_variant = None
+        no_variant = False
+
+        if fits_vehicle:
+            if not (request.user and request.user.is_authenticated):
+                raise NotAuthenticated("Authentication credentials were not provided.")
+            try:
+                v_uuid = uuid.UUID(str(fits_vehicle))
+            except (ValueError, AttributeError, TypeError):
+                raise DRFValidationError({"fits_vehicle": "Invalid vehicle UUID format."})
+
+            garage_vehicle = GarageVehicle.objects.filter(
+                id=v_uuid,
+                user=request.user,
+                is_archived=False,
+            ).select_related('vehicle_variant').first()
+            if not garage_vehicle:
+                raise NotFound("Garage vehicle not found.")
+
+            if garage_vehicle.vehicle_variant:
+                target_variant = garage_vehicle.vehicle_variant
+            else:
+                no_variant = True
+
+        instance = self.get_object()
+        serializer_context = self.get_serializer_context()
+        if fits_vehicle:
+            serializer_context['fits_vehicle'] = True
+            serializer_context['fits_vehicle_variant'] = target_variant
+            serializer_context['fits_vehicle_no_variant'] = no_variant
+
+        serializer = self.get_serializer(instance, context=serializer_context)
+        return Response(serializer.data)
 
 
 class CataloguePartOffersView(generics.ListAPIView):
@@ -444,6 +542,29 @@ class SellerPartListCreateView(generics.ListCreateAPIView):
         if self.request.data.get('status') == ListingStatusChoices.DRAFT:
             initial_status = ListingStatusChoices.DRAFT
 
+        # Submission gate: non-draft creation cannot enter PENDING_APPROVAL with CONFLICT
+        if initial_status != ListingStatusChoices.DRAFT:
+            cat_part = serializer.validated_data.get('catalogue_part')
+            variants = serializer.validated_data.get('compatible_variants', [])
+            conflicts = get_conflicting_variants(cat_part, variants)
+            if conflicts:
+                corr_id = getattr(self.request, 'correlation_id', '')
+                record_denied_audit_entry(
+                    action="listing:submit",
+                    resource_type="SparePartListing",
+                    resource_id="",
+                    reason_code="FITMENT_CONFLICT",
+                    correlation_id=corr_id,
+                    actor_id=user.id,
+                    metadata={
+                        "conflicting_variant_ids": [c["variant_id"] for c in conflicts],
+                    },
+                )
+                raise DRFValidationError({
+                    "compatible_variants": "Listing contains compatible variants that conflict with catalogue records (DOES_NOT_FIT).",
+                    "conflicts": conflicts,
+                })
+
         requested_stock = serializer.validated_data.get('stock_quantity', 1)
 
         with transaction.atomic():
@@ -543,6 +664,33 @@ class SellerPartDetailUpdateView(generics.RetrieveUpdateAPIView):
                 update_data['submitted_at'] = timezone.now()
                 update_data['rejection_reason'] = ""
 
+        # Gate on updates moving to PENDING_APPROVAL
+        if update_data.get('status') == ListingStatusChoices.PENDING_APPROVAL:
+            target_cat_part = serializer.validated_data.get('catalogue_part', instance.catalogue_part)
+            target_variants = serializer.validated_data.get(
+                'compatible_variants',
+                list(instance.compatible_variants.all())
+            )
+            conflicts = get_conflicting_variants(target_cat_part, target_variants)
+            if conflicts:
+                corr_id = getattr(self.request, 'correlation_id', '')
+                record_denied_audit_entry(
+                    action="listing:submit",
+                    resource_type="SparePartListing",
+                    resource_id=str(instance.id),
+                    reason_code="FITMENT_CONFLICT",
+                    correlation_id=corr_id,
+                    actor_id=self.request.user.id,
+                    metadata={
+                        "listing_id": str(instance.id),
+                        "conflicting_variant_ids": [c["variant_id"] for c in conflicts],
+                    },
+                )
+                raise DRFValidationError({
+                    "compatible_variants": "Listing contains compatible variants that conflict with catalogue records (DOES_NOT_FIT).",
+                    "conflicts": conflicts,
+                })
+
         serializer.save(**update_data)
 
 
@@ -578,6 +726,35 @@ class SellerPartResubmitView(views.APIView):
         if listing.status == ListingStatusChoices.PENDING_APPROVAL:
             return Response(
                 {"error": "This listing is already pending approval."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Submission gate: cannot enter PENDING_APPROVAL with CONFLICT
+        conflicts = get_conflicting_variants(listing.catalogue_part, listing.compatible_variants.all())
+        if conflicts:
+            corr_id = getattr(request, 'correlation_id', '')
+            record_denied_audit_entry(
+                action="listing:submit",
+                resource_type="SparePartListing",
+                resource_id=str(listing.id),
+                reason_code="FITMENT_CONFLICT",
+                correlation_id=corr_id,
+                actor_id=user.id,
+                metadata={
+                    "listing_id": str(listing.id),
+                    "conflicting_variant_ids": [c["variant_id"] for c in conflicts],
+                },
+            )
+            return Response(
+                {
+                    "status": "error",
+                    "code": 400,
+                    "message": "Listing cannot be submitted because it contains compatible variants that conflict with canonical catalogue records (DOES_NOT_FIT).",
+                    "details": {
+                        "compatible_variants": "Listing contains compatible variants that conflict with catalogue records.",
+                        "conflicts": conflicts,
+                    },
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -909,6 +1086,20 @@ class AdminPartListingReviewView(views.APIView):
         admin_notes = serializer.validated_data.get('admin_notes', '')
 
         if action == 'APPROVE':
+            conflicts = get_conflicting_variants(listing.catalogue_part, listing.compatible_variants.all())
+            if conflicts:
+                return Response(
+                    {
+                        "status": "error",
+                        "code": 400,
+                        "message": "Cannot approve listing with conflicting fitment records.",
+                        "details": {
+                            "compatible_variants": "Listing contains compatible variants that conflict with catalogue records (DOES_NOT_FIT).",
+                            "conflicts": conflicts,
+                        },
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             listing.status = ListingStatusChoices.APPROVED
             listing.rejection_reason = ""
         elif action == 'REJECT':

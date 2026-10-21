@@ -9,7 +9,9 @@ import {
   VehicleModel,
   PartCategory,
   CataloguePartOffer,
+  GarageVehicle,
 } from "@/lib/api/client";
+import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
   Search,
   Car,
@@ -24,10 +26,19 @@ import {
   MapPin,
   PackageCheck,
   Tag,
+  AlertTriangle,
+  XCircle,
+  Info,
+  HelpCircle,
 } from "lucide-react";
 
 export default function MarketplaceBrowseView() {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<"vehicles" | "parts">("vehicles");
+
+  // Garage Vehicles State (Phase 3 Part C)
+  const [garageVehicles, setGarageVehicles] = useState<GarageVehicle[]>([]);
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string>("");
 
   // Vehicles state
   const [vehicles, setVehicles] = useState<MarketplaceVehicleListing[]>([]);
@@ -96,6 +107,34 @@ export default function MarketplaceBrowseView() {
     }
   }, [vehicleSearch, selectedMake, selectedModel, fuelType, transmission, maxVehiclePrice]);
 
+  // Load buyer garage vehicles when logged in (Phase 3 Part C)
+  useEffect(() => {
+    if (!user) return;
+    let ignore = false;
+    api.garage
+      .listVehicles()
+      .then((res) => {
+        if (ignore) return;
+        const active = (res || []).filter((v) => !v.is_archived);
+        setGarageVehicles(active);
+        // Default to primary vehicle or first active vehicle
+        const primary = active.find((v) => v.is_primary) || active[0];
+        if (primary) {
+          setSelectedVehicleId(primary.id);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to load user garage vehicles for fitment", err);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [user]);
+
+  // Selected garage vehicle info
+  const selectedGarageVehicle = garageVehicles.find((v) => v.id === selectedVehicleId) || null;
+  const isVehicleUnlinked = Boolean(selectedGarageVehicle && !selectedGarageVehicle.vehicle_variant);
+
   // Fetch approved parts
   const fetchParts = useCallback(async () => {
     setPartsLoading(true);
@@ -106,6 +145,7 @@ export default function MarketplaceBrowseView() {
       if (partMpn) params.mpn = partMpn;
       if (selectedCategory) params.category_id = selectedCategory;
       if (maxPartPrice) params.price_max = maxPartPrice;
+      if (selectedVehicleId) params.fits_vehicle = selectedVehicleId;
 
       const data = await api.marketplace.browseParts(params);
       setParts(data);
@@ -114,7 +154,7 @@ export default function MarketplaceBrowseView() {
     } finally {
       setPartsLoading(false);
     }
-  }, [partSearch, partBrand, partMpn, selectedCategory, maxPartPrice]);
+  }, [partSearch, partBrand, partMpn, selectedCategory, maxPartPrice, selectedVehicleId]);
 
   useEffect(() => {
     let ignore = false;
@@ -138,6 +178,7 @@ export default function MarketplaceBrowseView() {
           if (partMpn) params.mpn = partMpn;
           if (selectedCategory) params.category_id = selectedCategory;
           if (maxPartPrice) params.price_max = maxPartPrice;
+          if (selectedVehicleId) params.fits_vehicle = selectedVehicleId;
 
           const data = await api.marketplace.browseParts(params);
           if (!ignore) setParts(data);
@@ -150,11 +191,33 @@ export default function MarketplaceBrowseView() {
     return () => {
       ignore = true;
     };
-  }, [activeTab, vehicleSearch, selectedMake, selectedModel, fuelType, transmission, maxVehiclePrice, partSearch, partBrand, partMpn, selectedCategory, maxPartPrice]);
+  }, [
+    activeTab,
+    vehicleSearch,
+    selectedMake,
+    selectedModel,
+    fuelType,
+    transmission,
+    maxVehiclePrice,
+    partSearch,
+    partBrand,
+    partMpn,
+    selectedCategory,
+    maxPartPrice,
+    selectedVehicleId,
+  ]);
 
   // Open part inspector & load other offers for linked catalogue part (Phase 3 Part B)
   const handleSelectPart = (part: MarketplacePartListing) => {
     setSelectedPart(part);
+    if (selectedVehicleId) {
+      api.marketplace
+        .getPart(part.id, { fits_vehicle: selectedVehicleId })
+        .then((detailed) => {
+          setSelectedPart(detailed);
+        })
+        .catch(console.error);
+    }
     if (part.catalogue_part) {
       setOffersLoading(true);
       api.marketplace
@@ -167,6 +230,65 @@ export default function MarketplaceBrowseView() {
         .finally(() => setOffersLoading(false));
     } else {
       setCatalogueOffers([]);
+    }
+  };
+
+  // Render buyer fitment badge (Phase 3 Part C)
+  const renderFitmentBadge = (fitment?: { status: string; qualifications: string; source: string }) => {
+    if (!fitment) return null;
+    switch (fitment.status) {
+      case "VERIFIED":
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Verified fit</span>
+          </span>
+        );
+      case "CONDITIONAL":
+        return (
+          <span
+            className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300"
+            title={fitment.qualifications || "Fits with conditions"}
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+            <span>Fits with conditions</span>
+            {fitment.qualifications && (
+              <span className="text-[10px] font-normal italic opacity-90 truncate max-w-xs">
+                ({fitment.qualifications})
+              </span>
+            )}
+          </span>
+        );
+      case "SELLER_CLAIMED":
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-sky-100 text-sky-800 border border-sky-300">
+            <Info className="w-3.5 h-3.5 text-sky-600" />
+            <span>Seller says it fits (not verified)</span>
+          </span>
+        );
+      case "CONFLICT":
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-800 border border-rose-300">
+            <XCircle className="w-3.5 h-3.5 text-rose-600" />
+            <span>Does not fit</span>
+          </span>
+        );
+      case "UNKNOWN":
+      default:
+        return (
+          <span
+            className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 border border-slate-300"
+            title={fitment.qualifications || "Fitment unknown"}
+          >
+            <HelpCircle className="w-3.5 h-3.5 text-slate-500" />
+            <span>Fitment unknown</span>
+            {fitment.qualifications && fitment.qualifications !== "none" && (
+              <span className="text-[10px] font-normal italic opacity-80">
+                ({fitment.qualifications})
+              </span>
+            )}
+          </span>
+        );
     }
   };
 
@@ -419,6 +541,57 @@ export default function MarketplaceBrowseView() {
       ========================================================================= */}
       {activeTab === "parts" && (
         <div className="space-y-6">
+          {/* Buyer Vehicle Fitment Selector (Phase 3 Part C) */}
+          {user && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-white space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                    <Car className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-white block">Vehicle Fitment Verification</span>
+                    <span className="text-[11px] text-slate-400">
+                      Select a vehicle from your garage to evaluate part compatibility.
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedVehicleId}
+                    onChange={(e) => setSelectedVehicleId(e.target.value)}
+                    className="px-3 py-2 text-xs bg-slate-950 border border-slate-700 text-white rounded-xl focus:outline-none focus:border-amber-500 max-w-xs"
+                  >
+                    <option value="">None (Browse all parts unannotated)</option>
+                    {garageVehicles.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.year} {v.make} {v.model} {v.trim || ""} {v.registration_plate ? `(${v.registration_plate})` : ""}{v.is_primary ? " ★ Primary" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedVehicleId && (
+                    <button
+                      onClick={() => setSelectedVehicleId("")}
+                      className="px-2.5 py-2 text-xs text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-xl transition-colors"
+                      title="Clear vehicle filter"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Notice when selected garage vehicle has no linked variant */}
+              {isVehicleUnlinked && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-300 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Link this vehicle to the catalogue to check fitment (this vehicle does not have a catalogue variant assigned).</span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Part Filter Bar */}
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3">
             <div className="flex flex-col md:flex-row items-center gap-3">
@@ -518,22 +691,25 @@ export default function MarketplaceBrowseView() {
                       <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
                         {p.brand}
                       </span>
-                      {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
-                        <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
-                          <X className="w-3 h-3" />
-                          <span>Out of Stock</span>
-                        </span>
-                      ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
-                        <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
-                          <PackageCheck className="w-3 h-3" />
-                          <span>Low Stock ({p.stock_quantity} left)</span>
-                        </span>
-                      ) : (
-                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
-                          <CheckCircle2 className="w-3 h-3" />
-                          <span>In Stock ({p.stock_quantity})</span>
-                        </span>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {p.fitment && renderFitmentBadge(p.fitment)}
+                        {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
+                          <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
+                            <X className="w-3 h-3" />
+                            <span>Out of Stock</span>
+                          </span>
+                        ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
+                            <PackageCheck className="w-3 h-3" />
+                            <span>Low Stock ({p.stock_quantity} left)</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>In Stock ({p.stock_quantity})</span>
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     <div>
@@ -752,6 +928,36 @@ export default function MarketplaceBrowseView() {
                 <p className="font-bold text-slate-900 mt-0.5">{selectedPart.condition}</p>
               </div>
             </div>
+
+            {/* Buyer Vehicle Fitment Verification (Phase 3 Part C) */}
+            {selectedGarageVehicle && (
+              <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Car className="w-4 h-4 text-amber-600" />
+                    <span className="font-bold text-slate-900">
+                      Evaluated for: {selectedGarageVehicle.year} {selectedGarageVehicle.make} {selectedGarageVehicle.model} {selectedGarageVehicle.trim || ""}
+                      {selectedGarageVehicle.registration_plate ? ` (${selectedGarageVehicle.registration_plate})` : ""}
+                    </span>
+                  </div>
+                  {renderFitmentBadge(selectedPart.fitment)}
+                </div>
+
+                {isVehicleUnlinked ? (
+                  <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Link this vehicle to the catalogue to check fitment</span>
+                  </div>
+                ) : (
+                  selectedPart.fitment?.qualifications && selectedPart.fitment.qualifications !== "none" && (
+                    <div className="p-2.5 bg-amber-50/70 border border-amber-200 rounded-xl text-[11px] text-amber-900">
+                      <span className="font-bold block mb-0.5">Fitment Conditions / Catalogue Notes:</span>
+                      <span>{selectedPart.fitment.qualifications}</span>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
 
             {selectedPart.oem_numbers && selectedPart.oem_numbers.length > 0 && (
               <div className="space-y-1 text-xs">

@@ -807,15 +807,16 @@ export const api = {
       const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
       const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
         `/marketplace/browse/parts/${qs}`,
-        { method: "GET", requiresAuth: false }
+        { method: "GET", requiresAuth: Boolean(params?.fits_vehicle) }
       );
       return Array.isArray(res) ? res : res.results || [];
     },
 
-    async getPart(id: string): Promise<MarketplacePartListing> {
-      return apiRequest<MarketplacePartListing>(`/marketplace/browse/parts/${id}/`, {
+    async getPart(id: string, params?: Record<string, string>): Promise<MarketplacePartListing> {
+      const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
+      return apiRequest<MarketplacePartListing>(`/marketplace/browse/parts/${id}/${qs}`, {
         method: "GET",
-        requiresAuth: false,
+        requiresAuth: Boolean(params?.fits_vehicle),
       });
     },
 
@@ -1237,6 +1238,27 @@ export interface MarketplaceVehicleListing {
   updated_at: string;
 }
 
+export interface FitmentVerificationItem {
+  variant_id: string;
+  display_name: string;
+  status: "VERIFIED" | "CONDITIONAL" | "CONFLICT" | "SELLER_CLAIMED" | "UNKNOWN";
+  qualifications: string;
+  source: "CATALOGUE" | "SELLER" | "NONE";
+}
+
+export interface FitmentSummary {
+  verified: number;
+  conditional: number;
+  seller_claimed: number;
+  conflict: number;
+}
+
+export interface BuyerPartFitment {
+  status: "VERIFIED" | "CONDITIONAL" | "CONFLICT" | "SELLER_CLAIMED" | "UNKNOWN";
+  qualifications: string;
+  source: "CATALOGUE" | "SELLER" | "NONE";
+}
+
 export interface MarketplacePartListing {
   id: string;
   seller?: string;
@@ -1270,6 +1292,9 @@ export interface MarketplacePartListing {
   images?: string[];
   compatible_variants?: VehicleVariant[];
   compatibility_notes?: string;
+  fitment?: BuyerPartFitment;
+  fitment_verification?: FitmentVerificationItem[];
+  fitment_summary?: FitmentSummary;
   status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
   submitted_at?: string;
   reviewed_at?: string | null;

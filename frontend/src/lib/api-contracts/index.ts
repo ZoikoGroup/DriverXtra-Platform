@@ -148,6 +148,12 @@ export const DOCUMENTED_API_CONTRACTS: Record<string, ApiContractDescriptor> = {
     sourceDoc: "Doc 07 §28",
     description: "Fetch immutable audit ledger of price modifications for a spare part listing."
   },
+  BROWSE_PARTS_FITMENT: {
+    method: "GET",
+    path: "/api/v1/marketplace/browse/parts/?fits_vehicle={garage_vehicle_id}",
+    sourceDoc: "Doc 07 §29",
+    description: "Public browse of spare parts annotated with fitment verification for a buyer garage vehicle."
+  },
 
   // Commerce & Orders (Doc 09)
   PLACE_ORDER: {

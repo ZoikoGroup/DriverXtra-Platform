@@ -181,20 +181,31 @@ The JWT carries an `active_role` claim indicating the user's current execution c
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/v1/marketplace/vehicles/` | Public | List approved public vehicle listings. |
-| `GET` | `/api/v1/marketplace/browse/parts/` | Public | List approved public spare part listings. |
+| `GET` | `/api/v1/marketplace/browse/vehicles/` | Public | List approved public vehicle listings. |
+| `GET` | `/api/v1/marketplace/browse/vehicles/{id}/` | Public | Retrieve public details for an approved vehicle listing. |
+| `GET` | `/api/v1/marketplace/browse/parts/` | Public (Bearer optional) | List approved public spare part listings. Accepts optional `?fits_vehicle=<garage_vehicle_id>` (requires Bearer auth) to annotate results with buyer vehicle fitment verification without filtering or reordering. |
+| `GET` | `/api/v1/marketplace/browse/parts/{id}/` | Public (Bearer optional) | Retrieve public details for an approved spare part listing. Accepts optional `?fits_vehicle=<garage_vehicle_id>` (requires Bearer auth) to annotate with buyer vehicle fitment. |
 | `GET` | `/api/v1/marketplace/browse/parts/catalogue/{catalogue_part_id}/offers/` | Public | List approved offers for a catalogue part sorted by price ascending, then newest. |
-| `GET` | `/api/v1/marketplace/seller/vehicles/` | Seller | List seller's own vehicle listings. |
-| `POST` | `/api/v1/marketplace/seller/vehicles/` | Seller | Create vehicle listing (enforces org OWNER/ADMIN). |
-| `PATCH` | `/api/v1/marketplace/seller/vehicles/{id}/` | Seller | Edit listing. Material changes demote to `PENDING_APPROVAL`. |
-| `POST` | `/api/v1/marketplace/seller/vehicles/{id}/resubmit/` | Seller | Resubmit rejected listing (creator or org OWNER/ADMIN). |
+| `GET` | `/api/v1/marketplace/vehicles/` | Seller | List seller's own vehicle listings. |
+| `POST` | `/api/v1/marketplace/vehicles/` | Seller | Create vehicle listing (enforces org OWNER/ADMIN). |
+| `PATCH` | `/api/v1/marketplace/vehicles/{id}/` | Seller | Edit listing. Material changes demote to `PENDING_APPROVAL`. |
+| `POST` | `/api/v1/marketplace/vehicles/{id}/submit/` | Seller | Submit draft vehicle for compliance review. |
+| `POST` | `/api/v1/marketplace/vehicles/{id}/resubmit/` | Seller | Resubmit rejected listing (creator or org OWNER/ADMIN). |
+| `GET` | `/api/v1/marketplace/parts/` | Seller | List seller's own spare part listings with computed `fitment_verification` and `fitment_summary`. |
+| `POST` | `/api/v1/marketplace/parts/` | Seller | Create spare part listing (non-draft submissions gate: blocked if declared variant has CONFLICT). |
+| `PATCH` | `/api/v1/marketplace/parts/{id}/` | Seller | Edit listing. Material changes demote to `PENDING_APPROVAL`; atomic conflict gate prevents demotion if edit introduces CONFLICT. |
+| `POST` | `/api/v1/marketplace/parts/{id}/submit/` | Seller | Submit draft part for approval (blocked on CONFLICT). |
+| `POST` | `/api/v1/marketplace/parts/{id}/resubmit/` | Seller | Resubmit rejected part for review (blocked on CONFLICT). |
 | `POST` | `/api/v1/marketplace/parts/{id}/stock/` | Seller | Adjust part stock (`delta`, `reason`, `note`). Atomic row-lock protected; accepts ADJUSTMENT/CORRECTION. |
 | `GET` | `/api/v1/marketplace/parts/{id}/stock-history/` | Seller | Retrieve immutable audit ledger of stock movements for part. |
 | `GET` | `/api/v1/marketplace/parts/{id}/price-history/` | Seller | Retrieve immutable audit ledger of price changes for part (seller or org OWNER/ADMIN). |
 | `GET` | `/api/v1/marketplace/parts/low-stock/` | Seller | List seller's part listings at or below `low_stock_threshold`. |
-| `GET` | `/api/v1/admin/marketplace/vehicles/` | Staff (`listing.review`) | List vehicles in admin moderation queue. |
-| `POST` | `/api/v1/admin/marketplace/vehicles/{id}/review/` | Staff (`listing.review`) | Approve, reject, or request changes on vehicle. |
-| `POST` | `/api/v1/admin/marketplace/parts/{id}/review/` | Staff (`listing.review`) | Approve, reject, or request changes on part. |
+| `GET` | `/api/v1/marketplace/admin/vehicles/` | Staff (`listing.review`) | List vehicles in admin moderation queue. |
+| `GET` | `/api/v1/marketplace/admin/vehicles/{id}/` | Staff (`listing.review`) | Retrieve admin details for a vehicle in review queue. |
+| `POST` | `/api/v1/marketplace/admin/vehicles/{id}/review/` | Staff (`listing.review`) | Approve, reject, or request changes on vehicle. |
+| `GET` | `/api/v1/marketplace/admin/parts/` | Staff (`listing.review`) | List spare parts in admin moderation queue with computed fitment summaries. |
+| `GET` | `/api/v1/marketplace/admin/parts/{id}/` | Staff (`listing.review`) | Retrieve admin details for a spare part listing. |
+| `POST` | `/api/v1/marketplace/admin/parts/{id}/review/` | Staff (`listing.review`) | Approve, reject, or request changes on part (APPROVE blocked if listing has CONFLICT). |
 
 ---
 
@@ -202,7 +213,7 @@ The JWT carries an `active_role` claim indicating the user's current execution c
 
 The test suite validates compliance with all architectural requirements:
 
-- **160 Tests Passing** (3 database trigger tests skipped when running under SQLite test configuration).
+- **179 Tests Passing** (3 database trigger tests skipped when running under SQLite test configuration).
 - Complete coverage across:
   - `tests/test_authentication.py`: Login, token refresh, logout revocation, suspended accounts.
   - `tests/test_registration.py`: BUYER-only enforcement, SELLER/WORKSHOP rejection, hashing.
@@ -213,6 +224,7 @@ The test suite validates compliance with all architectural requirements:
   - `tests/test_marketplace.py`: Material field demotion, org OWNER/ADMIN rules, resubmit permissions, stock adjustments.
   - `tests/test_inventory_management.py`: Inventory service row-locking, negative stock prevention, zero-delta rejection, forbidden reason rejection, availability computation, low-stock filtering, audit logging, and migration backfill idempotency.
   - `tests/test_offers_and_pricing.py`: Price validation, compare-at validation, MAX_LISTING_PRICE, active catalogue_part validation, atomic change_price with select_for_update and audit logging, approved demotion on price/compare_at/catalogue_part changes, immutable PriceChange ledger blocking update/delete, public catalogue offers endpoint, seller price-history permissions, and reviewer price flags (median, deviation, outlier warning, non-blocking).
+  - `tests/test_fitment_verification.py`: Phase 3 Part C spare parts fitment verification service, 5-status vocabulary (VERIFIED, CONDITIONAL, CONFLICT, SELLER_CLAIMED, UNKNOWN), universal part evaluation preservation, single-query batch evaluations (constant O(1) query count), submission gating on create/submit/resubmit/material-edit with atomic rollback, admin review approve gate, public buyer fits_vehicle parameter handling (401 unauth, 404 non-owner/archived, 400 invalid UUID, unlinked vehicle UNKNOWN, annotation without filtering/reordering), and seller permission isolation.
   - `tests/test_roles_and_permissions.py`: Staff sub-roles, `HasPermission`, staff invite & set password, active role JWT, TOTP MFA, 15-minute access tokens, maker-checker `ApprovalRequest`.
   - `tests/test_garage.py` & `tests/test_catalogue.py`: Vehicle master and catalog endpoints.
 
@@ -225,7 +237,7 @@ cd backend
 
 Expected result:
 ```text
-======================= 160 passed, 3 skipped in 51.76s =======================
+======================= 179 passed, 3 skipped in ~65s =======================
 ```
 
 ---
