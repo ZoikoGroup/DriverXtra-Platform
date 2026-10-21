@@ -183,7 +183,26 @@ The JWT carries an `active_role` claim indicating the user's current execution c
 |---|---|---|---|
 | `GET` | `/api/v1/marketplace/browse/vehicles/` | Public | List approved public vehicle listings. |
 | `GET` | `/api/v1/marketplace/browse/vehicles/{id}/` | Public | Retrieve public details for an approved vehicle listing. |
-| `GET` | `/api/v1/marketplace/browse/parts/` | Public (Bearer optional) | List approved public spare part listings. Accepts optional `?fits_vehicle=<garage_vehicle_id>` (requires Bearer auth) to annotate results with buyer vehicle fitment verification without filtering or reordering. |
+| `GET` | `/api/v1/marketplace/browse/parts/` | Public (Bearer optional) | List approved public spare part listings with deterministic sorting, multi-attribute filtering, pre-pagination fitment filtering, and aggregated facet counts. |
+
+#### Spare Parts Browse Query Parameters (`/api/v1/marketplace/browse/parts/`)
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `search` | `string` | No | None | Keyword query tokenised on whitespace matching `name`, `brand`, `mpn`, `oem_numbers`, and `description`. Matches determine relevance ordering when `sort=relevance`. |
+| `category_id` | `UUID` | No | None | Filter parts belonging to a specific `PartCategory`. |
+| `brand` | `string` | No | None | Case-insensitive substring match against part brand. |
+| `mpn` | `string` | No | None | Case-insensitive substring match against Manufacturer Part Number. |
+| `price_min` | `decimal` | No | None | Filter parts with `price >= price_min`. |
+| `price_max` | `decimal` | No | None | Filter parts with `price <= price_max`. |
+| `sort` | `string` | No | `newest` | Ordering strategy: `newest` (`-created_at, id`), `relevance` (exact MPN/OEM > prefix MPN > brand > name > description), `price_asc` (`price, id`), `price_desc` (`-price, id`). Invalid value returns structured 400. |
+| `condition` | `string` | No | None | Comma-separated list of valid `PartConditionChoices` (e.g. `NEW,REFURBISHED`). Invalid choice returns structured 400. |
+| `in_stock` | `boolean` | No | None | `true` filters to `stock_quantity > 0`. `false` returns both in-stock and out-of-stock items (default browse behavior). Invalid value returns structured 400. |
+| `fits_vehicle` | `UUID` | No | None | Active garage vehicle ID belonging to authenticated user. Annotates each listing with `fitment` verification without filtering or reordering. Requires Bearer authentication. |
+| `fits_only` | `boolean` | No | `false` | When `true`, filters the database queryset pre-pagination to listings whose fitment status for the selected vehicle is `VERIFIED` or `CONDITIONAL`. Requires `fits_vehicle` (missing returns 400). If garage vehicle has no catalogue variant, returns an empty list. |
+| `include_facets` | `boolean` | No | `false` | When `true`, computes aggregated counts across `brands`, `categories` (`id`, `name`, `slug`, `count`), and `conditions` over the full filtered queryset before pagination and includes a top-level `facets` payload. |
+| `page` | `integer` | No | `1` | Page number for standard DRF pagination. |
+| `page_size` | `integer` | No | `20` | Results per page (clamped at 50; values < 1 or non-integers return structured 400). |
 | `GET` | `/api/v1/marketplace/browse/parts/{id}/` | Public (Bearer optional) | Retrieve public details for an approved spare part listing. Accepts optional `?fits_vehicle=<garage_vehicle_id>` (requires Bearer auth) to annotate with buyer vehicle fitment. |
 | `GET` | `/api/v1/marketplace/browse/parts/catalogue/{catalogue_part_id}/offers/` | Public | List approved offers for a catalogue part sorted by price ascending, then newest. |
 | `GET` | `/api/v1/marketplace/vehicles/` | Seller | List seller's own vehicle listings. |
@@ -213,8 +232,9 @@ The JWT carries an `active_role` claim indicating the user's current execution c
 
 The test suite validates compliance with all architectural requirements:
 
-- **179 Tests Passing** (3 database trigger tests skipped when running under SQLite test configuration).
+- **206 Tests Passing** (3 database trigger tests skipped when running under SQLite test configuration).
 - Complete coverage across:
+  - `tests/test_search_and_browse_parts.py`: Phase 3 Part D public parts browse search, tokenised relevance ranking (MPN > OEM > brand > name > description), deterministic sorting, pagination clamping at 50, comma-separated condition filter, in-stock filter, pre-pagination fits_only filtering with 100% Part C decision-table parity, aggregated facet counts, and constant query counts.
   - `tests/test_authentication.py`: Login, token refresh, logout revocation, suspended accounts.
   - `tests/test_registration.py`: BUYER-only enforcement, SELLER/WORKSHOP rejection, hashing.
   - `tests/test_email_verification_and_password_reset.py`: Verification, resend, reset single-use, 1h expiry, session revocation.
@@ -237,7 +257,7 @@ cd backend
 
 Expected result:
 ```text
-======================= 179 passed, 3 skipped in ~65s =======================
+======================= 206 passed, 3 skipped in ~65s =======================
 ```
 
 ---

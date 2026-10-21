@@ -73,6 +73,8 @@ export default function LoginPage() {
     clearAuthError();
 
     const result = await login(email, password);
+    console.log("[Login] Result:", result);
+console.log("[Login] Auth error:", authError);
     setIsSubmitting(false);
 
     if (result.success) {
@@ -87,6 +89,7 @@ export default function LoginPage() {
 
   const handleMfaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    console.log("LOGIN BUTTON CLICKED");
     if (!mfaCode || mfaCode.trim().length !== 6) {
       setError("Please enter a valid 6-digit verification code.");
       return;
