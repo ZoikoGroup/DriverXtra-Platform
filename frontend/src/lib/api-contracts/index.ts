@@ -150,9 +150,9 @@ export const DOCUMENTED_API_CONTRACTS: Record<string, ApiContractDescriptor> = {
   },
   BROWSE_PARTS_FITMENT: {
     method: "GET",
-    path: "/api/v1/marketplace/browse/parts/?fits_vehicle={garage_vehicle_id}",
-    sourceDoc: "Doc 07 §29",
-    description: "Public browse of spare parts annotated with fitment verification for a buyer garage vehicle."
+    path: "/api/v1/marketplace/browse/parts/?sort={newest|price_asc|price_desc|relevance}&search={q}&condition={NEW,USED,...}&in_stock={bool}&fits_vehicle={id}&fits_only={bool}&include_facets={bool}&page={n}&page_size={1-50}",
+    sourceDoc: "Doc 07 §29, §30",
+    description: "Public browse and search of spare parts with deterministic sorting, multi-condition and in-stock filtering, vehicle fitment annotation, pre-pagination fits-only filtering, and aggregated facets."
   },
 
   // Commerce & Orders (Doc 09)

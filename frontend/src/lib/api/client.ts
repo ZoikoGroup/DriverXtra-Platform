@@ -803,13 +803,26 @@ export const api = {
       });
     },
 
-    async browseParts(params?: Record<string, string>): Promise<MarketplacePartListing[]> {
-      const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
-      const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
+    async browsePartsPaginated(params?: BrowsePartsParams): Promise<PaginatedPartListResponse> {
+      const cleanParams: Record<string, string> = {};
+      if (params) {
+        for (const [k, v] of Object.entries(params)) {
+          if (v !== undefined && v !== null && v !== "") {
+            cleanParams[k] = String(v);
+          }
+        }
+      }
+      const qs = Object.keys(cleanParams).length > 0 ? `?${new URLSearchParams(cleanParams).toString()}` : "";
+      const res = await apiRequest<PaginatedPartListResponse>(
         `/marketplace/browse/parts/${qs}`,
-        { method: "GET", requiresAuth: Boolean(params?.fits_vehicle) }
+        { method: "GET", requiresAuth: Boolean(cleanParams.fits_vehicle) }
       );
-      return Array.isArray(res) ? res : res.results || [];
+      return res;
+    },
+
+    async browseParts(params?: BrowsePartsParams): Promise<MarketplacePartListing[]> {
+      const res = await this.browsePartsPaginated(params);
+      return res.results || [];
     },
 
     async getPart(id: string, params?: Record<string, string>): Promise<MarketplacePartListing> {
@@ -1304,6 +1317,54 @@ export interface MarketplacePartListing {
   admin_notes?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface PartBrowseCategoryFacet {
+  id: string;
+  name: string;
+  slug: string;
+  count: number;
+}
+
+export interface PartBrowseBrandFacet {
+  brand: string;
+  count: number;
+}
+
+export interface PartBrowseConditionFacet {
+  condition: string;
+  count: number;
+}
+
+export interface PartBrowseFacets {
+  brands: PartBrowseBrandFacet[] | Record<string, number>;
+  categories: PartBrowseCategoryFacet[];
+  conditions: PartBrowseConditionFacet[] | Record<string, number>;
+}
+
+export interface PaginatedPartListResponse {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: MarketplacePartListing[];
+  facets?: PartBrowseFacets;
+}
+
+export interface BrowsePartsParams {
+  search?: string;
+  category_id?: string;
+  brand?: string;
+  mpn?: string;
+  condition?: string;
+  in_stock?: boolean | string;
+  price_max?: number | string;
+  sort?: "newest" | "price_asc" | "price_desc" | "relevance" | string;
+  fits_vehicle?: string;
+  fits_only?: boolean | string;
+  include_facets?: boolean | string;
+  page?: number | string;
+  page_size?: number | string;
+  [key: string]: string | number | boolean | undefined;
 }
 
 export interface CreateVehicleListingPayload {
