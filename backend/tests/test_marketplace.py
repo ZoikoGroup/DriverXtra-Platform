@@ -159,8 +159,8 @@ class TestMarketplaceWorkflow:
             'price': '20000.00',
         }
         res = seller_auth_client.post('/api/v1/marketplace/vehicles/', payload, format='json')
-        assert res.status_code == status.HTTP_400_BAD_REQUEST
-        assert 'organisation' in str(res.json())
+        assert res.status_code == status.HTTP_403_FORBIDDEN
+        assert 'OWNER or ADMIN' in str(res.json())
 
     def test_seller_isolation_cannot_view_or_edit_other_sellers_submissions(
         self, seller_auth_client, buyer_auth_client, seller_user, make_bmw, model_3series
@@ -543,4 +543,234 @@ class TestMarketplaceWorkflow:
         res = admin_auth_client.post(f'/api/v1/marketplace/admin/vehicles/{own_listing.id}/review/', {'action': 'APPROVE'}, format='json')
         assert res.status_code == status.HTTP_400_BAD_REQUEST
         assert 'Self-approval violation' in str(res.json())
+
+    # =========================================================================
+    # 5. Phase 4: Material Edits Demotion & Organisation Listing Rules
+    # =========================================================================
+
+    def test_editing_material_field_on_approved_vehicle_resets_to_pending_approval(
+        self, seller_auth_client, seller_user, make_bmw, model_3series
+    ):
+        listing = VehicleListing.objects.create(
+            seller=seller_user,
+            title='2021 BMW 330i M Sport',
+            make=make_bmw,
+            model=model_3series,
+            year=2021,
+            price=25000,
+            status=ListingStatusChoices.APPROVED,
+            is_active=True,
+        )
+
+        # Edit price (material field)
+        patch_res = seller_auth_client.patch(
+            f'/api/v1/marketplace/vehicles/{listing.id}/',
+            {'price': '23995.00'},
+            format='json',
+        )
+        assert patch_res.status_code == status.HTTP_200_OK
+        data = patch_res.json()
+        assert data['status'] == ListingStatusChoices.PENDING_APPROVAL
+
+        listing.refresh_from_db()
+        assert listing.status == ListingStatusChoices.PENDING_APPROVAL
+        assert float(listing.price) == 23995.00
+
+    def test_stock_only_change_on_approved_part_keeps_approved_status(
+        self, seller_auth_client, seller_user, brakes_category
+    ):
+        part = SparePartListing.objects.create(
+            seller=seller_user,
+            name='Brembo Caliper Left',
+            brand='Brembo',
+            mpn='CAL-001',
+            category=brakes_category,
+            price=150.00,
+            stock_quantity=5,
+            status=ListingStatusChoices.APPROVED,
+            is_active=True,
+        )
+
+        # Stock adjustment via dedicated stock endpoint
+        stock_res = seller_auth_client.post(
+            f'/api/v1/marketplace/parts/{part.id}/stock/',
+            {'delta': 7, 'reason': 'ADJUSTMENT', 'note': 'Restocked'},
+            format='json',
+        )
+        assert stock_res.status_code == status.HTTP_200_OK
+        data = stock_res.json()
+        assert data['status'] == 'success'
+        assert data['listing']['status'] == ListingStatusChoices.APPROVED
+        assert data['listing']['stock_quantity'] == 12
+
+        part.refresh_from_db()
+        assert part.status == ListingStatusChoices.APPROVED
+        assert part.stock_quantity == 12
+
+    def test_patch_part_with_stock_quantity_returns_structured_400(
+        self, seller_auth_client, seller_user, brakes_category
+    ):
+        part = SparePartListing.objects.create(
+            seller=seller_user,
+            name='Brembo Caliper Left',
+            brand='Brembo',
+            mpn='CAL-001',
+            category=brakes_category,
+            price=150.00,
+            stock_quantity=5,
+            status=ListingStatusChoices.APPROVED,
+            is_active=True,
+        )
+
+        patch_res = seller_auth_client.patch(
+            f'/api/v1/marketplace/parts/{part.id}/',
+            {'stock_quantity': 12},
+            format='json',
+        )
+        assert patch_res.status_code == status.HTTP_400_BAD_REQUEST
+        body = patch_res.json()
+        assert body['status'] == 'error'
+        assert body['code'] == 400
+        assert 'stock_quantity' in str(body)
+
+
+    def test_editing_material_field_on_approved_part_resets_to_pending_approval(
+        self, seller_auth_client, seller_user, brakes_category
+    ):
+        part = SparePartListing.objects.create(
+            seller=seller_user,
+            name='Brembo Caliper Right',
+            brand='Brembo',
+            mpn='CAL-002',
+            category=brakes_category,
+            price=150.00,
+            stock_quantity=5,
+            status=ListingStatusChoices.APPROVED,
+            is_active=True,
+        )
+
+        # Update price (material field)
+        patch_res = seller_auth_client.patch(
+            f'/api/v1/marketplace/parts/{part.id}/',
+            {'price': '165.00'},
+            format='json',
+        )
+        assert patch_res.status_code == status.HTTP_200_OK
+        data = patch_res.json()
+        assert data['status'] == ListingStatusChoices.PENDING_APPROVAL
+
+        part.refresh_from_db()
+        assert part.status == ListingStatusChoices.PENDING_APPROVAL
+
+    def test_non_owner_admin_org_member_cannot_create_org_listing(
+        self, api_client, test_organisation, workshop_user, make_bmw, model_3series, variant_330i
+    ):
+        # Add workshop_user as regular MEMBER in test_organisation
+        test_organisation.add_member(workshop_user, role=OrganisationRoleChoices.MEMBER)
+        # Give workshop_user SELLER role so they have marketplace access
+        workshop_user.add_role(RoleChoices.SELLER)
+        api_client.force_authenticate(user=workshop_user)
+
+        payload = {
+            'organisation': str(test_organisation.id),
+            'title': 'Org BMW 330i',
+            'make': str(make_bmw.id),
+            'model': str(model_3series.id),
+            'variant': str(variant_330i.id),
+            'year': 2021,
+            'price': '22000.00',
+        }
+        res = api_client.post('/api/v1/marketplace/vehicles/', payload, format='json')
+        assert res.status_code == status.HTTP_403_FORBIDDEN
+        assert 'OWNER or ADMIN' in str(res.json())
+
+    def test_non_owner_admin_org_member_cannot_edit_org_listing(
+        self, api_client, seller_user, test_organisation, workshop_user, make_bmw, model_3series
+    ):
+        # Create listing under org by owner (seller_user)
+        listing = VehicleListing.objects.create(
+            seller=seller_user,
+            organisation=test_organisation,
+            title='Org Fleet Car',
+            make=make_bmw,
+            model=model_3series,
+            year=2021,
+            price=20000,
+            status=ListingStatusChoices.PENDING_APPROVAL,
+        )
+
+        # Workshop user is MEMBER of test_organisation
+        test_organisation.add_member(workshop_user, role=OrganisationRoleChoices.MEMBER)
+        workshop_user.add_role(RoleChoices.SELLER)
+        api_client.force_authenticate(user=workshop_user)
+
+        # Attempt to edit listing
+        res = api_client.patch(
+            f'/api/v1/marketplace/vehicles/{listing.id}/',
+            {'price': '19500.00'},
+            format='json',
+        )
+        assert res.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_org_admin_can_edit_org_listing_even_if_not_creator(
+        self, api_client, seller_user, test_organisation, workshop_user, make_bmw, model_3series
+    ):
+        listing = VehicleListing.objects.create(
+            seller=seller_user,
+            organisation=test_organisation,
+            title='Org Fleet Car 2',
+            make=make_bmw,
+            model=model_3series,
+            year=2021,
+            price=20000,
+            status=ListingStatusChoices.PENDING_APPROVAL,
+        )
+
+        # Workshop user is ADMIN of test_organisation
+        test_organisation.add_member(workshop_user, role=OrganisationRoleChoices.ADMIN)
+        workshop_user.add_role(RoleChoices.SELLER)
+        api_client.force_authenticate(user=workshop_user)
+
+        res = api_client.patch(
+            f'/api/v1/marketplace/vehicles/{listing.id}/',
+            {'price': '19000.00'},
+            format='json',
+        )
+        assert res.status_code == status.HTTP_200_OK
+        listing.refresh_from_db()
+        assert float(listing.price) == 19000.00
+
+    def test_resubmit_rules_for_organisation_listings(
+        self, api_client, seller_user, test_organisation, workshop_user, make_bmw, model_3series
+    ):
+        listing = VehicleListing.objects.create(
+            seller=seller_user,
+            organisation=test_organisation,
+            title='Org Rejected Car',
+            make=make_bmw,
+            model=model_3series,
+            year=2021,
+            price=20000,
+            status=ListingStatusChoices.REJECTED,
+            rejection_reason='Missing documentation',
+        )
+
+        test_organisation.add_member(workshop_user, role=OrganisationRoleChoices.MEMBER)
+        workshop_user.add_role(RoleChoices.SELLER)
+        api_client.force_authenticate(user=workshop_user)
+
+        # Regular member cannot resubmit
+        res_denied = api_client.post(f'/api/v1/marketplace/vehicles/{listing.id}/resubmit/', format='json')
+        assert res_denied.status_code == status.HTTP_403_FORBIDDEN
+
+        # Upgrade workshop_user to ADMIN
+        membership = test_organisation.memberships.get(user=workshop_user)
+        membership.role = OrganisationRoleChoices.ADMIN
+        membership.save()
+
+        # Org ADMIN can resubmit
+        res_allowed = api_client.post(f'/api/v1/marketplace/vehicles/{listing.id}/resubmit/', format='json')
+        assert res_allowed.status_code == status.HTTP_200_OK
+        listing.refresh_from_db()
+        assert listing.status == ListingStatusChoices.PENDING_APPROVAL
 

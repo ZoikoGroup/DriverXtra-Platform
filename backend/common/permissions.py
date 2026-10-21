@@ -78,3 +78,24 @@ class IsOrganisationAdminOrOwner(permissions.BasePermission):
 
         role = organisation.get_member_role(user)
         return role in ('OWNER', 'ADMIN')
+
+
+def HasPermission(permission_code: str):
+    """DRF permission class factory requiring the user to hold the specified permission code.
+
+    Platform administrators (ADMIN / Superuser) bypass all checks.
+    """
+    class _HasPermission(permissions.BasePermission):
+        message = f"You do not have the required '{permission_code}' permission."
+
+        def has_permission(self, request, view):
+            user = request.user
+            if not (user and user.is_authenticated):
+                return False
+            if user.is_superuser or user.has_role('ADMIN') or user.has_role('MARKETPLACE_ADMIN'):
+                return True
+            if hasattr(user, 'has_permission'):
+                return user.has_permission(permission_code)
+            return False
+
+    return _HasPermission

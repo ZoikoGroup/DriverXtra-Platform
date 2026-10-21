@@ -117,7 +117,9 @@ async function refreshAccessToken(): Promise<string | null> {
       });
 
       if (!res.ok) {
-        tokenStorage.clearTokens();
+        if (res.status === 400 || res.status === 401) {
+          tokenStorage.clearTokens();
+        }
         return null;
       }
 
@@ -132,8 +134,10 @@ async function refreshAccessToken(): Promise<string | null> {
 
       tokenStorage.clearTokens();
       return null;
-    } catch {
-      tokenStorage.clearTokens();
+    } catch (err: unknown) {
+      console.warn("[Auth] Token refresh network failure:", {
+        message: err instanceof Error ? err.message : "Network error",
+      });
       return null;
     } finally {
       refreshPromise = null;
@@ -266,6 +270,10 @@ export interface BackendUserProfile {
   full_name: string;
   status: "ACTIVE" | "PENDING" | "SUSPENDED" | "DEACTIVATED";
   roles: string[];
+  active_role?: string;
+  has_mfa_enabled?: boolean;
+  staff_role?: { code: string; name: string; department?: string } | null;
+  permissions?: string[];
   is_staff: boolean;
   is_superuser: boolean;
   organisations: BackendOrganisationSummary[];
@@ -277,11 +285,16 @@ export interface BackendUserProfile {
 export interface LoginResponse {
   status: string;
   message: string;
-  tokens: {
+  code?: string;
+  active_role?: string;
+  mfa_required?: boolean;
+  pre_auth_token?: string;
+  email?: string;
+  tokens?: {
     access: string;
     refresh: string;
   };
-  user: BackendUserProfile;
+  user?: BackendUserProfile;
 }
 
 export interface LogoutResponse {
@@ -352,19 +365,77 @@ export interface AddMemberResponse {
   member: BackendOrganisationMember;
 }
 
+export interface StaffInvitePayload {
+  email: string;
+  staff_role: "VERIFICATION_OFFICER" | "DISPUTE_MANAGER" | "FINANCE_OFFICER" | "SUPPORT_AGENT" | string;
+  first_name?: string;
+  last_name?: string;
+  department?: string;
+}
+
+export interface StaffInviteResponse {
+  status: string;
+  message: string;
+  email: string;
+  staff_role: string;
+  invite_token?: string | null;
+}
+
 export const api = {
   auth: {
-    async login(email: string, password: string): Promise<LoginResponse> {
+    async login(email: string, password: string, code?: string): Promise<LoginResponse> {
       const data = await apiRequest<LoginResponse>("/auth/login/", {
         method: "POST",
         requiresAuth: false,
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, code }),
       });
+      if (data?.mfa_required) {
+        return data;
+      }
       if (!data?.tokens?.access || !data?.tokens?.refresh) {
         throw new ApiError("Authentication failed: both access and refresh tokens are required.", 500);
       }
       tokenStorage.setTokens(data.tokens.access, data.tokens.refresh);
       return data;
+    },
+
+    async switchRole(role: string): Promise<{ status: string; message: string; active_role: string; tokens: { access: string; refresh: string } }> {
+      const data = await apiRequest<{ status: string; message: string; active_role: string; tokens: { access: string; refresh: string } }>("/auth/switch-role/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ role }),
+      });
+      if (data?.tokens?.access) {
+        tokenStorage.setTokens(data.tokens.access, data.tokens.refresh);
+      }
+      return data;
+    },
+
+    async enrolMfa(): Promise<{ status: string; secret: string; qr_code_uri: string; message: string }> {
+      return apiRequest<{ status: string; secret: string; qr_code_uri: string; message: string }>("/auth/mfa/enrol/", {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async verifyMfa(code: string, pre_auth_token?: string): Promise<LoginResponse> {
+      const data = await apiRequest<LoginResponse>("/auth/mfa/verify/", {
+        method: "POST",
+        requiresAuth: !pre_auth_token,
+        body: JSON.stringify({ code, pre_auth_token }),
+      });
+      if (data?.tokens?.access && data?.tokens?.refresh) {
+        tokenStorage.setTokens(data.tokens.access, data.tokens.refresh);
+      }
+      return data;
+    },
+
+    async staffSetPassword(payload: { token: string; new_password: string }): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>("/auth/staff/set-password/", {
+        method: "POST",
+        requiresAuth: false,
+        body: JSON.stringify(payload),
+      });
     },
 
     async register(payload: RegisterPayload): Promise<RegisterResponse> {
@@ -393,6 +464,48 @@ export const api = {
         tokenStorage.clearTokens();
       }
       return { status: "success", message: "Logged out locally." };
+    },
+
+    async verifyEmail(token: string): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>("/auth/verify-email/", {
+        method: "POST",
+        requiresAuth: false,
+        body: JSON.stringify({ token }),
+      });
+    },
+
+    async resendVerification(email: string): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>("/auth/resend-verification/", {
+        method: "POST",
+        requiresAuth: false,
+        body: JSON.stringify({ email }),
+      });
+    },
+
+    async requestPasswordReset(email: string): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>("/auth/password-reset/request/", {
+        method: "POST",
+        requiresAuth: false,
+        body: JSON.stringify({ email }),
+      });
+    },
+
+    async confirmPasswordReset(payload: { token: string; new_password: string }): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>("/auth/password-reset/confirm/", {
+        method: "POST",
+        requiresAuth: false,
+        body: JSON.stringify(payload),
+      });
+    },
+  },
+
+  admin: {
+    async inviteStaff(payload: StaffInvitePayload): Promise<StaffInviteResponse> {
+      return apiRequest<StaffInviteResponse>("/admin/staff/invite/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
     },
   },
 
@@ -789,6 +902,47 @@ export const api = {
       return res.listing;
     },
 
+    async adjustPartStock(id: string, payload: StockAdjustmentPayload): Promise<StockAdjustmentResponse> {
+      return apiRequest<StockAdjustmentResponse>(`/marketplace/parts/${id}/stock/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getPartStockHistory(id: string): Promise<StockMovement[]> {
+      const res = await apiRequest<StockMovement[] | { results: StockMovement[] }>(
+        `/marketplace/parts/${id}/stock-history/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getPartPriceHistory(id: string): Promise<PriceChange[]> {
+      const res = await apiRequest<PriceChange[] | { results: PriceChange[] }>(
+        `/marketplace/parts/${id}/price-history/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getCataloguePartOffers(cataloguePartId: string): Promise<CataloguePartOffer[]> {
+      const res = await apiRequest<CataloguePartOffer[] | { results: CataloguePartOffer[] }>(
+        `/marketplace/browse/parts/catalogue/${cataloguePartId}/offers/`,
+        { method: "GET", requiresAuth: false }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async listLowStockParts(status?: string): Promise<MarketplacePartListing[]> {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
+        `/marketplace/parts/low-stock/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
     // Admin Review Queues
     async listAdminVehicles(status?: string): Promise<MarketplaceVehicleListing[]> {
       const qs = status ? `?status=${encodeURIComponent(status)}` : "";
@@ -952,6 +1106,7 @@ export interface PartSummary {
   id: string;
   name: string;
   part_number: string;
+  mpn?: string;
   category: string;
   category_name?: string;
   brand: string;
@@ -1095,10 +1250,21 @@ export interface MarketplacePartListing {
   category: string;
   category_name?: string;
   category_slug?: string;
+  catalogue_part?: string | null;
+  catalogue_part_name?: string | null;
   description?: string;
   price: string | number;
+  compare_at_price?: string | number | null;
+  price_flags?: {
+    flag: string;
+    median?: string | number | null;
+    comparable_count?: number;
+    deviation?: string | number | null;
+  };
   currency: string;
   stock_quantity: number;
+  low_stock_threshold?: number;
+  availability?: "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK";
   condition: string;
   primary_image_url?: string;
   images?: string[];
@@ -1145,10 +1311,13 @@ export interface CreatePartListingPayload {
   mpn: string;
   oem_numbers?: string[];
   category: string;
+  catalogue_part?: string | null;
   description?: string;
   price: number | string;
+  compare_at_price?: number | string | null;
   currency?: string;
   stock_quantity?: number;
+  low_stock_threshold?: number;
   condition?: string;
   primary_image_url?: string;
   images?: string[];
@@ -1162,4 +1331,57 @@ export interface ReviewListingPayload {
   action: "APPROVE" | "REJECT" | "REQUEST_CHANGES";
   rejection_reason?: string;
   admin_notes?: string;
+}
+
+export interface StockMovement {
+  id: string;
+  listing: string;
+  delta: number;
+  resulting_quantity: number;
+  reason: "INITIAL" | "ADJUSTMENT" | "SALE" | "RETURN" | "CORRECTION";
+  actor?: string | null;
+  actor_name?: string | null;
+  note: string;
+  created_at: string;
+}
+
+export interface StockAdjustmentPayload {
+  delta: number;
+  reason: "ADJUSTMENT" | "CORRECTION";
+  note?: string;
+}
+
+export interface StockAdjustmentResponse {
+  status: string;
+  message: string;
+  movement: StockMovement;
+  listing: MarketplacePartListing;
+}
+
+export interface PriceChange {
+  id: string;
+  listing: string;
+  old_price: string | number;
+  new_price: string | number;
+  old_compare_at_price?: string | number | null;
+  new_compare_at_price?: string | number | null;
+  actor?: string | null;
+  actor_name?: string | null;
+  note?: string;
+  created_at: string;
+}
+
+export interface CataloguePartOffer {
+  id: string;
+  price: string | number;
+  compare_at_price?: string | number | null;
+  currency: string;
+  condition: string;
+  stock_quantity: number;
+  low_stock_threshold?: number;
+  availability: "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK";
+  seller_name?: string;
+  organisation_name?: string | null;
+  primary_image_url?: string;
+  created_at: string;
 }

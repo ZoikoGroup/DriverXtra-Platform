@@ -10,6 +10,11 @@ from apps.marketplace.views import (
     SellerPartListCreateView,
     SellerPartDetailUpdateView,
     SellerPartResubmitView,
+    PartStockAdjustmentView,
+    PartStockHistoryView,
+    PartPriceHistoryView,
+    LowStockPartListView,
+    CataloguePartOffersView,
     AdminVehicleListingListView,
     AdminVehicleListingDetailView,
     AdminVehicleListingReviewView,
@@ -24,6 +29,7 @@ urlpatterns = [
     path('browse/vehicles/<uuid:id>/', MarketplaceVehicleDetailView.as_view(), name='marketplace-browse-vehicle-detail'),
     path('browse/parts/', MarketplacePartListView.as_view(), name='marketplace-browse-parts'),
     path('browse/parts/<uuid:id>/', MarketplacePartDetailView.as_view(), name='marketplace-browse-part-detail'),
+    path('browse/parts/catalogue/<uuid:catalogue_part_id>/offers/', CataloguePartOffersView.as_view(), name='marketplace-browse-catalogue-part-offers'),
 
     # 2. Seller Inventory Management
     path('vehicles/', SellerVehicleListCreateView.as_view(), name='marketplace-seller-vehicles'),
@@ -31,9 +37,13 @@ urlpatterns = [
     path('vehicles/<uuid:id>/submit/', SellerVehicleResubmitView.as_view(), name='marketplace-seller-vehicle-submit'),
     path('vehicles/<uuid:id>/resubmit/', SellerVehicleResubmitView.as_view(), name='marketplace-seller-vehicle-resubmit'),
     path('parts/', SellerPartListCreateView.as_view(), name='marketplace-seller-parts'),
+    path('parts/low-stock/', LowStockPartListView.as_view(), name='marketplace-parts-low-stock'),
     path('parts/<uuid:id>/', SellerPartDetailUpdateView.as_view(), name='marketplace-seller-part-detail'),
     path('parts/<uuid:id>/submit/', SellerPartResubmitView.as_view(), name='marketplace-seller-part-submit'),
     path('parts/<uuid:id>/resubmit/', SellerPartResubmitView.as_view(), name='marketplace-seller-part-resubmit'),
+    path('parts/<uuid:id>/stock/', PartStockAdjustmentView.as_view(), name='marketplace-part-stock-adjust'),
+    path('parts/<uuid:id>/stock-history/', PartStockHistoryView.as_view(), name='marketplace-part-stock-history'),
+    path('parts/<uuid:id>/price-history/', PartPriceHistoryView.as_view(), name='marketplace-part-price-history'),
 
     # 3. Admin Moderation & Approval Queues
     path('admin/vehicles/', AdminVehicleListingListView.as_view(), name='marketplace-admin-vehicles'),

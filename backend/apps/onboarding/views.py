@@ -1,8 +1,9 @@
 from rest_framework import views, status, generics, permissions
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError as DjangoValidationError
-from common.permissions import IsPlatformStaff
+from common.permissions import IsPlatformStaff, HasPermission
 from apps.onboarding.models import SellerApplication, SellerApplicationStatusChoices
+from platform_core.audit.writer import record_audit_entry
 from apps.onboarding.serializers import (
     SellerApplicationSerializer,
     SellerApplicationCreateUpdateSerializer,
@@ -139,7 +140,7 @@ class AdminSellerApplicationListView(generics.ListAPIView):
 
     GET /api/v1/admin/seller-applications/?status=PENDING
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('seller.verify')]
     serializer_class = SellerApplicationSerializer
 
     def get_queryset(self):
@@ -155,7 +156,7 @@ class AdminSellerApplicationDetailView(generics.RetrieveAPIView):
 
     GET /api/v1/admin/seller-applications/<id>/
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('seller.verify')]
     serializer_class = SellerApplicationSerializer
     queryset = SellerApplication.objects.select_related("user", "organisation", "reviewed_by").all()
     lookup_field = "id"
@@ -166,7 +167,7 @@ class AdminSellerApplicationReviewView(views.APIView):
 
     POST /api/v1/admin/seller-applications/<id>/review/
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('seller.verify')]
 
     def post(self, request, id):
         application = generics.get_object_or_404(SellerApplication, id=id)
@@ -178,12 +179,31 @@ class AdminSellerApplicationReviewView(views.APIView):
         reason = serializer.validated_data.get("reason", "")
         admin_notes = serializer.validated_data.get("admin_notes", "")
 
+        corr_id = getattr(request, 'correlation_id', '')
         try:
             if action == "APPROVE":
                 application.approve(reviewer=request.user, notes=admin_notes)
+                record_audit_entry(
+                    event_type="seller.application.approved",
+                    action="seller:application.approve",
+                    resource_type="SellerApplication",
+                    resource_id=str(application.id),
+                    actor_id=request.user.id,
+                    correlation_id=corr_id,
+                    metadata={"business_name": application.business_name, "applicant_id": str(application.user_id)},
+                )
                 message = f"Seller application for '{application.business_name}' approved. Seller privileges granted."
             else:
                 application.reject(reviewer=request.user, reason=reason, notes=admin_notes)
+                record_audit_entry(
+                    event_type="seller.application.rejected",
+                    action="seller:application.reject",
+                    resource_type="SellerApplication",
+                    resource_id=str(application.id),
+                    actor_id=request.user.id,
+                    correlation_id=corr_id,
+                    metadata={"business_name": application.business_name, "applicant_id": str(application.user_id), "reason": reason},
+                )
                 message = f"Seller application for '{application.business_name}' rejected."
         except DjangoValidationError as exc:
             return Response(

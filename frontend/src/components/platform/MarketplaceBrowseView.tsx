@@ -8,6 +8,7 @@ import {
   VehicleMake,
   VehicleModel,
   PartCategory,
+  CataloguePartOffer,
 } from "@/lib/api/client";
 import {
   Search,
@@ -22,6 +23,7 @@ import {
   Fuel,
   MapPin,
   PackageCheck,
+  Tag,
 } from "lucide-react";
 
 export default function MarketplaceBrowseView() {
@@ -47,6 +49,8 @@ export default function MarketplaceBrowseView() {
   const [selectedCategory, setSelectedCategory] = useState("");
   const [maxPartPrice, setMaxPartPrice] = useState("");
   const [selectedPart, setSelectedPart] = useState<MarketplacePartListing | null>(null);
+  const [catalogueOffers, setCatalogueOffers] = useState<CataloguePartOffer[]>([]);
+  const [offersLoading, setOffersLoading] = useState(false);
 
   // Reference data
   const [makes, setMakes] = useState<VehicleMake[]>([]);
@@ -147,6 +151,24 @@ export default function MarketplaceBrowseView() {
       ignore = true;
     };
   }, [activeTab, vehicleSearch, selectedMake, selectedModel, fuelType, transmission, maxVehiclePrice, partSearch, partBrand, partMpn, selectedCategory, maxPartPrice]);
+
+  // Open part inspector & load other offers for linked catalogue part (Phase 3 Part B)
+  const handleSelectPart = (part: MarketplacePartListing) => {
+    setSelectedPart(part);
+    if (part.catalogue_part) {
+      setOffersLoading(true);
+      api.marketplace
+        .getCataloguePartOffers(part.catalogue_part)
+        .then(setCatalogueOffers)
+        .catch((err) => {
+          console.error("Failed to load catalogue part offers", err);
+          setCatalogueOffers([]);
+        })
+        .finally(() => setOffersLoading(false));
+    } else {
+      setCatalogueOffers([]);
+    }
+  };
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -496,10 +518,22 @@ export default function MarketplaceBrowseView() {
                       <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
                         {p.brand}
                       </span>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
-                        <CheckCircle2 className="w-3 h-3" />
-                        <span>In Stock ({p.stock_quantity})</span>
-                      </span>
+                      {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
+                        <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
+                          <X className="w-3 h-3" />
+                          <span>Out of Stock</span>
+                        </span>
+                      ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
+                          <PackageCheck className="w-3 h-3" />
+                          <span>Low Stock ({p.stock_quantity} left)</span>
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>In Stock ({p.stock_quantity})</span>
+                        </span>
+                      )}
                     </div>
 
                     <div>
@@ -528,19 +562,40 @@ export default function MarketplaceBrowseView() {
 
                     <div className="flex items-baseline justify-between pt-1">
                       <span className="text-xs text-slate-500">Retail Price:</span>
-                      <span className="text-lg font-black text-slate-950">
-                        £{Number(p.price).toFixed(2)}
-                      </span>
+                      <div className="flex items-baseline gap-1.5">
+                        {p.compare_at_price && Number(p.compare_at_price) > Number(p.price) && (
+                          <span className="text-xs text-slate-400 line-through">
+                            £{Number(p.compare_at_price).toFixed(2)}
+                          </span>
+                        )}
+                        <span className="text-lg font-black text-slate-950">
+                          £{Number(p.price).toFixed(2)}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="p-5 pt-0">
+                  <div className="p-5 pt-0 space-y-2">
                     <button
-                      onClick={() => setSelectedPart(p)}
+                      onClick={() => handleSelectPart(p)}
                       className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
                     >
                       <Eye className="w-3.5 h-3.5 text-amber-400" />
                       <span>View Specifications & Fitment</span>
+                    </button>
+                    <button
+                      disabled={p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK"}
+                      className={`w-full py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                        p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK"
+                          ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
+                          : "bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm"
+                      }`}
+                    >
+                      <span>
+                        {p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK"
+                          ? "Out of Stock · Unavailable to Purchase"
+                          : "Add to Basket"}
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -665,14 +720,31 @@ export default function MarketplaceBrowseView() {
             <div className="grid grid-cols-3 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                 <span className="text-[10px] text-slate-500">Retail Price</span>
-                <p className="font-black text-base text-slate-950 mt-0.5">
-                  £{Number(selectedPart.price).toFixed(2)}
-                </p>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  {selectedPart.compare_at_price && Number(selectedPart.compare_at_price) > Number(selectedPart.price) && (
+                    <span className="text-xs text-slate-400 line-through">
+                      £{Number(selectedPart.compare_at_price).toFixed(2)}
+                    </span>
+                  )}
+                  <p className="font-black text-base text-slate-950">
+                    £{Number(selectedPart.price).toFixed(2)}
+                  </p>
+                </div>
               </div>
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                 <span className="text-[10px] text-slate-500">Stock Availability</span>
-                <p className="font-bold text-emerald-700 mt-0.5">
-                  {selectedPart.stock_quantity} Units Available
+                <p
+                  className={`font-bold mt-0.5 ${
+                    selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
+                      ? "text-rose-600"
+                      : selectedPart.stock_quantity <= (selectedPart.low_stock_threshold ?? 3)
+                      ? "text-amber-600"
+                      : "text-emerald-700"
+                  }`}
+                >
+                  {selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
+                    ? "Out of Stock (Unavailable)"
+                    : `${selectedPart.stock_quantity} Units Available`}
                 </p>
               </div>
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -694,6 +766,87 @@ export default function MarketplaceBrowseView() {
                     </span>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Other Offers Section (Phase 3 Part B) */}
+            {selectedPart.catalogue_part && (
+              <div className="space-y-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <h5 className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <Tag className="w-4 h-4 text-amber-500" />
+                    <span>Other Offers for this Part</span>
+                  </h5>
+                  {offersLoading && (
+                    <span className="text-[10px] text-slate-400">Checking catalogue offers...</span>
+                  )}
+                </div>
+
+                {offersLoading ? (
+                  <div className="p-4 text-center text-slate-400 text-xs">
+                    Loading competitive seller offers...
+                  </div>
+                ) : catalogueOffers.filter((o) => o.id !== selectedPart.id).length === 0 ? (
+                  <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 text-slate-500 text-[11px] italic">
+                    No other verified seller offers currently available for this catalogue part.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {catalogueOffers
+                      .filter((o) => o.id !== selectedPart.id)
+                      .map((offer) => (
+                        <div
+                          key={offer.id}
+                          className="p-3 bg-slate-50 hover:bg-slate-100/80 rounded-2xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors"
+                        >
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-slate-900 text-xs">
+                                {offer.organisation_name || offer.seller_name}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200 text-slate-700">
+                                {offer.condition}
+                              </span>
+                              {offer.availability === "OUT_OF_STOCK" || offer.stock_quantity === 0 ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                  Out of Stock (Unavailable)
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                  In Stock
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                              Seller: {offer.seller_name} {offer.organisation_name ? `(${offer.organisation_name})` : ""}
+                            </p>
+                          </div>
+
+                          <div className="text-right flex sm:flex-col items-center sm:items-end justify-between sm:justify-center">
+                            <div className="flex items-baseline gap-1.5">
+                              {offer.compare_at_price && Number(offer.compare_at_price) > Number(offer.price) && (
+                                <span className="text-xs text-slate-400 line-through font-mono">
+                                  £{Number(offer.compare_at_price).toFixed(2)}
+                                </span>
+                              )}
+                              <span className="text-sm font-black text-slate-950 font-mono">
+                                £{Number(offer.price).toFixed(2)}
+                              </span>
+                            </div>
+                            {offer.availability === "OUT_OF_STOCK" || offer.stock_quantity === 0 ? (
+                              <span className="text-[10px] text-rose-600 font-bold mt-0.5">
+                                Unavailable
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-emerald-700 font-bold mt-0.5">
+                                Available to Order
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -733,10 +886,22 @@ export default function MarketplaceBrowseView() {
               </div>
             )}
 
-            <div className="pt-2 flex justify-end">
+            <div className="pt-2 flex items-center justify-end gap-2">
+              <button
+                disabled={selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"}
+                className={`px-5 py-2.5 text-xs font-bold rounded-xl transition-all ${
+                  selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
+                    ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
+                    : "bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm"
+                }`}
+              >
+                {selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
+                  ? "Out of Stock · Unavailable"
+                  : "Add to Basket"}
+              </button>
               <button
                 onClick={() => setSelectedPart(null)}
-                className="px-5 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl"
+                className="px-5 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800"
               >
                 Close Inspector
               </button>

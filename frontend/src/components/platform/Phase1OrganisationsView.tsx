@@ -599,6 +599,9 @@ export default function Phase1OrganisationsView() {
                   <option value="WORKSHOP">Workshop (Service & Bay Repair)</option>
                   <option value="FLEET_OPERATOR">Fleet Operator (Logistics)</option>
                   <option value="INDIVIDUAL">Individual / Personal Garage</option>
+                  {(user?.is_superuser || user?.rawRoles?.includes("ADMIN") || user?.role === "MARKETPLACE_ADMIN") && (
+                    <option value="INTERNAL_OPS">Internal Operations (Platform Admin Only)</option>
+                  )}
                 </select>
               </div>
 

@@ -61,6 +61,16 @@ class OrganisationSerializer(serializers.ModelSerializer):
     def get_member_count(self, obj) -> int:
         return obj.memberships.filter(is_active=True).count()
 
+    def validate_type(self, value):
+        if value == OrganisationTypeChoices.INTERNAL_OPS:
+            request = self.context.get('request')
+            user = request.user if request else None
+            is_admin = user and (user.is_superuser or user.has_role('ADMIN'))
+            if not is_admin:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied("Only platform administrators may create Internal Operations organisations.")
+        return value
+
     def create(self, validated_data):
         user = self.context['request'].user
         validated_data['created_by'] = user

@@ -32,3 +32,6 @@ htmlcov/
 *.swo
 Thumbs.db
 Desktop.ini
+
+# Local database backups
+*.dump

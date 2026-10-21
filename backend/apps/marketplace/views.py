@@ -1,20 +1,33 @@
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
-from django.db.models import Q
+from rest_framework.exceptions import PermissionDenied, ValidationError as DRFValidationError
+from django.http import Http404
+from django.db import transaction
+from django.db.models import Q, F
 from django.utils import timezone
-from common.permissions import IsPlatformStaff
+from django.core.exceptions import ValidationError as DjangoValidationError
+from common.permissions import IsPlatformStaff, HasPermission
+from platform_core.audit.writer import record_audit_entry
+from apps.catalogue.models import Part
 from apps.marketplace.models import (
     VehicleListing,
     SparePartListing,
     ListingStatusChoices,
+    StockMovementReasonChoices,
 )
 from apps.marketplace.serializers import (
     VehicleListingSellerSerializer,
     SparePartListingSellerSerializer,
     VehicleListingPublicSerializer,
     SparePartListingPublicSerializer,
+    CataloguePartOfferSerializer,
+    PriceChangeSerializer,
+    AdminPartListingReviewSerializer,
     ListingReviewSerializer,
+    StockMovementSerializer,
+    StockAdjustmentSerializer,
 )
+from apps.marketplace.services import adjust_stock, change_price
 
 
 class IsSellerOrStaff(permissions.BasePermission):
@@ -193,6 +206,27 @@ class MarketplacePartDetailView(generics.RetrieveAPIView):
         ).select_related('category', 'seller', 'organisation').prefetch_related('compatible_variants')
 
 
+class CataloguePartOffersView(generics.ListAPIView):
+    """Public endpoint to list approved marketplace offers for a specific canonical catalogue part.
+
+    GET /api/v1/marketplace/browse/parts/catalogue/<catalogue_part_id>/offers/
+    """
+    permission_classes = [permissions.AllowAny]
+    serializer_class = CataloguePartOfferSerializer
+
+    def get_queryset(self):
+        catalogue_part_id = self.kwargs.get('catalogue_part_id')
+        part = Part.objects.filter(id=catalogue_part_id, is_active=True).first()
+        if not part:
+            raise Http404("Catalogue part not found or inactive.")
+
+        return SparePartListing.objects.filter(
+            catalogue_part=part,
+            status=ListingStatusChoices.APPROVED,
+            is_active=True,
+        ).select_related('seller', 'organisation').order_by('price', '-created_at')
+
+
 # =====================================================================
 # 2. Seller Inventory Management APIs (Add, List, Edit, Resubmit)
 # =====================================================================
@@ -224,13 +258,21 @@ class SellerVehicleListCreateView(generics.ListCreateAPIView):
         return queryset
 
     def perform_create(self, serializer):
+        user = self.request.user
+        org = serializer.validated_data.get('organisation')
+        if org:
+            if not (user.is_staff or user.has_role('ADMIN')):
+                member_role = org.get_member_role(user)
+                if member_role not in ('OWNER', 'ADMIN'):
+                    raise PermissionDenied("Only organisation OWNER or ADMIN may create listings for this organisation.")
+
         # Default to PENDING_APPROVAL unless explicitly requested as DRAFT
         initial_status = ListingStatusChoices.PENDING_APPROVAL
         if self.request.data.get('status') == ListingStatusChoices.DRAFT:
             initial_status = ListingStatusChoices.DRAFT
 
         serializer.save(
-            seller=self.request.user,
+            seller=user,
             status=initial_status,
             submitted_at=timezone.now(),
         )
@@ -258,8 +300,19 @@ class SellerVehicleDetailUpdateView(generics.RetrieveUpdateAPIView):
             ).distinct()
         return queryset
 
+    def check_object_permissions(self, request, obj):
+        super().check_object_permissions(request, obj)
+        if request.method in ('PATCH', 'PUT'):
+            user = request.user
+            if not (user.is_staff or user.has_role('ADMIN')):
+                if obj.organisation:
+                    member_role = obj.organisation.get_member_role(user)
+                    if member_role not in ('OWNER', 'ADMIN'):
+                        raise PermissionDenied("Only organisation OWNER or ADMIN may edit listings for this organisation.")
+                elif obj.seller != user:
+                    raise PermissionDenied("You can only edit your own listings.")
+
     def perform_update(self, serializer):
-        # Prevent seller from directly changing status to APPROVED
         instance = serializer.instance
         update_data = {}
         req_status = self.request.data.get('status')
@@ -275,6 +328,28 @@ class SellerVehicleDetailUpdateView(generics.RetrieveUpdateAPIView):
             update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
             update_data['submitted_at'] = timezone.now()
             update_data['rejection_reason'] = ""
+        elif instance.status == ListingStatusChoices.APPROVED:
+            material_fields = {
+                'price', 'description', 'make', 'make_id', 'model', 'model_id',
+                'variant', 'variant_id', 'images', 'primary_image_url', 'vin', 'mileage'
+            }
+            has_material_change = False
+            for field in material_fields:
+                if field in serializer.validated_data:
+                    current_val = getattr(instance, field, None)
+                    new_val = serializer.validated_data[field]
+                    if current_val != new_val:
+                        has_material_change = True
+                        break
+                elif field in self.request.data:
+                    has_material_change = True
+                    break
+
+            if has_material_change:
+                update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
+                update_data['submitted_at'] = timezone.now()
+                update_data['rejection_reason'] = ""
+
         serializer.save(**update_data)
 
 
@@ -292,11 +367,14 @@ class SellerVehicleResubmitView(views.APIView):
         if not listing:
             return Response({"error": "Vehicle listing not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if not (user.is_staff or user.has_role('ADMIN') or listing.seller == user):
-            return Response(
-                {"error": "You are not authorized to submit this vehicle."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        is_admin = user.is_staff or user.has_role('ADMIN')
+        is_seller = listing.seller == user
+        is_org_admin = False
+        if listing.organisation:
+            is_org_admin = listing.organisation.get_member_role(user) in ('OWNER', 'ADMIN')
+
+        if not (is_admin or is_seller or is_org_admin):
+            raise PermissionDenied("You are not authorized to submit this vehicle. Only the listing seller or organisation OWNER/ADMIN may resubmit.")
 
         if listing.status == ListingStatusChoices.APPROVED:
             return Response(
@@ -354,15 +432,35 @@ class SellerPartListCreateView(generics.ListCreateAPIView):
         return queryset
 
     def perform_create(self, serializer):
+        user = self.request.user
+        org = serializer.validated_data.get('organisation')
+        if org:
+            if not (user.is_staff or user.has_role('ADMIN')):
+                member_role = org.get_member_role(user)
+                if member_role not in ('OWNER', 'ADMIN'):
+                    raise PermissionDenied("Only organisation OWNER or ADMIN may create listings for this organisation.")
+
         initial_status = ListingStatusChoices.PENDING_APPROVAL
         if self.request.data.get('status') == ListingStatusChoices.DRAFT:
             initial_status = ListingStatusChoices.DRAFT
 
-        serializer.save(
-            seller=self.request.user,
-            status=initial_status,
-            submitted_at=timezone.now(),
-        )
+        requested_stock = serializer.validated_data.get('stock_quantity', 1)
+
+        with transaction.atomic():
+            instance = serializer.save(
+                seller=user,
+                status=initial_status,
+                stock_quantity=0,
+                submitted_at=timezone.now(),
+            )
+            if requested_stock > 0:
+                adjust_stock(
+                    listing=instance,
+                    delta=requested_stock,
+                    reason=StockMovementReasonChoices.INITIAL,
+                    actor=user,
+                    note="Initial stock on listing creation",
+                )
 
 
 class SellerPartDetailUpdateView(generics.RetrieveUpdateAPIView):
@@ -376,6 +474,13 @@ class SellerPartDetailUpdateView(generics.RetrieveUpdateAPIView):
     lookup_field = 'id'
     http_method_names = ['get', 'patch', 'head', 'options']
 
+    def patch(self, request, *args, **kwargs):
+        if 'stock_quantity' in request.data:
+            raise DRFValidationError({
+                "stock_quantity": "Direct modification of stock_quantity via update is disabled. Use POST /api/v1/marketplace/parts/<id>/stock/ to adjust stock."
+            })
+        return super().patch(request, *args, **kwargs)
+
     def get_queryset(self):
         user = self.request.user
         queryset = SparePartListing.objects.filter(is_active=True).select_related(
@@ -386,6 +491,18 @@ class SellerPartDetailUpdateView(generics.RetrieveUpdateAPIView):
                 Q(seller=user) | Q(organisation__memberships__user=user, organisation__memberships__is_active=True)
             ).distinct()
         return queryset
+
+    def check_object_permissions(self, request, obj):
+        super().check_object_permissions(request, obj)
+        if request.method in ('PATCH', 'PUT'):
+            user = request.user
+            if not (user.is_staff or user.has_role('ADMIN')):
+                if obj.organisation:
+                    member_role = obj.organisation.get_member_role(user)
+                    if member_role not in ('OWNER', 'ADMIN'):
+                        raise PermissionDenied("Only organisation OWNER or ADMIN may edit listings for this organisation.")
+                elif obj.seller != user:
+                    raise PermissionDenied("You can only edit your own listings.")
 
     def perform_update(self, serializer):
         instance = serializer.instance
@@ -403,6 +520,29 @@ class SellerPartDetailUpdateView(generics.RetrieveUpdateAPIView):
             update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
             update_data['submitted_at'] = timezone.now()
             update_data['rejection_reason'] = ""
+        elif instance.status == ListingStatusChoices.APPROVED:
+            material_fields = {
+                'price', 'compare_at_price', 'catalogue_part', 'description', 'name', 'brand', 'mpn', 'oem_numbers',
+                'category', 'category_id', 'images', 'primary_image_url',
+                'condition', 'compatible_variants'
+            }
+            has_material_change = False
+            for field in material_fields:
+                if field in serializer.validated_data:
+                    current_val = getattr(instance, field, None)
+                    new_val = serializer.validated_data[field]
+                    if current_val != new_val:
+                        has_material_change = True
+                        break
+                elif field in self.request.data:
+                    has_material_change = True
+                    break
+
+            if has_material_change:
+                update_data['status'] = ListingStatusChoices.PENDING_APPROVAL
+                update_data['submitted_at'] = timezone.now()
+                update_data['rejection_reason'] = ""
+
         serializer.save(**update_data)
 
 
@@ -420,11 +560,14 @@ class SellerPartResubmitView(views.APIView):
         if not listing:
             return Response({"error": "Part listing not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if not (user.is_staff or user.has_role('ADMIN') or listing.seller == user):
-            return Response(
-                {"error": "You are not authorized to submit this spare part."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        is_admin = user.is_staff or user.has_role('ADMIN')
+        is_seller = listing.seller == user
+        is_org_admin = False
+        if listing.organisation:
+            is_org_admin = listing.organisation.get_member_role(user) in ('OWNER', 'ADMIN')
+
+        if not (is_admin or is_seller or is_org_admin):
+            raise PermissionDenied("You are not authorized to resubmit this spare part. Only the listing seller or organisation OWNER/ADMIN may resubmit.")
 
         if listing.status == ListingStatusChoices.APPROVED:
             return Response(
@@ -456,6 +599,146 @@ class SellerPartResubmitView(views.APIView):
         )
 
 
+class PartStockAdjustmentView(views.APIView):
+    """Seller endpoint to record manual stock adjustments on a spare part listing.
+
+    POST /api/v1/marketplace/parts/<id>/stock/
+    Payload: { delta: int, reason: 'ADJUSTMENT' | 'CORRECTION', note?: str }
+    """
+    permission_classes = [IsSellerOrStaff]
+
+    def post(self, request, id):
+        user = request.user
+        listing = SparePartListing.objects.filter(id=id, is_active=True).first()
+        if not listing:
+            return Response({"error": "Part listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_admin = user.is_staff or user.has_role('ADMIN')
+        is_seller = listing.seller == user
+        is_org_admin = False
+        if listing.organisation:
+            is_org_admin = listing.organisation.get_member_role(user) in ('OWNER', 'ADMIN')
+
+        if not (is_admin or is_seller or is_org_admin):
+            if listing.organisation:
+                raise PermissionDenied("Only organisation OWNER or ADMIN may adjust stock for this organisation.")
+            raise PermissionDenied("You can only adjust stock for your own listings.")
+
+        serializer = StockAdjustmentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        delta = serializer.validated_data['delta']
+        reason = serializer.validated_data['reason']
+        note = serializer.validated_data.get('note', '')
+
+        try:
+            movement = adjust_stock(
+                listing=listing,
+                delta=delta,
+                reason=reason,
+                actor=user,
+                note=note,
+            )
+        except DjangoValidationError as exc:
+            msg = exc.messages[0] if hasattr(exc, 'messages') and exc.messages else str(exc)
+            raise DRFValidationError({"stock_quantity": msg})
+
+        return Response(
+            {
+                "status": "success",
+                "message": "Stock adjusted successfully.",
+                "movement": StockMovementSerializer(movement).data,
+                "listing": SparePartListingSellerSerializer(listing, context={'request': request}).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class PartStockHistoryView(views.APIView):
+    """Seller endpoint to view stock movement audit history for a spare part listing.
+
+    GET /api/v1/marketplace/parts/<id>/stock-history/
+    """
+    permission_classes = [IsSellerOrStaff]
+
+    def get(self, request, id):
+        user = request.user
+        listing = SparePartListing.objects.filter(id=id, is_active=True).first()
+        if not listing:
+            return Response({"error": "Part listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_admin = user.is_staff or user.has_role('ADMIN')
+        is_seller = listing.seller == user
+        is_org_admin = False
+        if listing.organisation:
+            is_org_admin = listing.organisation.get_member_role(user) in ('OWNER', 'ADMIN')
+
+        if not (is_admin or is_seller or is_org_admin):
+            if listing.organisation:
+                raise PermissionDenied("Only organisation OWNER or ADMIN may view stock history for this organisation.")
+            raise PermissionDenied("You can only view stock history for your own listings.")
+
+        movements = listing.stock_movements.all().select_related('actor').order_by('-created_at')
+        serializer = StockMovementSerializer(movements, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PartPriceHistoryView(views.APIView):
+    """Seller endpoint to view price modification audit history for a spare part listing.
+
+    GET /api/v1/marketplace/parts/<id>/price-history/
+    """
+    permission_classes = [IsSellerOrStaff]
+
+    def get(self, request, id):
+        user = request.user
+        listing = SparePartListing.objects.filter(id=id, is_active=True).first()
+        if not listing:
+            return Response({"error": "Part listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_admin = user.is_staff or user.has_role('ADMIN')
+        is_seller = listing.seller == user
+        is_org_admin = False
+        if listing.organisation:
+            is_org_admin = listing.organisation.get_member_role(user) in ('OWNER', 'ADMIN')
+
+        if not (is_admin or is_seller or is_org_admin):
+            if listing.organisation:
+                raise PermissionDenied("Only organisation OWNER or ADMIN may view price history for this organisation.")
+            raise PermissionDenied("You can only view price history for your own listings.")
+
+        price_changes = listing.price_changes.all().select_related('actor').order_by('-created_at')
+        serializer = PriceChangeSerializer(price_changes, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class LowStockPartListView(generics.ListAPIView):
+    """Seller endpoint to view spare part inventory at or below low stock threshold.
+
+    GET /api/v1/marketplace/parts/low-stock/
+    """
+    permission_classes = [IsSellerOrStaff]
+    serializer_class = SparePartListingSellerSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = SparePartListing.objects.filter(
+            is_active=True,
+            stock_quantity__lte=F('low_stock_threshold'),
+        ).select_related('category', 'seller', 'organisation').prefetch_related('compatible_variants')
+
+        if not (user.is_staff or user.has_role('ADMIN')):
+            queryset = queryset.filter(
+                Q(seller=user) | Q(organisation__memberships__user=user, organisation__memberships__is_active=True)
+            ).distinct()
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param.upper())
+
+        return queryset
+
+
 # =====================================================================
 # 3. Admin Moderation & Approval Queues
 # =====================================================================
@@ -465,7 +748,7 @@ class AdminVehicleListingListView(generics.ListAPIView):
 
     GET /api/v1/marketplace/admin/vehicles/?status=PENDING_APPROVAL
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('listing.review')]
     serializer_class = VehicleListingSellerSerializer
 
     def get_queryset(self):
@@ -483,7 +766,7 @@ class AdminVehicleListingDetailView(generics.RetrieveAPIView):
 
     GET /api/v1/marketplace/admin/vehicles/<id>/
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('listing.review')]
     serializer_class = VehicleListingSellerSerializer
     lookup_field = 'id'
     queryset = VehicleListing.objects.all().select_related(
@@ -496,7 +779,7 @@ class AdminVehicleListingReviewView(views.APIView):
 
     POST /api/v1/marketplace/admin/vehicles/<id>/review/
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('listing.review')]
 
     def post(self, request, id):
         listing = VehicleListing.objects.filter(id=id).first()
@@ -532,6 +815,32 @@ class AdminVehicleListingReviewView(views.APIView):
             listing.admin_notes = admin_notes
         listing.save()
 
+        corr_id = getattr(request, 'correlation_id', '')
+        event_type_map = {
+            'APPROVE': 'listing.approved',
+            'REJECT': 'listing.rejected',
+            'REQUEST_CHANGES': 'listing.changes_requested',
+        }
+        action_map = {
+            'APPROVE': 'listing:approve',
+            'REJECT': 'listing:reject',
+            'REQUEST_CHANGES': 'listing:request_changes',
+        }
+        record_audit_entry(
+            event_type=event_type_map.get(action, 'listing.reviewed'),
+            action=action_map.get(action, 'listing:review'),
+            resource_type='VehicleListing',
+            resource_id=str(listing.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={
+                'title': listing.title,
+                'seller_id': str(listing.seller_id),
+                'action': action,
+                'reason': rejection_reason,
+            },
+        )
+
         detail_serializer = VehicleListingSellerSerializer(listing, context={'request': request})
         return Response(
             {
@@ -548,12 +857,12 @@ class AdminPartListingListView(generics.ListAPIView):
 
     GET /api/v1/marketplace/admin/parts/?status=PENDING_APPROVAL
     """
-    permission_classes = [IsPlatformStaff]
-    serializer_class = SparePartListingSellerSerializer
+    permission_classes = [IsPlatformStaff, HasPermission('listing.review')]
+    serializer_class = AdminPartListingReviewSerializer
 
     def get_queryset(self):
         queryset = SparePartListing.objects.all().select_related(
-            'category', 'seller', 'organisation', 'reviewed_by'
+            'category', 'seller', 'organisation', 'reviewed_by', 'catalogue_part'
         ).prefetch_related('compatible_variants')
         status_param = self.request.query_params.get('status')
         if status_param:
@@ -566,11 +875,11 @@ class AdminPartListingDetailView(generics.RetrieveAPIView):
 
     GET /api/v1/marketplace/admin/parts/<id>/
     """
-    permission_classes = [IsPlatformStaff]
-    serializer_class = SparePartListingSellerSerializer
+    permission_classes = [IsPlatformStaff, HasPermission('listing.review')]
+    serializer_class = AdminPartListingReviewSerializer
     lookup_field = 'id'
     queryset = SparePartListing.objects.all().select_related(
-        'category', 'seller', 'organisation', 'reviewed_by'
+        'category', 'seller', 'organisation', 'reviewed_by', 'catalogue_part'
     ).prefetch_related('compatible_variants')
 
 
@@ -579,7 +888,7 @@ class AdminPartListingReviewView(views.APIView):
 
     POST /api/v1/marketplace/admin/parts/<id>/review/
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('listing.review')]
 
     def post(self, request, id):
         listing = SparePartListing.objects.filter(id=id).first()
@@ -615,7 +924,33 @@ class AdminPartListingReviewView(views.APIView):
             listing.admin_notes = admin_notes
         listing.save()
 
-        detail_serializer = SparePartListingSellerSerializer(listing, context={'request': request})
+        corr_id = getattr(request, 'correlation_id', '')
+        event_type_map = {
+            'APPROVE': 'listing.approved',
+            'REJECT': 'listing.rejected',
+            'REQUEST_CHANGES': 'listing.changes_requested',
+        }
+        action_map = {
+            'APPROVE': 'listing:approve',
+            'REJECT': 'listing:reject',
+            'REQUEST_CHANGES': 'listing:request_changes',
+        }
+        record_audit_entry(
+            event_type=event_type_map.get(action, 'listing.reviewed'),
+            action=action_map.get(action, 'listing:review'),
+            resource_type='SparePartListing',
+            resource_id=str(listing.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={
+                'title': listing.name,
+                'seller_id': str(listing.seller_id),
+                'action': action,
+                'reason': rejection_reason,
+            },
+        )
+
+        detail_serializer = AdminPartListingReviewSerializer(listing, context={'request': request})
         return Response(
             {
                 "status": "success",

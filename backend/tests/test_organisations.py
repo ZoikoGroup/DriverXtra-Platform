@@ -167,3 +167,26 @@ class TestOrganisationsAndAccessControl:
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
+    def test_non_admin_cannot_create_internal_ops_org(self, seller_auth_client):
+        payload = {
+            'name': 'Internal Operations Org',
+            'type': OrganisationTypeChoices.INTERNAL_OPS,
+            'jurisdiction': 'GB-ENG',
+        }
+        response = seller_auth_client.post('/api/v1/organisations/', payload, format='json')
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        data = response.json()
+        assert 'Only platform administrators' in str(data)
+
+    def test_platform_admin_can_create_internal_ops_org(self, admin_auth_client):
+        payload = {
+            'name': 'DriverXtra Operations Team',
+            'type': OrganisationTypeChoices.INTERNAL_OPS,
+            'jurisdiction': 'GB-ENG',
+        }
+        response = admin_auth_client.post('/api/v1/organisations/', payload, format='json')
+        assert response.status_code == status.HTTP_201_CREATED
+        data = response.json()
+        assert data['type'] == OrganisationTypeChoices.INTERNAL_OPS
+        assert data['name'] == 'DriverXtra Operations Team'
+
