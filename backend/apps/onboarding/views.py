@@ -183,6 +183,9 @@ class AdminSellerApplicationReviewView(views.APIView):
         try:
             if action == "APPROVE":
                 application.approve(reviewer=request.user, notes=admin_notes)
+                granted_roles = application.requested_roles if application.requested_roles else (
+                    ['SELLER', 'WORKSHOP'] if application.business_type == 'WORKSHOP' else ['SELLER']
+                )
                 record_audit_entry(
                     event_type="seller.application.approved",
                     action="seller:application.approve",
@@ -190,7 +193,11 @@ class AdminSellerApplicationReviewView(views.APIView):
                     resource_id=str(application.id),
                     actor_id=request.user.id,
                     correlation_id=corr_id,
-                    metadata={"business_name": application.business_name, "applicant_id": str(application.user_id)},
+                    metadata={
+                        "business_name": application.business_name,
+                        "applicant_id": str(application.user_id),
+                        "granted_roles": granted_roles,
+                    },
                 )
                 message = f"Seller application for '{application.business_name}' approved. Seller privileges granted."
             else:

@@ -1,7 +1,8 @@
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
 from django.db.models import Q
-from common.permissions import IsPlatformStaff
+from common.permissions import IsPlatformStaff, HasPermission
+from platform_core.audit.writer import record_audit_entry
 from apps.catalogue.models import (
     VehicleMake,
     VehicleModel,
@@ -20,10 +21,25 @@ from apps.catalogue.serializers import (
     PartCompatibilitySerializer,
     FitmentCheckSerializer,
 )
+from apps.catalogue.services import evaluate_canonical_fitment
+
+
+def log_catalogue_audit(request, event_type: str, action: str, resource_type: str, resource_id: str, metadata: dict = None):
+    corr_id = getattr(request, 'correlation_id', '')
+    actor_id = getattr(request.user, 'id', None) if (request.user and request.user.is_authenticated) else None
+    record_audit_entry(
+        event_type=event_type,
+        action=action,
+        resource_type=resource_type,
+        resource_id=str(resource_id),
+        actor_id=actor_id,
+        correlation_id=corr_id,
+        metadata=metadata or {},
+    )
 
 
 class VehicleMakeListCreateView(generics.ListCreateAPIView):
-    """List vehicle makes (public/auth) or add a make (admin/staff only).
+    """List vehicle makes (public/auth) or add a make (staff with catalogue.manage).
 
     GET /api/v1/catalogue/makes/
     POST /api/v1/catalogue/makes/
@@ -33,12 +49,62 @@ class VehicleMakeListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsPlatformStaff()]
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
         return [permissions.AllowAny()]
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.make.created",
+            action="catalogue:make.create",
+            resource_type="VehicleMake",
+            resource_id=instance.id,
+            metadata={"name": instance.name},
+        )
+
+
+class VehicleMakeDetailView(generics.RetrieveUpdateAPIView):
+    """Retrieve details, update or deactivate a vehicle make.
+
+    GET /api/v1/catalogue/makes/<id>/
+    PATCH /api/v1/catalogue/makes/<id>/
+    """
+    serializer_class = VehicleMakeSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        user = self.request.user
+        if user and user.is_authenticated and (user.is_staff or user.has_role('ADMIN')):
+            return VehicleMake.objects.all().prefetch_related('models')
+        return VehicleMake.objects.filter(is_active=True).prefetch_related('models')
+
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
+        return [permissions.AllowAny()]
+
+    def perform_update(self, serializer):
+        old_active = serializer.instance.is_active
+        instance = serializer.save()
+        changed = list(serializer.validated_data.keys())
+        meta = {"changed_fields": changed, "name": instance.name}
+        event = "catalogue.make.updated"
+        if old_active is True and instance.is_active is False:
+            event = "catalogue.make.deactivated"
+            meta["deactivated"] = True
+        log_catalogue_audit(
+            self.request,
+            event_type=event,
+            action="catalogue:make.update",
+            resource_type="VehicleMake",
+            resource_id=instance.id,
+            metadata=meta,
+        )
 
 
 class VehicleModelListCreateView(generics.ListCreateAPIView):
-    """List vehicle models filtered by make, or create model (admin/staff only).
+    """List vehicle models filtered by make, or create model (staff with catalogue.manage).
 
     GET /api/v1/catalogue/models/?make_id=<uuid>
     POST /api/v1/catalogue/models/
@@ -54,12 +120,62 @@ class VehicleModelListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsPlatformStaff()]
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
         return [permissions.AllowAny()]
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.model.created",
+            action="catalogue:model.create",
+            resource_type="VehicleModel",
+            resource_id=instance.id,
+            metadata={"name": instance.name, "make_id": str(instance.make_id)},
+        )
+
+
+class VehicleModelDetailView(generics.RetrieveUpdateAPIView):
+    """Retrieve details, update or deactivate a vehicle model.
+
+    GET /api/v1/catalogue/models/<id>/
+    PATCH /api/v1/catalogue/models/<id>/
+    """
+    serializer_class = VehicleModelSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        user = self.request.user
+        if user and user.is_authenticated and (user.is_staff or user.has_role('ADMIN')):
+            return VehicleModel.objects.all().select_related('make').prefetch_related('variants')
+        return VehicleModel.objects.filter(is_active=True).select_related('make').prefetch_related('variants')
+
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
+        return [permissions.AllowAny()]
+
+    def perform_update(self, serializer):
+        old_active = serializer.instance.is_active
+        instance = serializer.save()
+        changed = list(serializer.validated_data.keys())
+        meta = {"changed_fields": changed, "name": instance.name}
+        event = "catalogue.model.updated"
+        if old_active is True and instance.is_active is False:
+            event = "catalogue.model.deactivated"
+            meta["deactivated"] = True
+        log_catalogue_audit(
+            self.request,
+            event_type=event,
+            action="catalogue:model.update",
+            resource_type="VehicleModel",
+            resource_id=instance.id,
+            metadata=meta,
+        )
 
 
 class VehicleVariantListCreateView(generics.ListCreateAPIView):
-    """List vehicle variants filtered by model or year, or create variant (admin/staff only).
+    """List vehicle variants filtered by model or year, or create variant (staff with catalogue.manage).
 
     GET /api/v1/catalogue/variants/?model_id=<uuid>&year=2021
     POST /api/v1/catalogue/variants/
@@ -78,23 +194,62 @@ class VehicleVariantListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsPlatformStaff()]
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
         return [permissions.AllowAny()]
 
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.variant.created",
+            action="catalogue:variant.create",
+            resource_type="VehicleVariant",
+            resource_id=instance.id,
+            metadata={"name": instance.name, "model_id": str(instance.model_id), "year": instance.year},
+        )
 
-class VehicleVariantDetailView(generics.RetrieveAPIView):
-    """Retrieve details for a specific vehicle variant.
+
+class VehicleVariantDetailView(generics.RetrieveUpdateAPIView):
+    """Retrieve details, update or deactivate a specific vehicle variant.
 
     GET /api/v1/catalogue/variants/<id>/
+    PATCH /api/v1/catalogue/variants/<id>/
     """
-    queryset = VehicleVariant.objects.filter(is_active=True).select_related('model', 'model__make')
     serializer_class = VehicleVariantSerializer
     lookup_field = 'id'
-    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user and user.is_authenticated and (user.is_staff or user.has_role('ADMIN')):
+            return VehicleVariant.objects.all().select_related('model', 'model__make')
+        return VehicleVariant.objects.filter(is_active=True).select_related('model', 'model__make')
+
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
+        return [permissions.AllowAny()]
+
+    def perform_update(self, serializer):
+        old_active = serializer.instance.is_active
+        instance = serializer.save()
+        changed = list(serializer.validated_data.keys())
+        meta = {"changed_fields": changed, "display_name": instance.display_name}
+        event = "catalogue.variant.updated"
+        if old_active is True and instance.is_active is False:
+            event = "catalogue.variant.deactivated"
+            meta["deactivated"] = True
+        log_catalogue_audit(
+            self.request,
+            event_type=event,
+            action="catalogue:variant.update",
+            resource_type="VehicleVariant",
+            resource_id=instance.id,
+            metadata=meta,
+        )
 
 
 class PartCategoryListCreateView(generics.ListCreateAPIView):
-    """List part categories hierarchy or create category (admin/staff only).
+    """List part categories hierarchy or create category (staff with catalogue.manage).
 
     GET /api/v1/catalogue/categories/
     POST /api/v1/catalogue/categories/
@@ -103,19 +258,68 @@ class PartCategoryListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         queryset = PartCategory.objects.filter(is_active=True).select_related('parent')
-        # If top_only=true, only return root categories (subcategories will be nested)
         if self.request.query_params.get('root_only', 'false').lower() in ('true', '1'):
             queryset = queryset.filter(parent__isnull=True)
         return queryset
 
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsPlatformStaff()]
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
         return [permissions.AllowAny()]
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.category.created",
+            action="catalogue:category.create",
+            resource_type="PartCategory",
+            resource_id=instance.id,
+            metadata={"name": instance.name, "slug": instance.slug},
+        )
+
+
+class PartCategoryDetailView(generics.RetrieveUpdateAPIView):
+    """Retrieve details, update or deactivate a part category.
+
+    GET /api/v1/catalogue/categories/<id>/
+    PATCH /api/v1/catalogue/categories/<id>/
+    """
+    serializer_class = PartCategorySerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        user = self.request.user
+        if user and user.is_authenticated and (user.is_staff or user.has_role('ADMIN')):
+            return PartCategory.objects.all().select_related('parent')
+        return PartCategory.objects.filter(is_active=True).select_related('parent')
+
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
+        return [permissions.AllowAny()]
+
+    def perform_update(self, serializer):
+        old_active = serializer.instance.is_active
+        instance = serializer.save()
+        changed = list(serializer.validated_data.keys())
+        meta = {"changed_fields": changed, "slug": instance.slug}
+        event = "catalogue.category.updated"
+        if old_active is True and instance.is_active is False:
+            event = "catalogue.category.deactivated"
+            meta["deactivated"] = True
+        log_catalogue_audit(
+            self.request,
+            event_type=event,
+            action="catalogue:category.update",
+            resource_type="PartCategory",
+            resource_id=instance.id,
+            metadata=meta,
+        )
 
 
 class PartListCreateView(generics.ListCreateAPIView):
-    """List spare parts catalogue with category, brand, search, or add part (admin/staff only).
+    """List spare parts catalogue or add part (staff with catalogue.manage).
 
     GET /api/v1/catalogue/parts/?category_id=<uuid>&brand=Brembo&search=rotor
     POST /api/v1/catalogue/parts/
@@ -146,19 +350,58 @@ class PartListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsPlatformStaff()]
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
         return [permissions.AllowAny()]
 
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.part.created",
+            action="catalogue:part.create",
+            resource_type="Part",
+            resource_id=instance.id,
+            metadata={"brand": instance.brand, "mpn": instance.mpn},
+        )
 
-class PartDetailView(generics.RetrieveAPIView):
-    """Retrieve full detail for a canonical part in the catalogue.
+
+class PartDetailView(generics.RetrieveUpdateAPIView):
+    """Retrieve full detail, update or deactivate a canonical part in the catalogue.
 
     GET /api/v1/catalogue/parts/<id>/
+    PATCH /api/v1/catalogue/parts/<id>/
     """
-    queryset = Part.objects.filter(is_active=True).select_related('category').prefetch_related('compatibilities')
     serializer_class = PartSerializer
     lookup_field = 'id'
-    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user and user.is_authenticated and (user.is_staff or user.has_role('ADMIN')):
+            return Part.objects.all().select_related('category').prefetch_related('compatibilities')
+        return Part.objects.filter(is_active=True).select_related('category').prefetch_related('compatibilities')
+
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'PUT'):
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
+        return [permissions.AllowAny()]
+
+    def perform_update(self, serializer):
+        old_active = serializer.instance.is_active
+        instance = serializer.save()
+        changed = list(serializer.validated_data.keys())
+        meta = {"changed_fields": changed, "brand": instance.brand, "mpn": instance.mpn}
+        event = "catalogue.part.updated"
+        if old_active is True and instance.is_active is False:
+            event = "catalogue.part.deactivated"
+            meta["deactivated"] = True
+        log_catalogue_audit(
+            self.request,
+            event_type=event,
+            action="catalogue:part.update",
+            resource_type="Part",
+            resource_id=instance.id,
+            metadata=meta,
+        )
 
 
 class PartCompatibilityListCreateView(generics.ListCreateAPIView):
@@ -170,7 +413,9 @@ class PartCompatibilityListCreateView(generics.ListCreateAPIView):
     serializer_class = PartCompatibilitySerializer
 
     def get_queryset(self):
-        queryset = PartCompatibility.objects.select_related('part', 'vehicle_variant', 'vehicle_variant__model', 'vehicle_variant__model__make')
+        queryset = PartCompatibility.objects.select_related(
+            'part', 'vehicle_variant', 'vehicle_variant__model', 'vehicle_variant__model__make'
+        )
         part_id = self.request.query_params.get('part_id') or self.kwargs.get('id')
         variant_id = self.request.query_params.get('variant_id') or self.request.query_params.get('vehicle_variant_id')
 
@@ -183,11 +428,77 @@ class PartCompatibilityListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsPlatformStaff()]
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
         return [permissions.AllowAny()]
 
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.compatibility.created",
+            action="catalogue:compatibility.create",
+            resource_type="PartCompatibility",
+            resource_id=instance.id,
+            metadata={
+                "part_id": str(instance.part_id),
+                "vehicle_variant_id": str(instance.vehicle_variant_id),
+                "fitment_type": instance.fitment_type,
+            },
+        )
 
-from apps.catalogue.services import evaluate_canonical_fitment
+
+class PartCompatibilityDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Retrieve, update (fitment_type, qualifications, notes), or delete a compatibility record.
+
+    GET /api/v1/catalogue/compatibility/<id>/
+    PATCH /api/v1/catalogue/compatibility/<id>/
+    DELETE /api/v1/catalogue/compatibility/<id>/
+    """
+    queryset = PartCompatibility.objects.select_related(
+        'part', 'vehicle_variant', 'vehicle_variant__model', 'vehicle_variant__model__make'
+    )
+    serializer_class = PartCompatibilitySerializer
+    lookup_field = 'id'
+
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'PUT', 'DELETE'):
+            return [IsPlatformStaff(), HasPermission('catalogue.manage')()]
+        return [permissions.AllowAny()]
+
+    def perform_update(self, serializer):
+        old_fitment = serializer.instance.fitment_type
+        instance = serializer.save()
+        changed = list(serializer.validated_data.keys())
+        meta = {
+            "changed_fields": changed,
+            "part_id": str(instance.part_id),
+            "vehicle_variant_id": str(instance.vehicle_variant_id),
+        }
+        if 'fitment_type' in changed:
+            meta["old_fitment_type"] = old_fitment
+            meta["new_fitment_type"] = instance.fitment_type
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.compatibility.updated",
+            action="catalogue:compatibility.update",
+            resource_type="PartCompatibility",
+            resource_id=instance.id,
+            metadata=meta,
+        )
+
+    def perform_destroy(self, instance):
+        part_id = str(instance.part_id)
+        variant_id = str(instance.vehicle_variant_id)
+        instance_id = str(instance.id)
+        instance.delete()
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.compatibility.deleted",
+            action="catalogue:compatibility.delete",
+            resource_type="PartCompatibility",
+            resource_id=instance_id,
+            metadata={"part_id": part_id, "vehicle_variant_id": variant_id},
+        )
 
 
 class FitmentEvaluationView(views.APIView):
@@ -202,7 +513,6 @@ class FitmentEvaluationView(views.APIView):
         part = generics.get_object_or_404(Part, id=part_id, is_active=True)
         variant = generics.get_object_or_404(VehicleVariant, id=variant_id, is_active=True)
         return evaluate_canonical_fitment(part, variant)
-
 
     def get(self, request):
         part_id = request.query_params.get('part_id')

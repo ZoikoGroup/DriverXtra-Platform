@@ -27,6 +27,7 @@ class SellerApplicationSerializer(serializers.ModelSerializer):
             'organisation_name',
             'business_name',
             'business_type',
+            'requested_roles',
             'company_registration_number',
             'tax_id',
             'contact_email',
@@ -66,6 +67,10 @@ class SellerApplicationCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for applicant creating or updating an application draft."""
 
     submit_now = serializers.BooleanField(write_only=True, required=False, default=False)
+    requested_roles = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+    )
 
     class Meta:
         model = SellerApplication
@@ -74,6 +79,7 @@ class SellerApplicationCreateUpdateSerializer(serializers.ModelSerializer):
             'organisation',
             'business_name',
             'business_type',
+            'requested_roles',
             'company_registration_number',
             'tax_id',
             'contact_email',
@@ -121,6 +127,18 @@ class SellerApplicationCreateUpdateSerializer(serializers.ModelSerializer):
                 )
         return value
 
+    def validate_requested_roles(self, value):
+        if value is not None:
+            if not isinstance(value, list) or len(value) == 0:
+                raise serializers.ValidationError("At least one role ('SELLER' or 'WORKSHOP') must be requested.")
+            allowed = {"SELLER", "WORKSHOP"}
+            for r in value:
+                if r not in allowed:
+                    raise serializers.ValidationError(f"Invalid requested role '{r}'. Allowed roles are SELLER, WORKSHOP.")
+            if len(value) != len(set(value)):
+                raise serializers.ValidationError("Duplicate requested roles are not permitted.")
+        return value
+
     def validate(self, attrs):
         user = self.context['request'].user
 
@@ -140,6 +158,8 @@ class SellerApplicationCreateUpdateSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         submit_now = validated_data.pop('submit_now', False)
+        if 'requested_roles' not in validated_data or not validated_data['requested_roles']:
+            validated_data['requested_roles'] = ['SELLER']
         user = self.context['request'].user
         application = SellerApplication.objects.create(user=user, **validated_data)
 

@@ -70,6 +70,7 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
   const [postalCode, setPostalCode] = useState("");
   const [country, setCountry] = useState("United Kingdom");
   const [selectedOrgId, setSelectedOrgId] = useState<string>("");
+  const [requestedRoles, setRequestedRoles] = useState<string[]>(["SELLER"]);
 
   // Notification banners
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -88,11 +89,30 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
     setTimeout(() => setSuccessMsg(null), 5000);
   };
 
+  const handleRoleToggle = (role: string) => {
+    if (isFormLocked) return;
+    setRequestedRoles((prev) => {
+      const exists = prev.includes(role);
+      if (exists) {
+        if (prev.length <= 1) {
+          setErrorMsg("At least one requested platform capability is required.");
+          return prev;
+        }
+        setErrorMsg(null);
+        return prev.filter((r) => r !== role);
+      } else {
+        setErrorMsg(null);
+        return [...prev, role];
+      }
+    });
+  };
+
   // Populate form from application
   const populateForm = useCallback((app: SellerApplication) => {
     setBusinessName(app.business_name || "");
     setTradingName(app.trading_name || "");
     setBusinessType(app.business_type || "LTD");
+    setRequestedRoles(app.requested_roles && app.requested_roles.length > 0 ? app.requested_roles : ["SELLER"]);
     setRegistrationNumber(app.registration_number || "");
     setVatNumber(app.vat_number || "");
     setContactName(app.contact_name || "");
@@ -197,6 +217,7 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
       business_name: businessName.trim(),
       trading_name: tradingName.trim() || undefined,
       business_type: businessType,
+      requested_roles: requestedRoles,
       registration_number: registrationNumber.trim() || undefined,
       vat_number: vatNumber.trim() || undefined,
       contact_name: contactName.trim(),
@@ -216,6 +237,10 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
     if (e) e.preventDefault();
     if (!businessName.trim()) {
       setErrorMsg("Business name is required to save a draft application.");
+      return;
+    }
+    if (requestedRoles.length === 0) {
+      setErrorMsg("At least one requested platform capability must be selected.");
       return;
     }
     try {
@@ -238,6 +263,10 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
     // Validate required fields before submission
     if (!businessName.trim() || !contactName.trim() || !contactEmail.trim() || !addressLine1.trim() || !city.trim() || !postalCode.trim()) {
       setErrorMsg("Please complete all mandatory business and contact details before submitting.");
+      return;
+    }
+    if (requestedRoles.length === 0) {
+      setErrorMsg("Please select at least one requested platform capability before submitting.");
       return;
     }
 
@@ -584,6 +613,53 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
                   Only organisations where you hold an authorized OWNER or ADMIN role can be linked to a seller application.
                 </p>
               </div>
+
+              {/* Requested Platform Capabilities */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <label className="block text-xs font-bold text-slate-800">
+                  Requested Platform Capabilities *
+                </label>
+                <p className="text-[11px] text-slate-500">
+                  Select the capabilities you require on DriverXtra. You can select either or both. At least one selection is required.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <label className={`flex items-start gap-3 p-3 rounded-xl border text-xs cursor-pointer transition-colors ${
+                    requestedRoles.includes("SELLER")
+                      ? "bg-amber-50/70 border-amber-300 text-slate-900"
+                      : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                  } ${isFormLocked ? "cursor-not-allowed opacity-75" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={requestedRoles.includes("SELLER")}
+                      onChange={() => handleRoleToggle("SELLER")}
+                      disabled={isFormLocked}
+                      className="mt-0.5 rounded border-slate-300 text-amber-500 focus:ring-amber-400"
+                    />
+                    <div>
+                      <span className="font-bold block text-slate-950">Sell vehicles and spare parts</span>
+                      <span className="text-[11px] text-slate-500">List vehicles and spare parts inventory on the marketplace</span>
+                    </div>
+                  </label>
+
+                  <label className={`flex items-start gap-3 p-3 rounded-xl border text-xs cursor-pointer transition-colors ${
+                    requestedRoles.includes("WORKSHOP")
+                      ? "bg-purple-50/70 border-purple-300 text-slate-900"
+                      : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                  } ${isFormLocked ? "cursor-not-allowed opacity-75" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={requestedRoles.includes("WORKSHOP")}
+                      onChange={() => handleRoleToggle("WORKSHOP")}
+                      disabled={isFormLocked}
+                      className="mt-0.5 rounded border-slate-300 text-purple-600 focus:ring-purple-400"
+                    />
+                    <div>
+                      <span className="font-bold block text-slate-950">Provide workshop services</span>
+                      <span className="text-[11px] text-slate-500">Workshop partner status and commercial workshop services</span>
+                    </div>
+                  </label>
+                </div>
+              </div>
             </div>
 
             {/* Section 2: Contact Person */}
@@ -839,7 +915,21 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
                           )}
                         </td>
                         <td className="py-3 px-4 text-slate-600 font-medium">
-                          {app.business_type_display || app.business_type}
+                          <div>{app.business_type_display || app.business_type}</div>
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {(app.requested_roles && app.requested_roles.length > 0 ? app.requested_roles : ["SELLER"]).map((r) => (
+                              <span
+                                key={r}
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                  r === "WORKSHOP"
+                                    ? "bg-purple-100 text-purple-800"
+                                    : "bg-blue-100 text-blue-800"
+                                }`}
+                              >
+                                {r === "WORKSHOP" ? "Workshop" : "Seller"}
+                              </span>
+                            ))}
+                          </div>
                         </td>
                         <td className="py-3 px-4">
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
@@ -934,6 +1024,27 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
                 <div>
                   <span className="text-slate-400 block text-[10px] uppercase font-bold">Contact Email</span>
                   <span className="font-mono text-slate-800">{reviewModalApp.contact_email}</span>
+                </div>
+              </div>
+
+              <div className="pb-2 border-b border-slate-200">
+                <span className="text-slate-400 block text-[10px] uppercase font-bold">Requested Platform Roles</span>
+                <div className="flex gap-2 mt-1">
+                  {(reviewModalApp.requested_roles && reviewModalApp.requested_roles.length > 0
+                    ? reviewModalApp.requested_roles
+                    : ["SELLER"]
+                  ).map((r) => (
+                    <span
+                      key={r}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        r === "WORKSHOP"
+                          ? "bg-purple-100 text-purple-800"
+                          : "bg-blue-100 text-blue-800"
+                      }`}
+                    >
+                      {r === "WORKSHOP" ? "Workshop Services" : "Vehicle & Spare Parts Seller"}
+                    </span>
+                  ))}
                 </div>
               </div>
 

@@ -17,6 +17,15 @@ class VehicleMakeSerializer(serializers.ModelSerializer):
         model = VehicleMake
         fields = ['id', 'name', 'country_of_origin', 'logo_url', 'is_active', 'model_count']
 
+    def validate_name(self, value):
+        name = value.strip()
+        qs = VehicleMake.objects.filter(name__iexact=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(f"Vehicle make '{name}' already exists.")
+        return name
+
 
 class VehicleModelSerializer(serializers.ModelSerializer):
     make_name = serializers.CharField(source='make.name', read_only=True)
@@ -25,6 +34,18 @@ class VehicleModelSerializer(serializers.ModelSerializer):
     class Meta:
         model = VehicleModel
         fields = ['id', 'make', 'make_name', 'name', 'year_start', 'year_end', 'is_active', 'variant_count']
+
+    def validate(self, attrs):
+        make = attrs.get('make', self.instance.make if self.instance else None)
+        name = attrs.get('name', self.instance.name if self.instance else None)
+        if make and name:
+            name = name.strip()
+            qs = VehicleModel.objects.filter(make=make, name__iexact=name)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({"name": f"Vehicle model '{name}' already exists for make '{make.name}'."})
+        return attrs
 
 
 class VehicleVariantSerializer(serializers.ModelSerializer):
@@ -54,14 +75,58 @@ class VehicleVariantSerializer(serializers.ModelSerializer):
             'is_active',
         ]
 
+    def validate(self, attrs):
+        model = attrs.get('model', self.instance.model if self.instance else None)
+        name = attrs.get('name', self.instance.name if self.instance else None)
+        year = attrs.get('year', self.instance.year if self.instance else None)
+        engine_code = attrs.get('engine_code', self.instance.engine_code if self.instance else '')
+        if model and name and year is not None:
+            qs = VehicleVariant.objects.filter(
+                model=model,
+                name__iexact=name.strip(),
+                year=year,
+                engine_code=engine_code.strip(),
+            )
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    {"non_field_errors": [f"Vehicle variant '{name}' ({year}, {engine_code}) already exists for this model."]}
+                )
+        return attrs
+
 
 class PartCategorySerializer(serializers.ModelSerializer):
     subcategories = serializers.SerializerMethodField()
     parent_name = serializers.CharField(source='parent.name', read_only=True, allow_null=True)
+    slug = serializers.SlugField(max_length=150, required=False, allow_blank=True)
 
     class Meta:
         model = PartCategory
         fields = ['id', 'name', 'slug', 'parent', 'parent_name', 'description', 'is_active', 'subcategories']
+
+    def validate_slug(self, value):
+        if value:
+            value = value.strip()
+            qs = PartCategory.objects.filter(slug=value)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(f"Category with slug '{value}' already exists.")
+        return value
+
+    def validate(self, attrs):
+        name = attrs.get('name', self.instance.name if self.instance else None)
+        slug = attrs.get('slug', self.instance.slug if self.instance else None)
+        if name and not slug:
+            from django.utils.text import slugify
+            generated_slug = slugify(name)
+            qs = PartCategory.objects.filter(slug=generated_slug)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({"slug": f"Category with slug '{generated_slug}' already exists."})
+        return attrs
 
     def get_subcategories(self, obj):
         # Only nest 1 level of subcategories to prevent infinite recursion
@@ -112,8 +177,16 @@ class PartSerializer(serializers.ModelSerializer):
         return ret
 
     def validate(self, attrs):
-        if not attrs.get('mpn'):
+        mpn = attrs.get('mpn', self.instance.mpn if self.instance else None)
+        brand = attrs.get('brand', self.instance.brand if self.instance else None)
+        if not mpn:
             raise serializers.ValidationError({"mpn": "Manufacturer Part Number (mpn) is required."})
+        if brand and mpn:
+            qs = Part.objects.filter(brand__iexact=brand.strip(), mpn__iexact=mpn.strip())
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({"mpn": f"Part with brand '{brand}' and MPN '{mpn}' already exists."})
         return attrs
 
 
@@ -141,8 +214,28 @@ class PartCompatibilitySerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+        if self.instance:
+            if 'part' in attrs and attrs['part'] != self.instance.part:
+                raise serializers.ValidationError({"part": "Changing the associated part of an existing compatibility record is not permitted."})
+            if 'vehicle_variant' in attrs and attrs['vehicle_variant'] != self.instance.vehicle_variant:
+                raise serializers.ValidationError({"vehicle_variant": "Changing the associated vehicle variant of an existing compatibility record is not permitted."})
+
         if 'is_direct_fit' in self.initial_data and 'fitment_type' not in attrs:
             attrs['fitment_type'] = FitmentTypeChoices.CONFIRMED_FIT if self.initial_data['is_direct_fit'] else FitmentTypeChoices.UNKNOWN
+
+        fitment_type = attrs.get('fitment_type')
+        if fitment_type and fitment_type not in FitmentTypeChoices.values:
+            raise serializers.ValidationError({"fitment_type": f"Invalid fitment_type '{fitment_type}'."})
+
+        part = attrs.get('part', self.instance.part if self.instance else None)
+        variant = attrs.get('vehicle_variant', self.instance.vehicle_variant if self.instance else None)
+        if part and variant:
+            qs = PartCompatibility.objects.filter(part=part, vehicle_variant=variant)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError({"non_field_errors": ["A compatibility record already exists for this part and vehicle variant."]})
+
         return attrs
 
 

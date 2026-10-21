@@ -12,7 +12,8 @@ import {
   LogOut,
   ChevronRight,
   ShoppingBag,
-  UserPlus
+  UserPlus,
+  Wrench
 } from "lucide-react";
 
 interface SidebarProps {
@@ -32,11 +33,11 @@ export default function Sidebar({
 
   if (!user) return null;
 
-  // Render navigation strictly according to active_role claim
+  // Render navigation strictly according to active_role and granted roles
   const activeRole = user.activeRole || (user.rawRoles && user.rawRoles[0]) || "BUYER";
   const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
-  const isSeller = activeRole === "SELLER";
-  const isWorkshop = activeRole === "WORKSHOP";
+  const hasSeller = Boolean(user.rawRoles?.includes("SELLER") || activeRole === "SELLER");
+  const hasWorkshop = Boolean(user.rawRoles?.includes("WORKSHOP") || activeRole === "WORKSHOP");
 
   let roleNavItems: {
     id: string;
@@ -55,7 +56,20 @@ export default function Sidebar({
       { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Management" },
       { id: "profile", label: "My Profile", icon: User },
     ];
-  } else if (isSeller) {
+  } else if (hasSeller && hasWorkshop) {
+    // Both roles approved: access to both seller features and workshop hub
+    roleNavItems = [
+      { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
+      { id: "workshop_landing", label: "Workshop Services", icon: Wrench, badge: "Workshop" },
+      { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
+      { id: "seller_onboarding", label: "Partner & Seller Status", icon: FileCheck2, badge: "Verified" },
+      { id: "organisations", label: "Dealership & Workshop Teams", icon: Building2, badge: "Organisation" },
+      { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
+      { id: "profile", label: "My Profile", icon: User },
+    ];
+  } else if (hasSeller) {
+    // Seller-only: retain existing seller dashboard and features
     roleNavItems = [
       { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
@@ -65,9 +79,10 @@ export default function Sidebar({
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "profile", label: "My Profile", icon: User },
     ];
-  } else if (isWorkshop) {
+  } else if (hasWorkshop) {
+    // Workshop-only: workshop-oriented navigation and landing view, not seller inventory
     roleNavItems = [
-      { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
+      { id: "workshop_landing", label: "Workshop Services", icon: Wrench, badge: "Workshop" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
       { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },

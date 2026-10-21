@@ -155,7 +155,9 @@ interface RequestOptions extends RequestInit {
 export async function apiRequest<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
   const { requiresAuth = true, retryOn401 = true, headers: customHeaders, ...restOptions } = options;
   const baseUrl = getBaseUrl();
-  const url = `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+  const url = endpoint.startsWith("http://") || endpoint.startsWith("https://")
+    ? endpoint
+    : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -246,6 +248,34 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
   }
 
   return data as T;
+}
+
+export interface PaginatedResponse<T> {
+  count?: number;
+  next?: string | null;
+  previous?: string | null;
+  results?: T[];
+}
+
+export async function fetchAllPages<T>(initialEndpoint: string, options: RequestOptions = {}): Promise<T[]> {
+  let allItems: T[] = [];
+  let currentEndpoint: string | null = initialEndpoint;
+
+  while (currentEndpoint) {
+    const res: T[] | PaginatedResponse<T> = await apiRequest<T[] | PaginatedResponse<T>>(currentEndpoint, options);
+    if (Array.isArray(res)) {
+      allItems = allItems.concat(res);
+      break;
+    }
+    if (res && typeof res === "object" && Array.isArray(res.results)) {
+      allItems = allItems.concat(res.results);
+      currentEndpoint = res.next || null;
+    } else {
+      break;
+    }
+  }
+
+  return allItems;
 }
 
 // ----------------------------------------------------------------------
@@ -659,37 +689,33 @@ export const api = {
   // Phase 2: Vehicle & Parts Catalogue
   catalogue: {
     async getMakes(): Promise<VehicleMake[]> {
-      const res = await apiRequest<VehicleMake[] | { results: VehicleMake[] }>("/catalogue/makes/", {
+      return fetchAllPages<VehicleMake>("/catalogue/makes/", {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getModels(makeId?: string): Promise<VehicleModel[]> {
       const q = makeId ? `?make=${encodeURIComponent(makeId)}` : "";
-      const res = await apiRequest<VehicleModel[] | { results: VehicleModel[] }>(`/catalogue/models/${q}`, {
+      return fetchAllPages<VehicleModel>(`/catalogue/models/${q}`, {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getVariants(modelId?: string): Promise<VehicleVariant[]> {
       const q = modelId ? `?model=${encodeURIComponent(modelId)}` : "";
-      const res = await apiRequest<VehicleVariant[] | { results: VehicleVariant[] }>(`/catalogue/variants/${q}`, {
+      return fetchAllPages<VehicleVariant>(`/catalogue/variants/${q}`, {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getCategories(): Promise<PartCategory[]> {
-      const res = await apiRequest<PartCategory[] | { results: PartCategory[] }>("/catalogue/categories/", {
+      return fetchAllPages<PartCategory>("/catalogue/categories/", {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getParts(params?: { category?: string; brand?: string; search?: string }): Promise<PartSummary[]> {
@@ -698,11 +724,10 @@ export const api = {
       if (params?.brand) query.append("brand", params.brand);
       if (params?.search) query.append("search", params.search);
       const qs = query.toString() ? `?${query.toString()}` : "";
-      const res = await apiRequest<PartSummary[] | { results: PartSummary[] }>(`/catalogue/parts/${qs}`, {
+      return fetchAllPages<PartSummary>(`/catalogue/parts/${qs}`, {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getPart(id: string): Promise<PartDetail> {
@@ -713,14 +738,13 @@ export const api = {
     },
 
     async getPartCompatibilities(partId: string): Promise<PartCompatibilityItem[]> {
-      const res = await apiRequest<PartCompatibilityItem[] | { results: PartCompatibilityItem[] }>(
+      return fetchAllPages<PartCompatibilityItem>(
         `/catalogue/parts/${partId}/compatibilities/`,
         {
           method: "GET",
           requiresAuth: false,
         }
       );
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async evaluateFitment(partId: string, variantId: string): Promise<FitmentEvaluation> {
@@ -1017,6 +1041,7 @@ export interface SellerApplication {
   trading_name?: string;
   business_type: string;
   business_type_display?: string;
+  requested_roles?: string[];
   registration_number?: string;
   vat_number?: string;
   contact_name: string;
@@ -1044,6 +1069,7 @@ export interface SellerApplicationCreateUpdatePayload {
   business_name: string;
   trading_name?: string;
   business_type?: string;
+  requested_roles?: string[];
   registration_number?: string;
   vat_number?: string;
   contact_name?: string;

@@ -27,11 +27,16 @@ class BusinessTypeChoices(models.TextChoices):
     LLP = 'LLP', 'Limited Liability Partnership (LLP)'
 
 
-def grant_roles_for_application(user: User, business_type: str):
+def grant_roles_for_application(user: User, business_type: str, requested_roles: list = None):
     """Grants canonical platform roles upon seller application approval."""
-    user.add_role(RoleChoices.SELLER)
-    if business_type == BusinessTypeChoices.WORKSHOP:
-        user.add_role(RoleChoices.WORKSHOP)
+    if requested_roles:
+        for role in requested_roles:
+            user.add_role(role)
+    else:
+        # Backward compatibility for legacy applications without requested_roles
+        user.add_role(RoleChoices.SELLER)
+        if business_type == BusinessTypeChoices.WORKSHOP:
+            user.add_role(RoleChoices.WORKSHOP)
 
 
 class SellerApplication(BaseUUIDModel):
@@ -56,6 +61,11 @@ class SellerApplication(BaseUUIDModel):
         max_length=50,
         choices=BusinessTypeChoices.choices,
         default=BusinessTypeChoices.DEALER,
+    )
+    requested_roles = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Canonical roles requested: SELLER, WORKSHOP",
     )
     company_registration_number = models.CharField(max_length=100, blank=True)
     tax_id = models.CharField(max_length=100, blank=True)
@@ -106,6 +116,15 @@ class SellerApplication(BaseUUIDModel):
         super().clean()
         if self.status == SellerApplicationStatusChoices.REJECTED and not self.rejection_reason:
             raise ValidationError({'rejection_reason': 'A rejection reason is required when rejecting an application.'})
+        if self.requested_roles:
+            if not isinstance(self.requested_roles, list):
+                raise ValidationError({'requested_roles': 'Requested roles must be a list.'})
+            allowed_roles = {RoleChoices.SELLER, RoleChoices.WORKSHOP}
+            for r in self.requested_roles:
+                if r not in allowed_roles:
+                    raise ValidationError({'requested_roles': f"Role '{r}' is not supported for seller/workshop applicants."})
+            if len(self.requested_roles) != len(set(self.requested_roles)):
+                raise ValidationError({'requested_roles': 'Duplicate roles are not permitted.'})
 
     def submit_for_review(self):
         """Transitions draft or rejected application into pending review state."""
@@ -125,7 +144,7 @@ class SellerApplication(BaseUUIDModel):
         self.save(update_fields=['status', 'submitted_at', 'updated_at'])
 
     def approve(self, reviewer: User, notes: str = ''):
-        """Approves the application, records reviewer, and grants SELLER role to applicant."""
+        """Approves the application, records reviewer, and grants requested roles to applicant."""
         if reviewer == self.user:
             raise ValidationError('Applicants cannot approve their own application.')
 
@@ -140,7 +159,7 @@ class SellerApplication(BaseUUIDModel):
         self.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'admin_notes', 'updated_at'])
 
         # Grant verified platform roles to applicant
-        grant_roles_for_application(self.user, self.business_type)
+        grant_roles_for_application(self.user, self.business_type, self.requested_roles)
 
     def reject(self, reviewer: User, reason: str, notes: str = ''):
         """Rejects the application with mandatory rejection reason."""
