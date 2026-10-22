@@ -155,7 +155,9 @@ interface RequestOptions extends RequestInit {
 export async function apiRequest<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
   const { requiresAuth = true, retryOn401 = true, headers: customHeaders, ...restOptions } = options;
   const baseUrl = getBaseUrl();
-  const url = `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+  const url = endpoint.startsWith("http://") || endpoint.startsWith("https://")
+    ? endpoint
+    : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -246,6 +248,34 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
   }
 
   return data as T;
+}
+
+export interface PaginatedResponse<T> {
+  count?: number;
+  next?: string | null;
+  previous?: string | null;
+  results?: T[];
+}
+
+export async function fetchAllPages<T>(initialEndpoint: string, options: RequestOptions = {}): Promise<T[]> {
+  let allItems: T[] = [];
+  let currentEndpoint: string | null = initialEndpoint;
+
+  while (currentEndpoint) {
+    const res: T[] | PaginatedResponse<T> = await apiRequest<T[] | PaginatedResponse<T>>(currentEndpoint, options);
+    if (Array.isArray(res)) {
+      allItems = allItems.concat(res);
+      break;
+    }
+    if (res && typeof res === "object" && Array.isArray(res.results)) {
+      allItems = allItems.concat(res.results);
+      currentEndpoint = res.next || null;
+    } else {
+      break;
+    }
+  }
+
+  return allItems;
 }
 
 // ----------------------------------------------------------------------
@@ -659,37 +689,33 @@ export const api = {
   // Phase 2: Vehicle & Parts Catalogue
   catalogue: {
     async getMakes(): Promise<VehicleMake[]> {
-      const res = await apiRequest<VehicleMake[] | { results: VehicleMake[] }>("/catalogue/makes/", {
+      return fetchAllPages<VehicleMake>("/catalogue/makes/", {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getModels(makeId?: string): Promise<VehicleModel[]> {
       const q = makeId ? `?make=${encodeURIComponent(makeId)}` : "";
-      const res = await apiRequest<VehicleModel[] | { results: VehicleModel[] }>(`/catalogue/models/${q}`, {
+      return fetchAllPages<VehicleModel>(`/catalogue/models/${q}`, {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getVariants(modelId?: string): Promise<VehicleVariant[]> {
       const q = modelId ? `?model=${encodeURIComponent(modelId)}` : "";
-      const res = await apiRequest<VehicleVariant[] | { results: VehicleVariant[] }>(`/catalogue/variants/${q}`, {
+      return fetchAllPages<VehicleVariant>(`/catalogue/variants/${q}`, {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getCategories(): Promise<PartCategory[]> {
-      const res = await apiRequest<PartCategory[] | { results: PartCategory[] }>("/catalogue/categories/", {
+      return fetchAllPages<PartCategory>("/catalogue/categories/", {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getParts(params?: { category?: string; brand?: string; search?: string }): Promise<PartSummary[]> {
@@ -698,11 +724,10 @@ export const api = {
       if (params?.brand) query.append("brand", params.brand);
       if (params?.search) query.append("search", params.search);
       const qs = query.toString() ? `?${query.toString()}` : "";
-      const res = await apiRequest<PartSummary[] | { results: PartSummary[] }>(`/catalogue/parts/${qs}`, {
+      return fetchAllPages<PartSummary>(`/catalogue/parts/${qs}`, {
         method: "GET",
         requiresAuth: false,
       });
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async getPart(id: string): Promise<PartDetail> {
@@ -713,14 +738,13 @@ export const api = {
     },
 
     async getPartCompatibilities(partId: string): Promise<PartCompatibilityItem[]> {
-      const res = await apiRequest<PartCompatibilityItem[] | { results: PartCompatibilityItem[] }>(
+      return fetchAllPages<PartCompatibilityItem>(
         `/catalogue/parts/${partId}/compatibilities/`,
         {
           method: "GET",
           requiresAuth: false,
         }
       );
-      return Array.isArray(res) ? res : res.results || [];
     },
 
     async evaluateFitment(partId: string, variantId: string): Promise<FitmentEvaluation> {
@@ -803,19 +827,33 @@ export const api = {
       });
     },
 
-    async browseParts(params?: Record<string, string>): Promise<MarketplacePartListing[]> {
-      const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
-      const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
+    async browsePartsPaginated(params?: BrowsePartsParams): Promise<PaginatedPartListResponse> {
+      const cleanParams: Record<string, string> = {};
+      if (params) {
+        for (const [k, v] of Object.entries(params)) {
+          if (v !== undefined && v !== null && v !== "") {
+            cleanParams[k] = String(v);
+          }
+        }
+      }
+      const qs = Object.keys(cleanParams).length > 0 ? `?${new URLSearchParams(cleanParams).toString()}` : "";
+      const res = await apiRequest<PaginatedPartListResponse>(
         `/marketplace/browse/parts/${qs}`,
-        { method: "GET", requiresAuth: false }
+        { method: "GET", requiresAuth: Boolean(cleanParams.fits_vehicle) }
       );
-      return Array.isArray(res) ? res : res.results || [];
+      return res;
     },
 
-    async getPart(id: string): Promise<MarketplacePartListing> {
-      return apiRequest<MarketplacePartListing>(`/marketplace/browse/parts/${id}/`, {
+    async browseParts(params?: BrowsePartsParams): Promise<MarketplacePartListing[]> {
+      const res = await this.browsePartsPaginated(params);
+      return res.results || [];
+    },
+
+    async getPart(id: string, params?: Record<string, string>): Promise<MarketplacePartListing> {
+      const qs = params ? `?${new URLSearchParams(params).toString()}` : "";
+      return apiRequest<MarketplacePartListing>(`/marketplace/browse/parts/${id}/${qs}`, {
         method: "GET",
-        requiresAuth: false,
+        requiresAuth: Boolean(params?.fits_vehicle),
       });
     },
 
@@ -1003,6 +1041,7 @@ export interface SellerApplication {
   trading_name?: string;
   business_type: string;
   business_type_display?: string;
+  requested_roles?: string[];
   registration_number?: string;
   vat_number?: string;
   contact_name: string;
@@ -1030,6 +1069,7 @@ export interface SellerApplicationCreateUpdatePayload {
   business_name: string;
   trading_name?: string;
   business_type?: string;
+  requested_roles?: string[];
   registration_number?: string;
   vat_number?: string;
   contact_name?: string;
@@ -1237,6 +1277,27 @@ export interface MarketplaceVehicleListing {
   updated_at: string;
 }
 
+export interface FitmentVerificationItem {
+  variant_id: string;
+  display_name: string;
+  status: "VERIFIED" | "CONDITIONAL" | "CONFLICT" | "SELLER_CLAIMED" | "UNKNOWN";
+  qualifications: string;
+  source: "CATALOGUE" | "SELLER" | "NONE";
+}
+
+export interface FitmentSummary {
+  verified: number;
+  conditional: number;
+  seller_claimed: number;
+  conflict: number;
+}
+
+export interface BuyerPartFitment {
+  status: "VERIFIED" | "CONDITIONAL" | "CONFLICT" | "SELLER_CLAIMED" | "UNKNOWN";
+  qualifications: string;
+  source: "CATALOGUE" | "SELLER" | "NONE";
+}
+
 export interface MarketplacePartListing {
   id: string;
   seller?: string;
@@ -1270,6 +1331,9 @@ export interface MarketplacePartListing {
   images?: string[];
   compatible_variants?: VehicleVariant[];
   compatibility_notes?: string;
+  fitment?: BuyerPartFitment;
+  fitment_verification?: FitmentVerificationItem[];
+  fitment_summary?: FitmentSummary;
   status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
   submitted_at?: string;
   reviewed_at?: string | null;
@@ -1279,6 +1343,54 @@ export interface MarketplacePartListing {
   admin_notes?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface PartBrowseCategoryFacet {
+  id: string;
+  name: string;
+  slug: string;
+  count: number;
+}
+
+export interface PartBrowseBrandFacet {
+  brand: string;
+  count: number;
+}
+
+export interface PartBrowseConditionFacet {
+  condition: string;
+  count: number;
+}
+
+export interface PartBrowseFacets {
+  brands: PartBrowseBrandFacet[] | Record<string, number>;
+  categories: PartBrowseCategoryFacet[];
+  conditions: PartBrowseConditionFacet[] | Record<string, number>;
+}
+
+export interface PaginatedPartListResponse {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: MarketplacePartListing[];
+  facets?: PartBrowseFacets;
+}
+
+export interface BrowsePartsParams {
+  search?: string;
+  category_id?: string;
+  brand?: string;
+  mpn?: string;
+  condition?: string;
+  in_stock?: boolean | string;
+  price_max?: number | string;
+  sort?: "newest" | "price_asc" | "price_desc" | "relevance" | string;
+  fits_vehicle?: string;
+  fits_only?: boolean | string;
+  include_facets?: boolean | string;
+  page?: number | string;
+  page_size?: number | string;
+  [key: string]: string | number | boolean | undefined;
 }
 
 export interface CreateVehicleListingPayload {

@@ -93,6 +93,10 @@ export default function AdminMarketplaceReviewView() {
 
   const handleExecuteReview = async () => {
     if (!reviewAction) return;
+    if (inspectPart && reviewAction === "APPROVE" && (inspectPart.fitment_summary?.conflict ?? 0) > 0) {
+      setModalError("Cannot approve listing with conflicting vehicle fitments. Request changes or reject.");
+      return;
+    }
     if ((reviewAction === "REJECT" || reviewAction === "REQUEST_CHANGES") && !rejectionReason.trim()) {
       setModalError("Please enter a mandatory rejection / change-request reason.");
       return;
@@ -342,6 +346,12 @@ export default function AdminMarketplaceReviewView() {
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700">
                         {p.status}
                       </span>
+                      {p.fitment_summary && p.fitment_summary.conflict > 0 && (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300 flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3 text-rose-600" />
+                          <span>{p.fitment_summary.conflict} Fitment Conflict</span>
+                        </span>
+                      )}
                     </div>
                     <h4 className="text-base font-black text-slate-950">{p.name}</h4>
                     <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
@@ -611,6 +621,74 @@ export default function AdminMarketplaceReviewView() {
                   </div>
                 )}
 
+                {/* Fitment Verification & Summary (Phase 3 Part C) */}
+                <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                      <Wrench className="w-3.5 h-3.5 text-slate-600" />
+                      <span>Catalogue Fitment Verification</span>
+                    </span>
+                    {inspectPart.fitment_summary && (
+                      <div className="flex items-center gap-1.5">
+                        {inspectPart.fitment_summary.conflict > 0 && (
+                          <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-[10px] font-bold border border-rose-300 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-rose-600" />
+                            <span>{inspectPart.fitment_summary.conflict} Conflict</span>
+                          </span>
+                        )}
+                        {inspectPart.fitment_summary.verified > 0 && (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-bold border border-emerald-200">
+                            {inspectPart.fitment_summary.verified} Verified
+                          </span>
+                        )}
+                        {inspectPart.fitment_summary.conditional > 0 && (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 text-[10px] font-bold border border-amber-200">
+                            {inspectPart.fitment_summary.conditional} Conditional
+                          </span>
+                        )}
+                        {inspectPart.fitment_summary.seller_claimed > 0 && (
+                          <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-800 text-[10px] font-bold border border-sky-200">
+                            {inspectPart.fitment_summary.seller_claimed} Claimed
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {inspectPart.fitment_verification && inspectPart.fitment_verification.length > 0 ? (
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                      {inspectPart.fitment_verification.map((v) => (
+                        <div
+                          key={v.variant_id}
+                          className={`p-2 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+                            v.status === "VERIFIED"
+                              ? "bg-emerald-50/70 border-emerald-200 text-emerald-900"
+                              : v.status === "CONDITIONAL"
+                              ? "bg-amber-50/70 border-amber-200 text-amber-900"
+                              : v.status === "CONFLICT"
+                              ? "bg-rose-100 border-rose-300 text-rose-950 font-bold"
+                              : "bg-sky-50/70 border-sky-200 text-sky-900"
+                          }`}
+                        >
+                          <div className="space-y-0.5">
+                            <span className="font-semibold block">{v.display_name}</span>
+                            {v.qualifications && (
+                              <span className="text-[10px] italic font-normal block opacity-85">
+                                Note: {v.qualifications}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-white/80 border border-slate-200 shrink-0">
+                            {v.status === "CONFLICT" ? "DOES NOT FIT" : v.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-500 italic">No compatible variants declared for this listing.</p>
+                  )}
+                </div>
+
                 {/* Audit Review History */}
                 {inspectPart.reviewed_at && (
                   <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 text-[11px] text-slate-600">
@@ -626,15 +704,40 @@ export default function AdminMarketplaceReviewView() {
             {/* Moderation Actions */}
             <div className="pt-4 border-t border-slate-200 space-y-3">
               <h5 className="text-xs font-bold text-slate-800">Compliance Decision</h5>
+
+              {/* Conflict Explanation Banner if conflicts exist */}
+              {inspectPart && (inspectPart.fitment_summary?.conflict ?? 0) > 0 && (
+                <div className="p-3 bg-rose-50 border border-rose-300 rounded-xl text-xs text-rose-900 flex items-start gap-2 font-medium">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block">Approve Disabled: Fitment Conflict Detected</span>
+                    <span>
+                      This listing declares {inspectPart.fitment_summary?.conflict} vehicle variant(s) confirmed as incompatible by canonical catalogue records. Under platform policy, listings with fitment conflicts cannot be approved. Request Changes or Reject this submission.
+                    </span>
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setReviewAction("APPROVE")}
+                  onClick={() => {
+                    if (inspectPart && (inspectPart.fitment_summary?.conflict ?? 0) > 0) return;
+                    setReviewAction("APPROVE");
+                  }}
+                  disabled={Boolean(inspectPart && (inspectPart.fitment_summary?.conflict ?? 0) > 0)}
                   className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-                    reviewAction === "APPROVE"
+                    inspectPart && (inspectPart.fitment_summary?.conflict ?? 0) > 0
+                      ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60"
+                      : reviewAction === "APPROVE"
                       ? "bg-emerald-600 text-white shadow"
                       : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200"
                   }`}
+                  title={
+                    inspectPart && (inspectPart.fitment_summary?.conflict ?? 0) > 0
+                      ? "Approval blocked: Listing has conflicting vehicle fitments"
+                      : undefined
+                  }
                 >
                   <CheckCircle2 className="w-4 h-4" />
                   <span>Approve & Publish</span>

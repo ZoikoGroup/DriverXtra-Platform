@@ -1,19 +1,36 @@
+import uuid
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied, ValidationError as DRFValidationError
+from rest_framework.exceptions import (
+    PermissionDenied,
+    ValidationError as DRFValidationError,
+    NotAuthenticated,
+    NotFound,
+)
 from django.http import Http404
 from django.db import transaction
-from django.db.models import Q, F
+from django.db.models import (
+    Q, F, Count, Case, When, Value, IntegerField, TextField, Exists, OuterRef,
+)
+from django.db.models.functions import Cast
 from django.utils import timezone
 from django.core.exceptions import ValidationError as DjangoValidationError
+from rest_framework.pagination import PageNumberPagination
 from common.permissions import IsPlatformStaff, HasPermission
-from platform_core.audit.writer import record_audit_entry
-from apps.catalogue.models import Part
+from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
+from apps.catalogue.models import Part, PartCompatibility, FitmentTypeChoices
+from apps.garage.models import GarageVehicle
+from apps.marketplace.fitment import (
+    get_conflicting_variants,
+    batch_evaluate_listings_fitment,
+    evaluate_listing_single_variant,
+)
 from apps.marketplace.models import (
     VehicleListing,
     SparePartListing,
     ListingStatusChoices,
     StockMovementReasonChoices,
+    PartConditionChoices,
 )
 from apps.marketplace.serializers import (
     VehicleListingSellerSerializer,
@@ -134,22 +151,53 @@ class MarketplaceVehicleDetailView(generics.RetrieveAPIView):
         ).select_related('make', 'model', 'variant', 'seller', 'organisation')
 
 
+class MarketplacePartPagination(PageNumberPagination):
+    """Custom pagination for spare parts browse supporting page_size up to 50."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+
+    def get_page_size(self, request):
+        if self.page_size_query_param:
+            val = request.query_params.get(self.page_size_query_param)
+            if val is not None:
+                try:
+                    val_int = int(val)
+                except (ValueError, TypeError):
+                    raise DRFValidationError({"page_size": "Page size must be a positive integer."})
+                if val_int < 1:
+                    raise DRFValidationError({"page_size": "Page size must be a positive integer."})
+                if val_int > self.max_page_size:
+                    return self.max_page_size
+                return val_int
+        return self.page_size
+
+
 class MarketplacePartListView(generics.ListAPIView):
     """Public / Buyer endpoint to search and browse approved spare parts for sale.
 
     GET /api/v1/marketplace/browse/parts/
+    Optional ?fits_vehicle=<garage_vehicle_id> annotates results with fitment evaluation.
+    Optional ?fits_only=true filters to only verified/conditional fitments.
+    Optional ?sort=newest|price_asc|price_desc|relevance (default: newest).
+    Optional ?condition=NEW,USED,REFURBISHED.
+    Optional ?in_stock=true|false.
+    Optional ?include_facets=true.
+    Optional ?page=<int>&page_size=<int>.
     """
     permission_classes = [permissions.AllowAny]
     serializer_class = SparePartListingPublicSerializer
+    pagination_class = MarketplacePartPagination
 
     def get_queryset(self):
         queryset = SparePartListing.objects.filter(
             status=ListingStatusChoices.APPROVED,
             is_active=True,
-        ).select_related('category', 'seller', 'organisation').prefetch_related('compatible_variants')
+        ).select_related('category', 'seller', 'organisation', 'catalogue_part').prefetch_related('compatible_variants')
 
         params = self.request.query_params
 
+        # 1. Category filter
         category = params.get('category') or params.get('category_id')
         category_slug = params.get('category_slug')
         if category:
@@ -159,14 +207,17 @@ class MarketplacePartListView(generics.ListAPIView):
                 Q(category__slug=category_slug) | Q(category__parent__slug=category_slug)
             )
 
+        # 2. Brand filter
         brand = params.get('brand')
         if brand:
             queryset = queryset.filter(brand__iexact=brand)
 
+        # 3. MPN filter
         mpn = params.get('mpn')
         if mpn:
             queryset = queryset.filter(mpn__icontains=mpn)
 
+        # 4. Price filters
         price_min = params.get('price_min')
         if price_min:
             queryset = queryset.filter(price__gte=price_min)
@@ -174,26 +225,221 @@ class MarketplacePartListView(generics.ListAPIView):
         if price_max:
             queryset = queryset.filter(price__lte=price_max)
 
+        # 5. Variant ID filter
         variant_id = params.get('variant_id') or params.get('vehicle_variant_id')
         if variant_id:
             queryset = queryset.filter(compatible_variants__id=variant_id)
 
-        search = params.get('search')
+        # 6. Condition filter (Part D: accepts comma-separated multiple, validates choices)
+        condition_param = params.get('condition')
+        if condition_param:
+            valid_conditions = set(PartConditionChoices.values)
+            raw_conds = [c.strip().upper() for c in condition_param.split(',') if c.strip()]
+            if not raw_conds or any(c not in valid_conditions for c in raw_conds):
+                valid_str = ', '.join(sorted(valid_conditions))
+                raise DRFValidationError({"condition": f"Invalid condition choice. Must be one of: {valid_str}."})
+            queryset = queryset.filter(condition__in=raw_conds)
+
+        # 7. In-Stock filter (Part D: true/false boolean string, true filters stock_quantity > 0)
+        in_stock_param = params.get('in_stock')
+        if in_stock_param is not None:
+            val = in_stock_param.strip().lower()
+            if val in ('true', '1'):
+                queryset = queryset.filter(stock_quantity__gt=0)
+            elif val in ('false', '0'):
+                pass
+            else:
+                raise DRFValidationError({"in_stock": "Invalid in_stock value. Must be 'true' or 'false'."})
+
+        # 8. Sort parameter validation
+        sort = params.get('sort', 'newest')
+        if sort not in ('newest', 'price_asc', 'price_desc', 'relevance'):
+            raise DRFValidationError({"sort": f"Invalid sort option '{sort}'. Must be one of: newest, price_asc, price_desc, relevance."})
+
+        # 9. fits_vehicle and fits_only handling
+        fits_vehicle = params.get('fits_vehicle')
+        fits_only_param = params.get('fits_only')
+        fits_only = False
+        if fits_only_param is not None:
+            val = fits_only_param.strip().lower()
+            if val in ('true', '1'):
+                fits_only = True
+                if not fits_vehicle:
+                    raise DRFValidationError({"fits_only": "fits_only filter requires fits_vehicle parameter."})
+            elif val in ('false', '0'):
+                fits_only = False
+            else:
+                raise DRFValidationError({"fits_only": "Invalid fits_only value. Must be 'true' or 'false'."})
+
+        target_variant = None
+        no_variant = False
+        if fits_vehicle:
+            user = self.request.user
+            if not (user and user.is_authenticated):
+                raise NotAuthenticated("Authentication credentials were not provided.")
+            try:
+                v_uuid = uuid.UUID(str(fits_vehicle))
+            except (ValueError, AttributeError, TypeError):
+                raise DRFValidationError({"fits_vehicle": "Invalid vehicle UUID format."})
+
+            garage_vehicle = GarageVehicle.objects.filter(
+                id=v_uuid,
+                user=user,
+                is_archived=False,
+            ).select_related('vehicle_variant').first()
+            if not garage_vehicle:
+                raise NotFound("Garage vehicle not found.")
+
+            if garage_vehicle.vehicle_variant:
+                target_variant = garage_vehicle.vehicle_variant
+            else:
+                no_variant = True
+
+            self._cached_fits_vehicle = fits_vehicle
+            self._cached_target_variant = target_variant
+            self._cached_no_variant = no_variant
+
+            if fits_only:
+                if no_variant or target_variant is None:
+                    queryset = queryset.none()
+                else:
+                    compat_match = PartCompatibility.objects.filter(
+                        part_id=OuterRef('catalogue_part_id'),
+                        vehicle_variant_id=target_variant.id,
+                        fitment_type__in=[FitmentTypeChoices.CONFIRMED_FIT, FitmentTypeChoices.CONDITIONAL_FIT],
+                    )
+                    any_compat = PartCompatibility.objects.filter(
+                        part_id=OuterRef('catalogue_part_id'),
+                        vehicle_variant_id=target_variant.id,
+                    )
+                    fits_predicate = Q(catalogue_part__isnull=False) & (
+                        Q(Exists(compat_match)) |
+                        (Q(catalogue_part__is_universal=True) & ~Q(Exists(any_compat)))
+                    )
+                    queryset = queryset.filter(fits_predicate)
+
+        # 10. Search & Relevance
+        search = params.get('search', '').strip()
+        queryset = queryset.annotate(oem_text=Cast('oem_numbers', output_field=TextField()))
+
         if search:
             queryset = queryset.filter(
                 Q(name__icontains=search)
                 | Q(brand__icontains=search)
                 | Q(mpn__icontains=search)
                 | Q(description__icontains=search)
+                | Q(oem_text__icontains=search)
             )
 
+        if sort == 'relevance':
+            if search:
+                # Portable relevance ranking weights:
+                # 1. Exact MPN match: 100 points
+                # 2. Exact OEM cross reference match: 90 points
+                # 3. MPN prefix match (starts with search query): 60 points
+                # 4. Brand exact match: 40 points
+                # 5. Name contains: 25 points
+                # 6. Brand contains: 15 points
+                # 7. Description contains: 5 points
+                relevance_score = Case(
+                    When(mpn__iexact=search, then=Value(100)),
+                    When(oem_text__icontains=search, then=Value(90)),
+                    When(mpn__istartswith=search, then=Value(60)),
+                    When(brand__iexact=search, then=Value(40)),
+                    When(name__icontains=search, then=Value(25)),
+                    When(brand__icontains=search, then=Value(15)),
+                    When(description__icontains=search, then=Value(5)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+                queryset = queryset.annotate(relevance_score=relevance_score).order_by('-relevance_score', '-created_at', 'id')
+            else:
+                queryset = queryset.order_by('-created_at', 'id')
+        elif sort == 'price_asc':
+            queryset = queryset.order_by('price', '-created_at', 'id')
+        elif sort == 'price_desc':
+            queryset = queryset.order_by('-price', '-created_at', 'id')
+        else:  # newest
+            queryset = queryset.order_by('-created_at', 'id')
+
         return queryset.distinct()
+
+    def _compute_facets(self, queryset):
+        base_qs = queryset.order_by()
+        brands = list(
+            base_qs.values('brand')
+            .annotate(count=Count('id', distinct=True))
+            .order_by('-count', 'brand')
+        )
+        categories = [
+            {
+                'id': str(c['category__id']),
+                'name': c['category__name'],
+                'slug': c['category__slug'],
+                'count': c['count'],
+            }
+            for c in base_qs.values('category__id', 'category__name', 'category__slug')
+            .annotate(count=Count('id', distinct=True))
+            .order_by('-count', 'category__name')
+            if c['category__id'] is not None
+        ]
+        conditions = list(
+            base_qs.values('condition')
+            .annotate(count=Count('id', distinct=True))
+            .order_by('-count', 'condition')
+        )
+        return {
+            'brands': brands,
+            'categories': categories,
+            'conditions': conditions,
+        }
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # Compute facets over full filtered queryset before pagination if requested
+        facets_data = None
+        include_facets = request.query_params.get('include_facets', '').strip().lower()
+        if include_facets in ('true', '1'):
+            facets_data = self._compute_facets(queryset)
+
+        page = self.paginate_queryset(queryset)
+        listings_to_evaluate = page if page is not None else list(queryset)
+
+        fits_vehicle = getattr(self, '_cached_fits_vehicle', None)
+        target_variant = getattr(self, '_cached_target_variant', None)
+        no_variant = getattr(self, '_cached_no_variant', False)
+
+        if fits_vehicle and target_variant and listings_to_evaluate:
+            eval_map = batch_evaluate_listings_fitment(listings_to_evaluate, target_variant)
+            for listing in listings_to_evaluate:
+                listing._annotated_fitment = eval_map.get(listing.id)
+
+        serializer_context = self.get_serializer_context()
+        if fits_vehicle:
+            serializer_context['fits_vehicle'] = True
+            serializer_context['fits_vehicle_variant'] = target_variant
+            serializer_context['fits_vehicle_no_variant'] = no_variant
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context=serializer_context)
+            response = self.get_paginated_response(serializer.data)
+            if facets_data is not None:
+                response.data['facets'] = facets_data
+            return response
+
+        serializer = self.get_serializer(queryset, many=True, context=serializer_context)
+        response_data = {'results': serializer.data}
+        if facets_data is not None:
+            response_data['facets'] = facets_data
+        return Response(response_data)
 
 
 class MarketplacePartDetailView(generics.RetrieveAPIView):
     """Public / Buyer endpoint to view full details of an approved spare part for sale.
 
     GET /api/v1/marketplace/browse/parts/<id>/
+    Optional ?fits_vehicle=<garage_vehicle_id> annotates response with fitment evaluation.
     """
     permission_classes = [permissions.AllowAny]
     serializer_class = SparePartListingPublicSerializer
@@ -203,7 +449,43 @@ class MarketplacePartDetailView(generics.RetrieveAPIView):
         return SparePartListing.objects.filter(
             status=ListingStatusChoices.APPROVED,
             is_active=True,
-        ).select_related('category', 'seller', 'organisation').prefetch_related('compatible_variants')
+        ).select_related('category', 'seller', 'organisation', 'catalogue_part').prefetch_related('compatible_variants')
+
+    def retrieve(self, request, *args, **kwargs):
+        fits_vehicle = request.query_params.get('fits_vehicle')
+        target_variant = None
+        no_variant = False
+
+        if fits_vehicle:
+            if not (request.user and request.user.is_authenticated):
+                raise NotAuthenticated("Authentication credentials were not provided.")
+            try:
+                v_uuid = uuid.UUID(str(fits_vehicle))
+            except (ValueError, AttributeError, TypeError):
+                raise DRFValidationError({"fits_vehicle": "Invalid vehicle UUID format."})
+
+            garage_vehicle = GarageVehicle.objects.filter(
+                id=v_uuid,
+                user=request.user,
+                is_archived=False,
+            ).select_related('vehicle_variant').first()
+            if not garage_vehicle:
+                raise NotFound("Garage vehicle not found.")
+
+            if garage_vehicle.vehicle_variant:
+                target_variant = garage_vehicle.vehicle_variant
+            else:
+                no_variant = True
+
+        instance = self.get_object()
+        serializer_context = self.get_serializer_context()
+        if fits_vehicle:
+            serializer_context['fits_vehicle'] = True
+            serializer_context['fits_vehicle_variant'] = target_variant
+            serializer_context['fits_vehicle_no_variant'] = no_variant
+
+        serializer = self.get_serializer(instance, context=serializer_context)
+        return Response(serializer.data)
 
 
 class CataloguePartOffersView(generics.ListAPIView):
@@ -444,6 +726,29 @@ class SellerPartListCreateView(generics.ListCreateAPIView):
         if self.request.data.get('status') == ListingStatusChoices.DRAFT:
             initial_status = ListingStatusChoices.DRAFT
 
+        # Submission gate: non-draft creation cannot enter PENDING_APPROVAL with CONFLICT
+        if initial_status != ListingStatusChoices.DRAFT:
+            cat_part = serializer.validated_data.get('catalogue_part')
+            variants = serializer.validated_data.get('compatible_variants', [])
+            conflicts = get_conflicting_variants(cat_part, variants)
+            if conflicts:
+                corr_id = getattr(self.request, 'correlation_id', '')
+                record_denied_audit_entry(
+                    action="listing:submit",
+                    resource_type="SparePartListing",
+                    resource_id="",
+                    reason_code="FITMENT_CONFLICT",
+                    correlation_id=corr_id,
+                    actor_id=user.id,
+                    metadata={
+                        "conflicting_variant_ids": [c["variant_id"] for c in conflicts],
+                    },
+                )
+                raise DRFValidationError({
+                    "compatible_variants": "Listing contains compatible variants that conflict with catalogue records (DOES_NOT_FIT).",
+                    "conflicts": conflicts,
+                })
+
         requested_stock = serializer.validated_data.get('stock_quantity', 1)
 
         with transaction.atomic():
@@ -543,6 +848,33 @@ class SellerPartDetailUpdateView(generics.RetrieveUpdateAPIView):
                 update_data['submitted_at'] = timezone.now()
                 update_data['rejection_reason'] = ""
 
+        # Gate on updates moving to PENDING_APPROVAL
+        if update_data.get('status') == ListingStatusChoices.PENDING_APPROVAL:
+            target_cat_part = serializer.validated_data.get('catalogue_part', instance.catalogue_part)
+            target_variants = serializer.validated_data.get(
+                'compatible_variants',
+                list(instance.compatible_variants.all())
+            )
+            conflicts = get_conflicting_variants(target_cat_part, target_variants)
+            if conflicts:
+                corr_id = getattr(self.request, 'correlation_id', '')
+                record_denied_audit_entry(
+                    action="listing:submit",
+                    resource_type="SparePartListing",
+                    resource_id=str(instance.id),
+                    reason_code="FITMENT_CONFLICT",
+                    correlation_id=corr_id,
+                    actor_id=self.request.user.id,
+                    metadata={
+                        "listing_id": str(instance.id),
+                        "conflicting_variant_ids": [c["variant_id"] for c in conflicts],
+                    },
+                )
+                raise DRFValidationError({
+                    "compatible_variants": "Listing contains compatible variants that conflict with catalogue records (DOES_NOT_FIT).",
+                    "conflicts": conflicts,
+                })
+
         serializer.save(**update_data)
 
 
@@ -578,6 +910,35 @@ class SellerPartResubmitView(views.APIView):
         if listing.status == ListingStatusChoices.PENDING_APPROVAL:
             return Response(
                 {"error": "This listing is already pending approval."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Submission gate: cannot enter PENDING_APPROVAL with CONFLICT
+        conflicts = get_conflicting_variants(listing.catalogue_part, listing.compatible_variants.all())
+        if conflicts:
+            corr_id = getattr(request, 'correlation_id', '')
+            record_denied_audit_entry(
+                action="listing:submit",
+                resource_type="SparePartListing",
+                resource_id=str(listing.id),
+                reason_code="FITMENT_CONFLICT",
+                correlation_id=corr_id,
+                actor_id=user.id,
+                metadata={
+                    "listing_id": str(listing.id),
+                    "conflicting_variant_ids": [c["variant_id"] for c in conflicts],
+                },
+            )
+            return Response(
+                {
+                    "status": "error",
+                    "code": 400,
+                    "message": "Listing cannot be submitted because it contains compatible variants that conflict with canonical catalogue records (DOES_NOT_FIT).",
+                    "details": {
+                        "compatible_variants": "Listing contains compatible variants that conflict with catalogue records.",
+                        "conflicts": conflicts,
+                    },
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -909,6 +1270,20 @@ class AdminPartListingReviewView(views.APIView):
         admin_notes = serializer.validated_data.get('admin_notes', '')
 
         if action == 'APPROVE':
+            conflicts = get_conflicting_variants(listing.catalogue_part, listing.compatible_variants.all())
+            if conflicts:
+                return Response(
+                    {
+                        "status": "error",
+                        "code": 400,
+                        "message": "Cannot approve listing with conflicting fitment records.",
+                        "details": {
+                            "compatible_variants": "Listing contains compatible variants that conflict with catalogue records (DOES_NOT_FIT).",
+                            "conflicts": conflicts,
+                        },
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             listing.status = ListingStatusChoices.APPROVED
             listing.rejection_reason = ""
         elif action == 'REJECT':

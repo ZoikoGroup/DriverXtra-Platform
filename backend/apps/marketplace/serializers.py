@@ -13,6 +13,12 @@ from apps.marketplace.models import (
 )
 from apps.catalogue.models import Part
 from apps.marketplace.services import change_price, _UNSET
+from apps.marketplace.fitment import (
+    evaluate_listing_fitment,
+    get_conflicting_variants,
+    evaluate_listing_single_variant,
+)
+from platform_core.audit.writer import record_denied_audit_entry
 from apps.organisations.models import Organisation, OrganisationRoleChoices
 from apps.catalogue.serializers import (
     VehicleMakeSerializer,
@@ -211,6 +217,8 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    fitment_verification = serializers.SerializerMethodField(read_only=True)
+    fitment_summary = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = SparePartListing
@@ -241,6 +249,8 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'images',
             'compatible_variants',
             'compatibility_notes',
+            'fitment_verification',
+            'fitment_summary',
             'status',
             'reviewed_by',
             'reviewed_by_name',
@@ -256,6 +266,8 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'seller_name',
             'catalogue_part_name',
             'price_flags',
+            'fitment_verification',
+            'fitment_summary',
             'status',
             'reviewed_by',
             'reviewed_by_name',
@@ -270,6 +282,35 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
         super().__init__(*args, **kwargs)
         if self.instance is not None and 'stock_quantity' in self.fields:
             self.fields['stock_quantity'].read_only = True
+
+    def _get_evaluations(self, obj):
+        if not hasattr(obj, '_cached_fitment_evals'):
+            variants = list(obj.compatible_variants.all())
+            obj._cached_fitment_evals = evaluate_listing_fitment(obj, variants)
+        return obj._cached_fitment_evals
+
+    def get_fitment_verification(self, obj):
+        return self._get_evaluations(obj)
+
+    def get_fitment_summary(self, obj):
+        evals = self._get_evaluations(obj)
+        counts = {
+            "verified": 0,
+            "conditional": 0,
+            "seller_claimed": 0,
+            "conflict": 0,
+        }
+        for item in evals:
+            st = item.get("status")
+            if st == "VERIFIED":
+                counts["verified"] += 1
+            elif st == "CONDITIONAL":
+                counts["conditional"] += 1
+            elif st == "SELLER_CLAIMED":
+                counts["seller_claimed"] += 1
+            elif st == "CONFLICT":
+                counts["conflict"] += 1
+        return counts
 
     def get_availability(self, obj) -> str:
         if obj.stock_quantity == 0:
@@ -400,6 +441,33 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
                 if field in validated_data and getattr(locked_instance, field, None) != validated_data[field]:
                     other_material_changed = True
                     break
+
+            # Part C: Submission gate on APPROVED listing material-edits introducing CONFLICT
+            if locked_instance.status == ListingStatusChoices.APPROVED:
+                target_cat_part = validated_data.get('catalogue_part', locked_instance.catalogue_part)
+                target_variants = validated_data.get(
+                    'compatible_variants',
+                    list(locked_instance.compatible_variants.all())
+                )
+                conflicts = get_conflicting_variants(target_cat_part, target_variants)
+                if conflicts:
+                    corr_id = getattr(request, 'correlation_id', '') if request else ''
+                    record_denied_audit_entry(
+                        action="listing:submit",
+                        resource_type="SparePartListing",
+                        resource_id=str(locked_instance.id),
+                        reason_code="FITMENT_CONFLICT",
+                        correlation_id=corr_id,
+                        actor_id=getattr(actor, 'id', None),
+                        metadata={
+                            "listing_id": str(locked_instance.id),
+                            "conflicting_variant_ids": [c["variant_id"] for c in conflicts],
+                        },
+                    )
+                    raise serializers.ValidationError({
+                        "compatible_variants": "Listing contains compatible variants that conflict with catalogue records (DOES_NOT_FIT).",
+                        "conflicts": conflicts,
+                    })
 
             # Save non-price fields ONCE via super().update()
             instance = super().update(instance, validated_data)
@@ -541,6 +609,7 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
     organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
     compatible_variants = VehicleVariantSerializer(many=True, read_only=True)
     availability = serializers.SerializerMethodField()
+    fitment = serializers.SerializerMethodField()
 
     class Meta:
         model = SparePartListing
@@ -561,6 +630,7 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'stock_quantity',
             'low_stock_threshold',
             'availability',
+            'fitment',
             'condition',
             'primary_image_url',
             'images',
@@ -578,6 +648,33 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
         if obj.stock_quantity <= obj.low_stock_threshold:
             return 'LOW_STOCK'
         return 'IN_STOCK'
+
+    def get_fitment(self, obj):
+        if 'fits_vehicle' not in self.context:
+            return None
+        if self.context.get('fits_vehicle_no_variant'):
+            return {
+                "status": "UNKNOWN",
+                "qualifications": "vehicle not linked to catalogue",
+                "source": "NONE",
+            }
+        annotated = getattr(obj, '_annotated_fitment', None)
+        if annotated is not None:
+            return annotated
+        target_variant = self.context.get('fits_vehicle_variant')
+        if target_variant:
+            return evaluate_listing_single_variant(obj, target_variant)
+        return {
+            "status": "UNKNOWN",
+            "qualifications": "No confirmed compatibility record found for this part and vehicle variant.",
+            "source": "NONE",
+        }
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if 'fits_vehicle' not in self.context:
+            ret.pop('fitment', None)
+        return ret
 
 
 class CataloguePartOfferSerializer(serializers.ModelSerializer):

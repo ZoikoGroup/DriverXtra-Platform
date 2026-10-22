@@ -325,3 +325,187 @@ class TestSellerOnboarding:
         res = buyer_auth_client.post('/api/v1/seller/application/', payload, format='json')
         assert res.status_code == status.HTTP_201_CREATED
         assert res.json()['application']['organisation'] is None
+
+    def test_requested_roles_validation_rejects_invalid_roles(self, buyer_auth_client):
+        # Attempt to request ADMIN, STAFF, or BUYER roles
+        for invalid_role in ['ADMIN', 'STAFF', 'BUYER', 'SUPERUSER']:
+            res = buyer_auth_client.post(
+                '/api/v1/seller/application/',
+                {'business_name': 'Hacker Motors', 'requested_roles': [invalid_role]},
+                format='json',
+            )
+            assert res.status_code == status.HTTP_400_BAD_REQUEST, f"Expected 400 for role {invalid_role}"
+            assert 'invalid requested role' in str(res.json()).lower()
+
+    def test_requested_roles_validation_rejects_empty_list(self, buyer_auth_client):
+        res = buyer_auth_client.post(
+            '/api/v1/seller/application/',
+            {'business_name': 'Empty Roles Motors', 'requested_roles': []},
+            format='json',
+        )
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'at least one role' in str(res.json()).lower()
+
+    def test_requested_roles_validation_rejects_duplicates(self, buyer_auth_client):
+        res = buyer_auth_client.post(
+            '/api/v1/seller/application/',
+            {'business_name': 'Duplicate Roles Motors', 'requested_roles': ['SELLER', 'SELLER']},
+            format='json',
+        )
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert 'duplicate' in str(res.json()).lower()
+
+    def test_requested_roles_workshop_only_approval_grants_only_workshop(self, buyer_auth_client, admin_auth_client, buyer_user):
+        # Create draft with WORKSHOP role only
+        create_res = buyer_auth_client.post(
+            '/api/v1/seller/application/',
+            {
+                'business_name': 'Precision Workshop Services',
+                'business_type': BusinessTypeChoices.LTD,
+                'requested_roles': ['WORKSHOP'],
+                'contact_name': 'John Mechanic',
+                'contact_email': 'mechanic@precision.com',
+                'contact_phone': '+447000123',
+                'business_address_line1': '10 Pit Lane',
+                'business_city': 'Silverstone',
+                'business_postal_code': 'NN12 8TN',
+            },
+            format='json',
+        )
+        assert create_res.status_code == status.HTTP_201_CREATED
+        app_id = create_res.json()['application']['id']
+
+        # Submit application
+        sub_res = buyer_auth_client.post('/api/v1/seller/application/submit/')
+        assert sub_res.status_code == status.HTTP_200_OK
+
+        # Admin approves application
+        apprv_res = admin_auth_client.post(
+            f'/api/v1/admin/seller-applications/{app_id}/review/',
+            {'action': 'APPROVE', 'admin_notes': 'Verified workshop capabilities.'},
+            format='json',
+        )
+        assert apprv_res.status_code == status.HTTP_200_OK
+
+        # Verify applicant holds WORKSHOP but NOT SELLER role
+        buyer_user.refresh_from_db()
+        assert buyer_user.has_role(RoleChoices.WORKSHOP) is True
+        assert buyer_user.has_role(RoleChoices.SELLER) is False
+
+    def test_requested_roles_both_roles_approval_grants_both(self, buyer_auth_client, admin_auth_client, buyer_user):
+        # Create draft requesting both SELLER and WORKSHOP
+        create_res = buyer_auth_client.post(
+            '/api/v1/seller/application/',
+            {
+                'business_name': 'Full Service Dealership Ltd',
+                'business_type': BusinessTypeChoices.LTD,
+                'requested_roles': ['SELLER', 'WORKSHOP'],
+                'contact_name': 'Alice Director',
+                'contact_email': 'alice@fullservice.com',
+                'contact_phone': '+447000999',
+                'business_address_line1': '1 Motor Way',
+                'business_city': 'Coventry',
+                'business_postal_code': 'CV1 1AA',
+            },
+            format='json',
+        )
+        assert create_res.status_code == status.HTTP_201_CREATED
+        app_id = create_res.json()['application']['id']
+
+        # Submit & approve
+        buyer_auth_client.post('/api/v1/seller/application/submit/')
+        apprv_res = admin_auth_client.post(
+            f'/api/v1/admin/seller-applications/{app_id}/review/',
+            {'action': 'APPROVE', 'admin_notes': 'Both roles approved.'},
+            format='json',
+        )
+        assert apprv_res.status_code == status.HTTP_200_OK
+
+        buyer_user.refresh_from_db()
+        assert buyer_user.has_role(RoleChoices.SELLER) is True
+        assert buyer_user.has_role(RoleChoices.WORKSHOP) is True
+
+    def test_legacy_application_approval_preserves_expected_roles(self, admin_auth_client):
+        from apps.onboarding.models import SellerApplication, SellerApplicationStatusChoices
+        # 1. Legacy pending application with business_type=WORKSHOP and empty requested_roles
+        legacy_workshop_user = User.objects.create_user(
+            email='legacy.wksh@driverxtra.com',
+            password='Password123!',
+            is_email_verified=True,
+        )
+        legacy_app_wksh = SellerApplication.objects.create(
+            user=legacy_workshop_user,
+            business_name='Legacy Workshop Garage',
+            business_type=BusinessTypeChoices.WORKSHOP,
+            requested_roles=[],
+            contact_email='legacy.wksh@driverxtra.com',
+            contact_phone='+447000111',
+            status=SellerApplicationStatusChoices.PENDING,
+        )
+        res = admin_auth_client.post(
+            f'/api/v1/admin/seller-applications/{legacy_app_wksh.id}/review/',
+            {'action': 'APPROVE'},
+            format='json',
+        )
+        assert res.status_code == status.HTTP_200_OK
+        legacy_workshop_user.refresh_from_db()
+        assert legacy_workshop_user.has_role(RoleChoices.SELLER) is True
+        assert legacy_workshop_user.has_role(RoleChoices.WORKSHOP) is True
+
+        # 2. Legacy pending application with business_type=LTD and empty requested_roles
+        legacy_seller_user = User.objects.create_user(
+            email='legacy.seller@driverxtra.com',
+            password='Password123!',
+            is_email_verified=True,
+        )
+        legacy_app_seller = SellerApplication.objects.create(
+            user=legacy_seller_user,
+            business_name='Legacy Car Sales Ltd',
+            business_type=BusinessTypeChoices.LTD,
+            requested_roles=[],
+            contact_email='legacy.seller@driverxtra.com',
+            contact_phone='+447000222',
+            status=SellerApplicationStatusChoices.PENDING,
+        )
+        res = admin_auth_client.post(
+            f'/api/v1/admin/seller-applications/{legacy_app_seller.id}/review/',
+            {'action': 'APPROVE'},
+            format='json',
+        )
+        assert res.status_code == status.HTTP_200_OK
+        legacy_seller_user.refresh_from_db()
+        assert legacy_seller_user.has_role(RoleChoices.SELLER) is True
+        assert legacy_seller_user.has_role(RoleChoices.WORKSHOP) is False
+
+    def test_approval_audit_event_contains_granted_roles(self, buyer_auth_client, admin_auth_client, buyer_user):
+        from platform_core.audit.models import AuditLog
+        create_res = buyer_auth_client.post(
+            '/api/v1/seller/application/',
+            {
+                'business_name': 'Audited Workshop Hub',
+                'business_type': BusinessTypeChoices.LTD,
+                'requested_roles': ['WORKSHOP'],
+                'contact_name': 'Audited Contact',
+                'contact_email': 'audited@workshop.com',
+                'contact_phone': '+447000333',
+                'business_address_line1': '1 Audit Road',
+                'business_city': 'London',
+                'business_postal_code': 'EC1A 1BB',
+            },
+            format='json',
+        )
+        app_id = create_res.json()['application']['id']
+        buyer_auth_client.post('/api/v1/seller/application/submit/')
+        admin_auth_client.post(
+            f'/api/v1/admin/seller-applications/{app_id}/review/',
+            {'action': 'APPROVE'},
+            format='json',
+        )
+
+        audit_event = AuditLog.objects.filter(
+            event_type='seller.application.approved',
+            resource_id=str(app_id),
+        ).latest('created_at')
+        assert audit_event is not None
+        assert audit_event.metadata.get('granted_roles') == ['WORKSHOP']
+

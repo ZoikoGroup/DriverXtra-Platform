@@ -13,6 +13,7 @@ import Phase2CatalogueView from "@/components/platform/Phase2CatalogueView";
 import Phase2SellerOnboardingView from "@/components/platform/Phase2SellerOnboardingView";
 import MarketplaceBrowseView from "@/components/platform/MarketplaceBrowseView";
 import SellerInventoryView from "@/components/platform/SellerInventoryView";
+import WorkshopLandingView from "@/components/platform/WorkshopLandingView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import {
@@ -26,7 +27,12 @@ function getDefaultTabForRole(user?: PrototypeUser | null): string {
   if (activeRole === "ADMIN" || activeRole === "STAFF") {
     return "admin_marketplace_review";
   }
-  if (activeRole === "SELLER" || activeRole === "WORKSHOP") {
+  const hasSeller = Boolean(user.rawRoles?.includes("SELLER") || activeRole === "SELLER");
+  const hasWorkshop = Boolean(user.rawRoles?.includes("WORKSHOP") || activeRole === "WORKSHOP");
+  if (hasWorkshop && !hasSeller) {
+    return "workshop_landing";
+  }
+  if (hasSeller) {
     return "seller_inventory";
   }
   return "marketplace_browse";
@@ -77,6 +83,7 @@ export default function PlatformDashboardPage() {
       parts_fitment: "Vehicle Parts & Confirmed Fitment (Phase 2)",
       seller_onboarding: "Apply to sell / Apply as workshop (Seller Verification)",
       seller_reviews: "Seller Applications Compliance Queue (Phase 2)",
+      workshop_landing: "Workshop Services — Workshop Partner Hub",
     };
     return map[tab] || "Dashboard Overview";
   };
@@ -104,6 +111,8 @@ export default function PlatformDashboardPage() {
         <main className="flex-1 overflow-y-auto">
           {currentTab === "marketplace_browse" ? (
             <MarketplaceBrowseView />
+          ) : currentTab === "workshop_landing" ? (
+            <WorkshopLandingView />
           ) : currentTab === "seller_inventory" ? (
             isSellerOrWorkshop ? (
               <SellerInventoryView />

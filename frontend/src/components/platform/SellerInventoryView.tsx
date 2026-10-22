@@ -62,6 +62,8 @@ export default function SellerInventoryView() {
   const [editPartCompareAtPrice, setEditPartCompareAtPrice] = useState("");
   const [editPartCataloguePart, setEditPartCataloguePart] = useState("");
   const [editPartDescription, setEditPartDescription] = useState("");
+  const [editPartVariant, setEditPartVariant] = useState("");
+  const [editPartCompatibilityNotes, setEditPartCompatibilityNotes] = useState("");
 
   // Stock Adjust State (Phase 3 Part A)
   const [adjustingPart, setAdjustingPart] = useState<MarketplacePartListing | null>(null);
@@ -89,6 +91,24 @@ export default function SellerInventoryView() {
   const [userOrgs, setUserOrgs] = useState<BackendOrganisation[]>([]);
 
   // Helpers for Org Roles and Permissions (Phase 4)
+  const parseConflictDetails = (err: unknown): {
+    message: string;
+    conflicts?: Array<{ variant_id?: string; display_name?: string; qualifications?: string }>;
+  } => {
+    if (err && typeof err === "object") {
+      const apiErr = err as { message?: string; details?: Record<string, unknown> };
+      const details = apiErr.details;
+      if (details && typeof details === "object" && Array.isArray(details.conflicts)) {
+        return {
+          message: apiErr.message || "Listing cannot be submitted with conflicting vehicle fitments.",
+          conflicts: details.conflicts as Array<{ variant_id?: string; display_name?: string; qualifications?: string }>,
+        };
+      }
+    }
+    const msg = err instanceof Error ? err.message : "An error occurred";
+    return { message: msg };
+  };
+
   const canManageListing = (item: { organisation?: string | null; seller?: string }) => {
     if (user?.is_superuser || user?.rawRoles?.includes("ADMIN") || user?.role === "MARKETPLACE_ADMIN") return true;
     if (item.organisation) {
@@ -114,6 +134,13 @@ export default function SellerInventoryView() {
   const [successMessage, setSuccessMessage] = useState("");
   const [vehModalError, setVehModalError] = useState("");
   const [partModalError, setPartModalError] = useState("");
+
+  // Conflict modal state for clear blocking message (Phase 3 Part C)
+  const [conflictModal, setConflictModal] = useState<{
+    title: string;
+    message: string;
+    conflicts?: Array<{ variant_id?: string; display_name?: string; qualifications?: string }>;
+  } | null>(null);
 
   // New Vehicle Form State
   const [vehTitle, setVehTitle] = useState("");
@@ -158,7 +185,7 @@ export default function SellerInventoryView() {
     setVehModel("");
     setVehVariant("");
     setModels([]);
-    setVariants([]);
+    api.catalogue.getVariants().then(setVariants).catch(console.error);
     setVehYear("2021");
     setVehReg("");
     setVehVin("");
@@ -198,6 +225,7 @@ export default function SellerInventoryView() {
     api.catalogue.getMakes().then(setMakes).catch(console.error);
     api.catalogue.getCategories().then(setCategories).catch(console.error);
     api.catalogue.getParts().then(setCatalogueParts).catch(console.error);
+    api.catalogue.getVariants().then(setVariants).catch(console.error);
     api.organisations.list().then((paginated) => {
       const orgs = paginated.results || [];
       // Filter to user's organisations where they have admin/owner permission
@@ -224,11 +252,10 @@ export default function SellerInventoryView() {
     };
   }, [vehMake]);
 
-  // Load variants when model changes
+  // Load variants when model changes (or reload all catalogue variants when no model selected)
   useEffect(() => {
-    if (!vehModel) return;
     let ignore = false;
-    api.catalogue.getVariants(vehModel).then((res) => {
+    api.catalogue.getVariants(vehModel || undefined).then((res) => {
       if (!ignore) setVariants(res);
     }).catch(console.error);
     return () => {
@@ -442,8 +469,15 @@ export default function SellerInventoryView() {
       const data = await api.marketplace.listMyParts(targetFilter);
       setParts(data);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to submit spare part.";
-      setPartModalError(msg);
+      const conflictInfo = parseConflictDetails(err);
+      if (conflictInfo.conflicts && conflictInfo.conflicts.length > 0) {
+        setConflictModal({
+          title: "Submission Blocked: Fitment Conflict Detected",
+          message: conflictInfo.message,
+          conflicts: conflictInfo.conflicts,
+        });
+      }
+      setPartModalError(conflictInfo.message);
     } finally {
       setActionLoading(false);
     }
@@ -477,7 +511,15 @@ export default function SellerInventoryView() {
       const data = await api.marketplace.listMyParts("PENDING_APPROVAL");
       setParts(data);
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : "Failed to submit draft spare part.");
+      const conflictInfo = parseConflictDetails(err);
+      if (conflictInfo.conflicts && conflictInfo.conflicts.length > 0) {
+        setConflictModal({
+          title: "Submission Blocked: Fitment Conflict Detected",
+          message: conflictInfo.message,
+          conflicts: conflictInfo.conflicts,
+        });
+      }
+      setErrorMessage(conflictInfo.message);
     } finally {
       setActionLoading(false);
     }
@@ -511,7 +553,15 @@ export default function SellerInventoryView() {
       const data = await api.marketplace.listMyParts("PENDING_APPROVAL");
       setParts(data);
     } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : "Resubmission failed.");
+      const conflictInfo = parseConflictDetails(err);
+      if (conflictInfo.conflicts && conflictInfo.conflicts.length > 0) {
+        setConflictModal({
+          title: "Resubmission Blocked: Fitment Conflict Detected",
+          message: conflictInfo.message,
+          conflicts: conflictInfo.conflicts,
+        });
+      }
+      setErrorMessage(conflictInfo.message);
     } finally {
       setActionLoading(false);
     }
@@ -579,14 +629,31 @@ export default function SellerInventoryView() {
         updatePayload.price = parsedPrice;
         updatePayload.compare_at_price = parsedCompareAt;
         updatePayload.catalogue_part = editPartCataloguePart || null;
+        updatePayload.compatible_variants = editPartVariant ? [editPartVariant] : [];
+        updatePayload.compatibility_notes = editPartCompatibilityNotes.trim();
       }
 
       await api.marketplace.updatePart(editingPart.id, updatePayload);
+
+      let initialVarId = "";
+      if (Array.isArray(editingPart.compatible_variants) && editingPart.compatible_variants.length > 0) {
+        const first = editingPart.compatible_variants[0] as unknown;
+        if (typeof first === "object" && first !== null && "id" in first) {
+          initialVarId = String((first as { id: string }).id);
+        } else if (typeof first === "string") {
+          initialVarId = first;
+        }
+      } else if (editingPart.fitment_verification && editingPart.fitment_verification.length > 0) {
+        initialVarId = editingPart.fitment_verification[0].variant_id || "";
+      }
+
       const isMaterial =
         parsedPrice !== Number(editingPart.price) ||
         parsedCompareAt !== (editingPart.compare_at_price ? Number(editingPart.compare_at_price) : null) ||
         (editPartCataloguePart || null) !== (editingPart.catalogue_part || null) ||
-        editPartDescription !== (editingPart.description || "");
+        editPartDescription !== (editingPart.description || "") ||
+        editPartVariant !== initialVarId ||
+        editPartCompatibilityNotes.trim() !== (editingPart.compatibility_notes || "").trim();
       setSuccessMessage(
         editingPart.status === "APPROVED" && isMaterial
           ? "Spare part updated! Material fields were modified, so it has been returned to Pending Approval for review."
@@ -596,7 +663,15 @@ export default function SellerInventoryView() {
       const data = await api.marketplace.listMyParts(statusFilter === "ALL" ? undefined : statusFilter);
       setParts(data);
     } catch (err: unknown) {
-      setPartModalError(err instanceof Error ? err.message : "Failed to update spare part.");
+      const conflictInfo = parseConflictDetails(err);
+      if (conflictInfo.conflicts && conflictInfo.conflicts.length > 0) {
+        setConflictModal({
+          title: "Update Blocked: Fitment Conflict Detected",
+          message: conflictInfo.message,
+          conflicts: conflictInfo.conflicts,
+        });
+      }
+      setPartModalError(conflictInfo.message);
     } finally {
       setActionLoading(false);
     }
@@ -1157,6 +1232,21 @@ export default function SellerInventoryView() {
                               setEditPartCompareAtPrice(p.compare_at_price ? String(p.compare_at_price) : "");
                               setEditPartCataloguePart(p.catalogue_part || "");
                               setEditPartDescription(p.description || "");
+
+                              let currentVarId = "";
+                              if (Array.isArray(p.compatible_variants) && p.compatible_variants.length > 0) {
+                                const first = p.compatible_variants[0] as unknown;
+                                if (typeof first === "object" && first !== null && "id" in first) {
+                                  currentVarId = String((first as { id: string }).id);
+                                } else if (typeof first === "string") {
+                                  currentVarId = first;
+                                }
+                              } else if (p.fitment_verification && p.fitment_verification.length > 0) {
+                                currentVarId = p.fitment_verification[0].variant_id || "";
+                              }
+                              setEditPartVariant(currentVarId);
+                              setEditPartCompatibilityNotes(p.compatibility_notes || "");
+
                               setPartModalError("");
                             }}
                             className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors inline-flex items-center gap-1"
@@ -1173,6 +1263,83 @@ export default function SellerInventoryView() {
                     </div>
                   </div>
 
+                  {/* Fitment Verification & Summary (Phase 3 Part C) */}
+                  {((p.fitment_verification && p.fitment_verification.length > 0) || p.fitment_summary) && (
+                    <div className="p-3 bg-slate-50/80 rounded-2xl border border-slate-200/80 space-y-2 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-slate-800 text-[11px] flex items-center gap-1.5">
+                          <Wrench className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Vehicle Fitment Verification</span>
+                        </span>
+                        {p.fitment_summary && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {p.fitment_summary.conflict > 0 && (
+                              <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-[10px] font-bold border border-rose-300 flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 text-rose-600" />
+                                <span>{p.fitment_summary.conflict} Conflict (Blocking)</span>
+                              </span>
+                            )}
+                            {p.fitment_summary.verified > 0 && (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-bold border border-emerald-200">
+                                {p.fitment_summary.verified} Verified
+                              </span>
+                            )}
+                            {p.fitment_summary.conditional > 0 && (
+                              <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 text-[10px] font-bold border border-amber-200">
+                                {p.fitment_summary.conditional} Conditional
+                              </span>
+                            )}
+                            {p.fitment_summary.seller_claimed > 0 && (
+                              <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-800 text-[10px] font-bold border border-sky-200">
+                                {p.fitment_summary.seller_claimed} Seller-Claimed
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {p.fitment_verification && p.fitment_verification.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {p.fitment_verification.map((v) => (
+                            <span
+                              key={v.variant_id}
+                              className={`px-2 py-0.5 rounded-lg text-[10px] font-medium border flex items-center gap-1 ${
+                                v.status === "VERIFIED"
+                                  ? "bg-emerald-50 text-emerald-900 border-emerald-200"
+                                  : v.status === "CONDITIONAL"
+                                  ? "bg-amber-50 text-amber-900 border-amber-200"
+                                  : v.status === "CONFLICT"
+                                  ? "bg-rose-100 text-rose-900 border-rose-300 font-bold"
+                                  : "bg-sky-50 text-sky-900 border-sky-200"
+                              }`}
+                            >
+                              <span>
+                                {v.status === "VERIFIED"
+                                  ? "Verified:"
+                                  : v.status === "CONDITIONAL"
+                                  ? "Conditional:"
+                                  : v.status === "CONFLICT"
+                                  ? "CONFLICT:"
+                                  : "Claimed:"}{" "}
+                                {v.display_name}
+                              </span>
+                              {v.qualifications && (
+                                <span className="text-[9px] opacity-80 italic">({v.qualifications})</span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      ) : p.fitment_summary &&
+                        (p.fitment_summary.verified ?? 0) === 0 &&
+                        (p.fitment_summary.conditional ?? 0) === 0 &&
+                        (p.fitment_summary.seller_claimed ?? 0) === 0 &&
+                        (p.fitment_summary.conflict ?? 0) === 0 ? (
+                        <p className="text-[11px] text-slate-500 italic pt-0.5">
+                          No compatible variants declared for this listing.
+                        </p>
+                      ) : null}
+                    </div>
+                  )}
+
                   {/* Draft Notice & Publish Button */}
                   {p.status === "DRAFT" && (
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs">
@@ -1180,14 +1347,23 @@ export default function SellerInventoryView() {
                         <FileText className="w-4 h-4 text-slate-500 shrink-0" />
                         <span>This spare part is saved as a <strong>Draft</strong>. It is not published or sent for review until submitted.</span>
                       </div>
-                      <button
-                        onClick={() => handlePublishDraftPart(p.id)}
-                        disabled={actionLoading}
-                        className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0"
-                      >
-                        {actionLoading ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
-                        <span>Submit For Approval</span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {p.fitment_summary && p.fitment_summary.conflict > 0 && (
+                          <span className="text-[11px] text-rose-700 font-bold flex items-center gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
+                            <span>Cannot submit: resolve conflict</span>
+                          </span>
+                        )}
+                        <button
+                          onClick={() => handlePublishDraftPart(p.id)}
+                          disabled={actionLoading || Boolean(p.fitment_summary && p.fitment_summary.conflict > 0)}
+                          className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 shrink-0"
+                          title={p.fitment_summary && p.fitment_summary.conflict > 0 ? "Submission blocked due to conflicting fitments" : undefined}
+                        >
+                          {actionLoading ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
+                          <span>Submit For Approval</span>
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -1229,11 +1405,17 @@ export default function SellerInventoryView() {
                       <p className="text-xs text-red-800 bg-white/80 p-3 rounded-xl border border-red-100">
                         {p.rejection_reason || "Please correct the listed issues and resubmit."}
                       </p>
-                      <div className="flex justify-end pt-1">
+                      <div className="flex items-center justify-between pt-1">
+                        {p.fitment_summary && p.fitment_summary.conflict > 0 ? (
+                          <span className="text-xs text-rose-700 font-bold flex items-center gap-1.5">
+                            <AlertTriangle className="w-4 h-4 text-rose-600" />
+                            <span>Resubmission blocked: Part has conflicting vehicle fitments. Remove conflicts first.</span>
+                          </span>
+                        ) : <div />}
                         {canResubmitListing(p) ? (
                           <button
                             onClick={() => handleResubmitPart(p.id)}
-                            disabled={actionLoading}
+                            disabled={actionLoading || Boolean(p.fitment_summary && p.fitment_summary.conflict > 0)}
                             className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 disabled:opacity-50"
                           >
                             <RotateCcw className="w-3.5 h-3.5" />
@@ -1752,7 +1934,7 @@ export default function SellerInventoryView() {
                     <option value="">Universal / Unlinked</option>
                     {variants.map((v) => (
                       <option key={v.id} value={v.id}>
-                        {v.name} ({v.engine_code || v.fuel_type})
+                        {v.display_name || `${v.name} (${v.engine_code || v.fuel_type})`}
                       </option>
                     ))}
                   </select>
@@ -1958,7 +2140,7 @@ export default function SellerInventoryView() {
             {editingPart.status === "APPROVED" && (
               <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 font-semibold flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>Changing price, compare-at price or catalogue link sends this listing back for review.</span>
+                <span>Changing price, compare-at price, catalogue link or compatible variant sends this listing back for review.</span>
               </div>
             )}
 
@@ -1991,6 +2173,39 @@ export default function SellerInventoryView() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* Compatible Variant & Notes */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Compatible Variant (Optional)
+                  </label>
+                  <select
+                    value={editPartVariant}
+                    onChange={(e) => setEditPartVariant(e.target.value)}
+                    disabled={!canManageListing(editingPart)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none disabled:opacity-50 disabled:bg-slate-100"
+                  >
+                    <option value="">Universal / Unlinked</option>
+                    {variants.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.display_name || `${v.name} (${v.engine_code || v.fuel_type})`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Compatibility Notes</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Fits 330i with M-Sport Brakes only"
+                    value={editPartCompatibilityNotes}
+                    onChange={(e) => setEditPartCompatibilityNotes(e.target.value)}
+                    disabled={!canManageListing(editingPart)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none disabled:opacity-50 disabled:bg-slate-100"
+                  />
+                </div>
               </div>
 
               {/* Price and Compare-At Price */}
@@ -2425,6 +2640,71 @@ export default function SellerInventoryView() {
                 className="px-4 py-2 bg-slate-900 text-white rounded-xl font-bold hover:bg-slate-800"
               >
                 Close Ledger
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: FITMENT CONFLICT BLOCKING DIALOG (Phase 3 Part C)
+      ========================================================================= */}
+      {conflictModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 border border-rose-200">
+            <div className="flex items-center justify-between pb-3 border-b border-rose-100">
+              <div className="flex items-center gap-2 text-rose-900">
+                <ShieldAlert className="w-6 h-6 text-rose-600 shrink-0" />
+                <h3 className="text-base font-black text-rose-950">{conflictModal.title}</h3>
+              </div>
+              <button
+                onClick={() => setConflictModal(null)}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-slate-700 leading-relaxed font-medium">
+                {conflictModal.message}
+              </p>
+
+              {conflictModal.conflicts && conflictModal.conflicts.length > 0 && (
+                <div className="space-y-2 bg-rose-50/80 p-3.5 rounded-2xl border border-rose-200">
+                  <span className="font-bold text-rose-900 block text-[11px] uppercase tracking-wider">
+                    Conflicting Vehicle Fitments ({conflictModal.conflicts.length})
+                  </span>
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    {conflictModal.conflicts.map((c, idx) => (
+                      <div key={idx} className="bg-white p-2.5 rounded-xl border border-rose-100 flex items-start gap-2">
+                        <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold text-slate-900 block">
+                            {c.display_name || c.variant_id}
+                          </span>
+                          <span className="text-[11px] text-rose-800 italic block">
+                            Catalogue Note: {c.qualifications || "Confirmed does not fit by manufacturer catalogue"}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <p className="text-[11px] text-slate-500">
+                To submit or approve this listing, you must remove or correct the declared compatible variants that conflict with canonical catalogue records.
+              </p>
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setConflictModal(null)}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-colors"
+              >
+                Acknowledge & Fix
               </button>
             </div>
           </div>
