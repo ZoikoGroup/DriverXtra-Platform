@@ -10,6 +10,8 @@ from apps.marketplace.models import (
     StockMovementReasonChoices,
     PriceChange,
     ListingStatusChoices,
+    BuyerFavouriteVehicle,
+    BuyerFavouritePart,
 )
 from apps.catalogue.models import Part
 from apps.marketplace.services import change_price, _UNSET
@@ -19,12 +21,15 @@ from apps.marketplace.fitment import (
     evaluate_listing_single_variant,
 )
 from platform_core.audit.writer import record_denied_audit_entry
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 from apps.organisations.models import Organisation, OrganisationRoleChoices
 from apps.catalogue.serializers import (
     VehicleMakeSerializer,
     VehicleModelSerializer,
     VehicleVariantSerializer,
     PartCategorySerializer,
+    validate_image_url_list,
 )
 
 
@@ -101,6 +106,7 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
     masked_vin = serializers.CharField(read_only=True)
     masked_registration = serializers.CharField(read_only=True)
     reviewed_by_name = serializers.CharField(source='reviewed_by.full_name', read_only=True, allow_null=True)
+    primary_image_url = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = VehicleListing
@@ -187,6 +193,21 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Please provide a valid manufacturing year.")
         return value
 
+    def validate_primary_image_url(self, value):
+        if not value:
+            return ""
+        val = value.strip()
+        if not (val.startswith('/media/') or val.startswith('/static/')):
+            validator = URLValidator()
+            try:
+                validator(val)
+            except DjangoValidationError:
+                raise serializers.ValidationError(f"Primary image URL is not a valid URL: '{value}'.")
+        return val
+
+    def validate_images(self, value):
+        return validate_image_url_list(value, max_count=10)
+
     def validate(self, attrs):
         make = attrs.get('make')
         model = attrs.get('model')
@@ -195,6 +216,15 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
         variant = attrs.get('variant')
         if variant and model and variant.model_id != model.id:
             raise serializers.ValidationError({"variant": "Selected variant does not belong to the selected vehicle model."})
+
+        # Sync primary image and images
+        primary = attrs.get('primary_image_url', getattr(self.instance, 'primary_image_url', ''))
+        imgs = attrs.get('images', getattr(self.instance, 'images', []))
+        if not primary and imgs:
+            attrs['primary_image_url'] = imgs[0]
+        elif primary and primary not in imgs and len(imgs) < 10:
+            attrs['images'] = [primary] + [i for i in imgs if i != primary]
+
         return attrs
 
 
@@ -219,6 +249,7 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
     )
     fitment_verification = serializers.SerializerMethodField(read_only=True)
     fitment_summary = serializers.SerializerMethodField(read_only=True)
+    primary_image_url = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = SparePartListing
@@ -347,7 +378,30 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
                     'compare_at_price': "Compare-at price must be strictly greater than retail price."
                 })
 
+        # Sync primary image and images
+        primary = attrs.get('primary_image_url', getattr(self.instance, 'primary_image_url', ''))
+        imgs = attrs.get('images', getattr(self.instance, 'images', []))
+        if not primary and imgs:
+            attrs['primary_image_url'] = imgs[0]
+        elif primary and primary not in imgs and len(imgs) < 10:
+            attrs['images'] = [primary] + [i for i in imgs if i != primary]
+
         return attrs
+
+    def validate_primary_image_url(self, value):
+        if not value:
+            return ""
+        val = value.strip()
+        if not (val.startswith('/media/') or val.startswith('/static/')):
+            validator = URLValidator()
+            try:
+                validator(val)
+            except DjangoValidationError:
+                raise serializers.ValidationError(f"Primary image URL is not a valid URL: '{value}'.")
+        return val
+
+    def validate_images(self, value):
+        return validate_image_url_list(value, max_count=10)
 
     def validate_organisation(self, value):
         if not value:
@@ -746,3 +800,139 @@ class AdminPartListingReviewSerializer(SparePartListingSellerSerializer):
 
 
 PartListingReviewSerializer = AdminPartListingReviewSerializer
+
+
+class BuyerFavouriteVehicleSerializer(serializers.ModelSerializer):
+    """Serializer for saved buyer favourite vehicle listings."""
+
+    vehicle = VehicleListingPublicSerializer(read_only=True)
+    vehicle_id = serializers.UUIDField(write_only=True, required=False)
+    is_available = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = BuyerFavouriteVehicle
+        fields = [
+            'id',
+            'vehicle_id',
+            'vehicle',
+            'is_available',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'vehicle', 'is_available', 'created_at']
+
+    def get_is_available(self, obj) -> bool:
+        if not obj.vehicle:
+            return False
+        return (
+            obj.vehicle.status == ListingStatusChoices.APPROVED
+            and bool(obj.vehicle.is_active)
+        )
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if instance.vehicle_id:
+            ret['vehicle_id'] = str(instance.vehicle_id)
+        return ret
+
+    def validate(self, attrs):
+        initial = getattr(self, 'initial_data', {}) or {}
+        raw_vid = (
+            attrs.get('vehicle_id')
+            or initial.get('vehicle_id')
+            or initial.get('listing_id')
+            or initial.get('vehicle')
+        )
+        if not raw_vid:
+            raise serializers.ValidationError({"vehicle_id": "Vehicle listing ID is required."})
+
+        try:
+            vehicle = VehicleListing.objects.get(id=raw_vid)
+        except (VehicleListing.DoesNotExist, ValueError):
+            raise serializers.ValidationError({"vehicle_id": "Vehicle listing not found."})
+
+        # Eligibility check: Only approved and active vehicle listings may be newly favourited
+        if vehicle.status != ListingStatusChoices.APPROVED or not vehicle.is_active:
+            raise serializers.ValidationError({
+                "vehicle_id": "Only approved and active vehicle listings can be added to favourites."
+            })
+
+        attrs['vehicle'] = vehicle
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        user = request.user if request else None
+        vehicle = validated_data['vehicle']
+        favourite, _ = BuyerFavouriteVehicle.objects.get_or_create(
+            user=user,
+            vehicle=vehicle,
+        )
+        return favourite
+
+
+class BuyerFavouritePartSerializer(serializers.ModelSerializer):
+    """Serializer for saved buyer favourite spare part listings."""
+
+    part = SparePartListingPublicSerializer(read_only=True)
+    part_id = serializers.UUIDField(write_only=True, required=False)
+    is_available = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = BuyerFavouritePart
+        fields = [
+            'id',
+            'part_id',
+            'part',
+            'is_available',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'part', 'is_available', 'created_at']
+
+    def get_is_available(self, obj) -> bool:
+        if not obj.part:
+            return False
+        return (
+            obj.part.status == ListingStatusChoices.APPROVED
+            and bool(obj.part.is_active)
+        )
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if instance.part_id:
+            ret['part_id'] = str(instance.part_id)
+        return ret
+
+    def validate(self, attrs):
+        initial = getattr(self, 'initial_data', {}) or {}
+        raw_pid = (
+            attrs.get('part_id')
+            or initial.get('part_id')
+            or initial.get('listing_id')
+            or initial.get('part')
+        )
+        if not raw_pid:
+            raise serializers.ValidationError({"part_id": "Spare part listing ID is required."})
+
+        try:
+            part = SparePartListing.objects.get(id=raw_pid)
+        except (SparePartListing.DoesNotExist, ValueError):
+            raise serializers.ValidationError({"part_id": "Spare part listing not found."})
+
+        # Eligibility check: Only approved and active spare part listings may be newly favourited
+        if part.status != ListingStatusChoices.APPROVED or not part.is_active:
+            raise serializers.ValidationError({
+                "part_id": "Only approved and active spare part listings can be added to favourites."
+            })
+
+        attrs['part'] = part
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        user = request.user if request else None
+        part = validated_data['part']
+        favourite, _ = BuyerFavouritePart.objects.get_or_create(
+            user=user,
+            part=part,
+        )
+        return favourite

@@ -1,3 +1,5 @@
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 from rest_framework import serializers
 from apps.catalogue.models import (
     VehicleMake,
@@ -7,7 +9,32 @@ from apps.catalogue.models import (
     Part,
     PartCompatibility,
     FitmentTypeChoices,
+    VehicleCatalogueApplication,
+    CataloguePhotoProposal,
+    CatalogueApplicationStatusChoices,
 )
+
+
+def validate_image_url_list(images, max_count=10):
+    if images is None:
+        return []
+    if not isinstance(images, list):
+        raise serializers.ValidationError("Images must be provided as a list of URL strings.")
+    if len(images) > max_count:
+        raise serializers.ValidationError(f"Maximum of {max_count} images allowed.")
+    validator = URLValidator()
+    cleaned = []
+    for idx, item in enumerate(images):
+        if not isinstance(item, str) or not item.strip():
+            raise serializers.ValidationError(f"Image #{idx + 1} must be a non-empty URL string.")
+        url = item.strip()
+        if not (url.startswith('/media/') or url.startswith('/static/')):
+            try:
+                validator(url)
+            except DjangoValidationError:
+                raise serializers.ValidationError(f"Image #{idx + 1} is not a valid URL: '{url}'.")
+        cleaned.append(url)
+    return cleaned
 
 
 class VehicleMakeSerializer(serializers.ModelSerializer):
@@ -33,7 +60,7 @@ class VehicleModelSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = VehicleModel
-        fields = ['id', 'make', 'make_name', 'name', 'year_start', 'year_end', 'is_active', 'variant_count']
+        fields = ['id', 'make', 'make_name', 'name', 'year_start', 'year_end', 'image_url', 'is_active', 'variant_count']
 
     def validate(self, attrs):
         make = attrs.get('make', self.instance.make if self.instance else None)
@@ -249,4 +276,204 @@ class FitmentCheckSerializer(serializers.Serializer):
         if not variant_id:
             raise serializers.ValidationError({"vehicle_variant_id": "Either vehicle_variant_id or variant_id is required."})
         attrs['vehicle_variant_id'] = variant_id
+        return attrs
+
+
+class VehicleCatalogueApplicationSerializer(serializers.ModelSerializer):
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.full_name', read_only=True, allow_null=True)
+    created_model_name = serializers.CharField(source='created_model.name', read_only=True, allow_null=True)
+    created_variant_display = serializers.CharField(source='created_variant.display_name', read_only=True, allow_null=True)
+    primary_image_url = serializers.CharField(required=False, allow_blank=True)
+
+    class Meta:
+        model = VehicleCatalogueApplication
+        fields = [
+            'id',
+            'seller',
+            'seller_name',
+            'make',
+            'make_name',
+            'model_name',
+            'year_start',
+            'year_end',
+            'variant_name',
+            'year',
+            'fuel_type',
+            'transmission',
+            'body_type',
+            'engine_code',
+            'power_bhp',
+            'engine_capacity_cc',
+            'primary_image_url',
+            'images',
+            'notes',
+            'status',
+            'rejection_reason',
+            'admin_notes',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
+            'created_model',
+            'created_model_name',
+            'created_variant',
+            'created_variant_display',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'seller',
+            'seller_name',
+            'status',
+            'rejection_reason',
+            'admin_notes',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
+            'created_model',
+            'created_model_name',
+            'created_variant',
+            'created_variant_display',
+            'created_at',
+            'updated_at',
+        ]
+
+    def validate_primary_image_url(self, value):
+        if not value:
+            return ""
+        val = value.strip()
+        if not (val.startswith('/media/') or val.startswith('/static/')):
+            validator = URLValidator()
+            try:
+                validator(val)
+            except DjangoValidationError:
+                raise serializers.ValidationError(f"Primary image URL is not a valid URL: '{value}'.")
+        return val
+
+    def validate_images(self, value):
+        return validate_image_url_list(value, max_count=10)
+
+    def validate_year_start(self, value):
+        if value < 1900 or value > 2050:
+            raise serializers.ValidationError("Please provide a valid start manufacturing year between 1900 and 2050.")
+        return value
+
+    def validate(self, attrs):
+        year_start = attrs.get('year_start', getattr(self.instance, 'year_start', None))
+        year_end = attrs.get('year_end', getattr(self.instance, 'year_end', None))
+        if year_start and year_end and year_end < year_start:
+            raise serializers.ValidationError({"year_end": "Year end cannot be before year start."})
+
+        # Sync primary image and images list
+        primary = attrs.get('primary_image_url', getattr(self.instance, 'primary_image_url', ''))
+        imgs = attrs.get('images', getattr(self.instance, 'images', []))
+        if not primary and imgs:
+            attrs['primary_image_url'] = imgs[0]
+        elif primary and primary not in imgs and len(imgs) < 10:
+            attrs['images'] = [primary] + [i for i in imgs if i != primary]
+
+        return attrs
+
+
+class VehicleCatalogueApplicationReviewSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(
+        choices=['APPROVE', 'REJECT', 'REQUEST_CHANGES'],
+        help_text="Approval action: APPROVE, REJECT, or REQUEST_CHANGES"
+    )
+    rejection_reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Mandatory if action is REJECT or REQUEST_CHANGES"
+    )
+    admin_notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        action = attrs.get('action')
+        reason = attrs.get('rejection_reason', '').strip()
+        if action in ('REJECT', 'REQUEST_CHANGES') and not reason:
+            raise serializers.ValidationError({
+                'rejection_reason': f"A clear reason is required when choosing {action}."
+            })
+        return attrs
+
+
+class CataloguePhotoProposalSerializer(serializers.ModelSerializer):
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    model_name = serializers.CharField(source='model.name', read_only=True)
+    make_name = serializers.CharField(source='model.make.name', read_only=True)
+    current_image_url = serializers.CharField(source='model.image_url', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.full_name', read_only=True, allow_null=True)
+    proposed_image_url = serializers.CharField(required=True, allow_blank=False)
+
+    class Meta:
+        model = CataloguePhotoProposal
+        fields = [
+            'id',
+            'model',
+            'model_name',
+            'make_name',
+            'current_image_url',
+            'seller',
+            'seller_name',
+            'proposed_image_url',
+            'notes',
+            'status',
+            'rejection_reason',
+            'admin_notes',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'seller',
+            'seller_name',
+            'model_name',
+            'make_name',
+            'current_image_url',
+            'status',
+            'rejection_reason',
+            'admin_notes',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
+            'created_at',
+            'updated_at',
+        ]
+
+    def validate_proposed_image_url(self, value):
+        if not value:
+            raise serializers.ValidationError("Proposed image URL is required.")
+        val = value.strip()
+        if not (val.startswith('/media/') or val.startswith('/static/')):
+            validator = URLValidator()
+            try:
+                validator(val)
+            except DjangoValidationError:
+                raise serializers.ValidationError(f"Proposed image URL is not a valid URL: '{value}'.")
+        return val
+
+
+class CataloguePhotoProposalReviewSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(
+        choices=['APPROVE', 'REJECT'],
+        help_text="Approval action: APPROVE or REJECT"
+    )
+    rejection_reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Mandatory if action is REJECT"
+    )
+    admin_notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        action = attrs.get('action')
+        reason = attrs.get('rejection_reason', '').strip()
+        if action == 'REJECT' and not reason:
+            raise serializers.ValidationError({
+                'rejection_reason': "A clear reason is required when rejecting a photo proposal."
+            })
         return attrs

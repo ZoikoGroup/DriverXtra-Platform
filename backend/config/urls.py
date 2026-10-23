@@ -29,3 +29,9 @@ urlpatterns = [
     # Marketplace: Vehicle & Spare Parts Submissions, Approvals & Public Browse
     path('api/v1/marketplace/', include('apps.marketplace.urls')),
 ]
+
+# Serve media files in development / test environments
+from django.conf import settings
+from django.conf.urls.static import static
+
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

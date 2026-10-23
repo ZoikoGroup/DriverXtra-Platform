@@ -226,6 +226,14 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# =========================================================
+# MEDIA FILES & STORAGE CONFIGURATION
+# =========================================================
+
+MEDIA_URL = os.getenv("MEDIA_URL", "/media/")
+MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", BASE_DIR / "media"))
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", str(5 * 1024 * 1024)))  # 5 MB default
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 

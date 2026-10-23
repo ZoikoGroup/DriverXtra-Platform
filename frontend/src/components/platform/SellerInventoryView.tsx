@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   api,
+  resolveMediaUrl,
   MarketplaceVehicleListing,
   MarketplacePartListing,
   VehicleMake,
@@ -15,8 +16,12 @@ import {
   CreatePartListingPayload,
   StockMovement,
   PriceChange,
+  VehicleCatalogueApplication,
+  CreateVehicleCatalogueApplicationPayload,
+  CataloguePhotoProposal,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
+import ListingPhotoManager from "./ListingPhotoManager";
 import {
   Car,
   Wrench,
@@ -33,11 +38,17 @@ import {
   Pencil,
   Sliders,
   History,
+  FilePlus,
+  Camera,
+  ExternalLink,
+  HelpCircle,
+  Upload,
+  Loader2,
 } from "lucide-react";
 
 export default function SellerInventoryView() {
   const { user } = useAuth();
-  const [activeSection, setActiveSection] = useState<"vehicles" | "parts">("vehicles");
+  const [activeSection, setActiveSection] = useState<"vehicles" | "parts" | "applications">("vehicles");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
 
   // Vehicles state
@@ -55,6 +66,8 @@ export default function SellerInventoryView() {
   const [editVehPrice, setEditVehPrice] = useState("");
   const [editVehMileage, setEditVehMileage] = useState("");
   const [editVehDescription, setEditVehDescription] = useState("");
+  const [editVehPrimaryImageUrl, setEditVehPrimaryImageUrl] = useState("");
+  const [editVehImages, setEditVehImages] = useState<string[]>([]);
 
   // Edit Part State (Phase 3 Part B: price, compare-at, catalogue part)
   const [editingPart, setEditingPart] = useState<MarketplacePartListing | null>(null);
@@ -64,6 +77,8 @@ export default function SellerInventoryView() {
   const [editPartDescription, setEditPartDescription] = useState("");
   const [editPartVariant, setEditPartVariant] = useState("");
   const [editPartCompatibilityNotes, setEditPartCompatibilityNotes] = useState("");
+  const [editPartPrimaryImageUrl, setEditPartPrimaryImageUrl] = useState("");
+  const [editPartImages, setEditPartImages] = useState<string[]>([]);
 
   // Stock Adjust State (Phase 3 Part A)
   const [adjustingPart, setAdjustingPart] = useState<MarketplacePartListing | null>(null);
@@ -157,7 +172,8 @@ export default function SellerInventoryView() {
   const [vehPrice, setVehPrice] = useState("18500");
   const [vehCondition, setVehCondition] = useState("VERY_GOOD");
   const [vehDescription, setVehDescription] = useState("");
-  const [vehImageUrl, setVehImageUrl] = useState("");
+  const [vehPrimaryImageUrl, setVehPrimaryImageUrl] = useState("");
+  const [vehImages, setVehImages] = useState<string[]>([]);
   const [vehCity, setVehCity] = useState("London");
   const [vehPostcode, setVehPostcode] = useState("SW1A 1AA");
   const [vehOrg, setVehOrg] = useState("");
@@ -174,10 +190,65 @@ export default function SellerInventoryView() {
   const [partStock, setPartStock] = useState("5");
   const [partCondition, setPartCondition] = useState("NEW");
   const [partDescription, setPartDescription] = useState("");
-  const [partImageUrl, setPartImageUrl] = useState("");
+  const [partPrimaryImageUrl, setPartPrimaryImageUrl] = useState("");
+  const [partImages, setPartImages] = useState<string[]>([]);
   const [partVariant, setPartVariant] = useState("");
   const [partCompatibilityNotes, setPartCompatibilityNotes] = useState("");
   const [partOrg, setPartOrg] = useState("");
+
+  // Catalogue Application State
+  const [appModalOpen, setAppModalOpen] = useState(false);
+  const [myApplications, setMyApplications] = useState<VehicleCatalogueApplication[]>([]);
+  const [applicationsLoading, setApplicationsLoading] = useState(false);
+  const [appMakeMode, setAppMakeMode] = useState<"SELECT" | "CUSTOM">("SELECT");
+  const [appMakeId, setAppMakeId] = useState("");
+  const [appMakeName, setAppMakeName] = useState("");
+  const [appModelName, setAppModelName] = useState("");
+  const [appYearStart, setAppYearStart] = useState("2020");
+  const [appYearEnd, setAppYearEnd] = useState("");
+  const [appVariantName, setAppVariantName] = useState("");
+  const [appYear, setAppYear] = useState("2021");
+  const [appFuel, setAppFuel] = useState("PETROL");
+  const [appTrans, setAppTrans] = useState("AUTOMATIC");
+  const [appBody, setAppBody] = useState("Saloon");
+  const [appEngineCode, setAppEngineCode] = useState("");
+  const [appPowerBhp, setAppPowerBhp] = useState("");
+  const [appEngineCapacityCc, setAppEngineCapacityCc] = useState("");
+  const [appPrimaryImageUrl, setAppPrimaryImageUrl] = useState("");
+  const [appImages, setAppImages] = useState<string[]>([]);
+  const [appNotes, setAppNotes] = useState("");
+  const [appModalError, setAppModalError] = useState("");
+  const [appSubmitting, setAppSubmitting] = useState(false);
+
+  // Catalogue Photo Proposal State
+  const [photoProposalOpen, setPhotoProposalOpen] = useState(false);
+  const [proposalModelId, setProposalModelId] = useState("");
+  const [proposalModelName, setProposalModelName] = useState("");
+  const [proposalMakeName, setProposalMakeName] = useState("");
+  const [proposalCurrentUrl, setProposalCurrentUrl] = useState("");
+  const [proposedUrl, setProposedUrl] = useState("");
+  const [proposalNotes, setProposalNotes] = useState("");
+  const [proposalError, setProposalError] = useState("");
+  const [proposalLoading, setProposalLoading] = useState(false);
+  const [proposalUploading, setProposalUploading] = useState(false);
+  const proposalFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [myPhotoProposals, setMyPhotoProposals] = useState<CataloguePhotoProposal[]>([]);
+
+  const handleProposalFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    e.target.value = "";
+    setProposalError("");
+    setProposalUploading(true);
+    try {
+      const res = await api.marketplace.uploadImage(file, { listingType: "catalogue" });
+      setProposedUrl(res.url);
+    } catch (err: unknown) {
+      setProposalError(err instanceof Error ? err.message : "Failed to upload photo.");
+    } finally {
+      setProposalUploading(false);
+    }
+  };
 
   const resetVehicleForm = () => {
     setVehTitle("");
@@ -196,7 +267,8 @@ export default function SellerInventoryView() {
     setVehPrice("18500");
     setVehCondition("VERY_GOOD");
     setVehDescription("");
-    setVehImageUrl("");
+    setVehPrimaryImageUrl("");
+    setVehImages([]);
     setVehCity("London");
     setVehPostcode("SW1A 1AA");
     setVehModalError("");
@@ -214,10 +286,150 @@ export default function SellerInventoryView() {
     setPartStock("5");
     setPartCondition("NEW");
     setPartDescription("");
-    setPartImageUrl("");
+    setPartPrimaryImageUrl("");
+    setPartImages([]);
     setPartVariant("");
     setPartCompatibilityNotes("");
     setPartModalError("");
+  };
+
+  const resetApplicationForm = () => {
+    setAppMakeMode("SELECT");
+    setAppMakeId("");
+    setAppMakeName("");
+    setAppModelName("");
+    setAppYearStart("2020");
+    setAppYearEnd("");
+    setAppVariantName("");
+    setAppYear("2021");
+    setAppFuel("PETROL");
+    setAppTrans("AUTOMATIC");
+    setAppBody("Saloon");
+    setAppEngineCode("");
+    setAppPowerBhp("");
+    setAppEngineCapacityCc("");
+    setAppPrimaryImageUrl("");
+    setAppImages([]);
+    setAppNotes("");
+    setAppModalError("");
+  };
+
+  const loadMyApplications = async () => {
+    setApplicationsLoading(true);
+    try {
+      const data = await api.catalogue.listApplications();
+      setMyApplications(data);
+    } catch (err) {
+      console.error("Failed to load catalogue applications", err);
+    } finally {
+      setApplicationsLoading(false);
+    }
+  };
+
+  const loadMyPhotoProposals = async () => {
+    try {
+      const data = await api.catalogue.listPhotoProposals();
+      setMyPhotoProposals(data);
+    } catch (err) {
+      console.error("Failed to load catalogue photo proposals", err);
+    }
+  };
+
+  const handleSubmitApplication = async () => {
+    setAppModalError("");
+    const resolvedMakeName = appMakeMode === "CUSTOM"
+      ? appMakeName.trim()
+      : (makes.find((m) => m.id === appMakeId)?.name || "").trim();
+
+    if (!resolvedMakeName) {
+      setAppModalError("Vehicle Make is required.");
+      return;
+    }
+    if (!appModelName.trim()) {
+      setAppModalError("Vehicle Model Name is required.");
+      return;
+    }
+    const yStart = parseInt(appYearStart, 10);
+    if (isNaN(yStart) || yStart < 1900 || yStart > 2050) {
+      setAppModalError("Please provide a valid start year (1900 - 2050).");
+      return;
+    }
+    let yEnd: number | null = null;
+    if (appYearEnd.trim()) {
+      yEnd = parseInt(appYearEnd, 10);
+      if (isNaN(yEnd) || yEnd < yStart) {
+        setAppModalError("End year cannot be before start year.");
+        return;
+      }
+    }
+
+    setAppSubmitting(true);
+    try {
+      const payload: CreateVehicleCatalogueApplicationPayload = {
+        make: appMakeMode === "SELECT" && appMakeId ? appMakeId : null,
+        make_name: resolvedMakeName,
+        model_name: appModelName.trim(),
+        year_start: yStart,
+        year_end: yEnd,
+        variant_name: appVariantName.trim() || undefined,
+        year: appYear.trim() ? parseInt(appYear, 10) : undefined,
+        fuel_type: appFuel,
+        transmission: appTrans,
+        body_type: appBody.trim(),
+        engine_code: appEngineCode.trim(),
+        power_bhp: appPowerBhp.trim() ? parseInt(appPowerBhp, 10) : undefined,
+        engine_capacity_cc: appEngineCapacityCc.trim() ? parseInt(appEngineCapacityCc, 10) : undefined,
+        primary_image_url: appPrimaryImageUrl.trim(),
+        images: appImages,
+        notes: appNotes.trim(),
+      };
+
+      await api.catalogue.submitApplication(payload);
+      setSuccessMessage("Vehicle catalogue application submitted successfully! It is pending admin review.");
+      setAppModalOpen(false);
+      resetApplicationForm();
+      loadMyApplications();
+    } catch (err: unknown) {
+      setAppModalError(err instanceof Error ? err.message : "Failed to submit vehicle application.");
+    } finally {
+      setAppSubmitting(false);
+    }
+  };
+
+  const handleProposePhoto = async () => {
+    setProposalError("");
+    if (!proposalModelId) {
+      setProposalError("Model is required.");
+      return;
+    }
+    if (!proposedUrl.trim()) {
+      setProposalError("Please enter a proposed image URL.");
+      return;
+    }
+    try {
+      new URL(proposedUrl.trim());
+    } catch {
+      setProposalError("Please provide a valid image URL.");
+      return;
+    }
+
+    setProposalLoading(true);
+    try {
+      await api.catalogue.submitPhotoProposal({
+        model: proposalModelId,
+        proposed_image_url: proposedUrl.trim(),
+        notes: proposalNotes.trim(),
+      });
+      setSuccessMessage("Catalogue photo proposal submitted successfully! Pending admin review.");
+      setPhotoProposalOpen(false);
+      setProposedUrl("");
+      setProposalNotes("");
+      loadMyPhotoProposals();
+    } catch (err: unknown) {
+      setProposalError(err instanceof Error ? err.message : "Failed to submit photo proposal.");
+    } finally {
+      setProposalLoading(false);
+    }
   };
 
   // Load reference datasets
@@ -268,7 +480,7 @@ export default function SellerInventoryView() {
     let ignore = false;
     const statusParam = statusFilter === "ALL" ? undefined : statusFilter;
     if (activeSection === "vehicles") {
-      api.marketplace.listMyVehicles(statusParam).then((data) => {
+  api.marketplace.listMyVehicles(statusParam).then((data) => {
         if (!ignore) {
           setVehicles(data);
           setVehiclesLoading(false);
@@ -279,8 +491,8 @@ export default function SellerInventoryView() {
           setVehiclesLoading(false);
         }
       });
-    } else {
-      if (statusFilter === "LOW_STOCK") {
+    } else if (activeSection === "parts") {
+  if (statusFilter === "LOW_STOCK") {
         api.marketplace.listLowStockParts().then((data) => {
           if (!ignore) {
             setParts(data);
@@ -305,7 +517,14 @@ export default function SellerInventoryView() {
           }
         });
       }
+    } else if (activeSection === "applications") {
+  Promise.resolve().then(() => {
+    if (!ignore) {
+      loadMyApplications();
+      loadMyPhotoProposals();
     }
+  });
+}
     return () => {
       ignore = true;
     };
@@ -358,7 +577,8 @@ export default function SellerInventoryView() {
         currency: "GBP",
         condition: vehCondition,
         description: vehDescription.trim(),
-        primary_image_url: vehImageUrl.trim(),
+        primary_image_url: vehPrimaryImageUrl.trim(),
+        images: vehImages,
         location_city: vehCity.trim(),
         location_postcode: vehPostcode.trim(),
         organisation: vehOrg || null,
@@ -449,7 +669,8 @@ export default function SellerInventoryView() {
         stock_quantity: parsedStock,
         condition: partCondition,
         description: partDescription.trim(),
-        primary_image_url: partImageUrl.trim(),
+        primary_image_url: partPrimaryImageUrl.trim(),
+        images: partImages,
         compatible_variants: partVariant ? [partVariant] : [],
         compatibility_notes: partCompatibilityNotes.trim(),
         organisation: partOrg || null,
@@ -577,6 +798,8 @@ export default function SellerInventoryView() {
         price: parseFloat(editVehPrice),
         mileage: parseInt(editVehMileage, 10),
         description: editVehDescription,
+        primary_image_url: editVehPrimaryImageUrl.trim(),
+        images: editVehImages,
       });
       setSuccessMessage(
         editingVehicle.status === "APPROVED"
@@ -624,6 +847,8 @@ export default function SellerInventoryView() {
     try {
       const updatePayload: Partial<CreatePartListingPayload> = {
         description: editPartDescription,
+        primary_image_url: editPartPrimaryImageUrl.trim(),
+        images: editPartImages,
       };
       if (canManageListing(editingPart)) {
         updatePayload.price = parsedPrice;
@@ -839,7 +1064,7 @@ export default function SellerInventoryView() {
               <Plus className="w-4 h-4" />
               <span>Add Vehicle</span>
             </button>
-          ) : (
+          ) : activeSection === "parts" ? (
             <button
               onClick={() => {
                 setErrorMessage("");
@@ -850,6 +1075,31 @@ export default function SellerInventoryView() {
               <Plus className="w-4 h-4" />
               <span>Add Spare Part</span>
             </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setProposalError("");
+                  setPhotoProposalOpen(true);
+                }}
+                className="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-amber-400 text-xs font-bold rounded-xl transition-all border border-slate-700 flex items-center gap-1.5"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Propose Official Photo</span>
+              </button>
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setAppModalError("");
+                  setAppModalOpen(true);
+                }}
+                className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all shadow-md flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Submit Vehicle to Catalogue</span>
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -886,37 +1136,57 @@ export default function SellerInventoryView() {
             <Wrench className="w-3.5 h-3.5" />
             <span>My Spare Parts</span>
           </button>
+          <button
+            onClick={() => {
+              setActiveSection("applications");
+              setStatusFilter("ALL");
+            }}
+            className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+              activeSection === "applications"
+                ? "bg-white text-slate-900 shadow-sm"
+                : "text-slate-500 hover:text-slate-900"
+            }`}
+          >
+            <FilePlus className="w-3.5 h-3.5" />
+            <span>Catalogue Submissions</span>
+          </button>
         </div>
 
         {/* Status Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
-          {(activeSection === "parts"
-            ? ["ALL", "LOW_STOCK", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
-            : ["ALL", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
-          ).map((st) => (
-            <button
-              key={st}
-              onClick={() => setStatusFilter(st)}
-              className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors ${
-                statusFilter === st
-                  ? "bg-slate-900 text-white"
+        {activeSection !== "applications" ? (
+          <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
+            {(activeSection === "parts"
+              ? ["ALL", "LOW_STOCK", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
+              : ["ALL", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
+            ).map((st) => (
+              <button
+                key={st}
+                onClick={() => setStatusFilter(st)}
+                className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors ${
+                  statusFilter === st
+                    ? "bg-slate-900 text-white"
+                    : st === "LOW_STOCK"
+                    ? "bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200"
+                    : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                }`}
+              >
+                {st === "ALL"
+                  ? "All Statuses"
                   : st === "LOW_STOCK"
-                  ? "bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200"
-                  : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
-              }`}
-            >
-              {st === "ALL"
-                ? "All Statuses"
-                : st === "LOW_STOCK"
-                ? "⚠ Low Stock Only"
-                : st === "PENDING_APPROVAL"
-                ? "Pending"
-                : st === "CHANGES_REQUESTED"
-                ? "Action Req."
-                : st.charAt(0) + st.slice(1).toLowerCase()}
-            </button>
-          ))}
-        </div>
+                  ? "⚠ Low Stock Only"
+                  : st === "PENDING_APPROVAL"
+                  ? "Pending"
+                  : st === "CHANGES_REQUESTED"
+                  ? "Action Req."
+                  : st.charAt(0) + st.slice(1).toLowerCase()}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-slate-500 font-medium flex items-center gap-2">
+            <span>Catalogue proposals undergo compliance review before official inclusion.</span>
+          </div>
+        )}
       </div>
 
       {/* =========================================================================
@@ -955,7 +1225,7 @@ export default function SellerInventoryView() {
                     <div className="flex items-start gap-4">
                       <div className="w-24 h-20 rounded-2xl bg-slate-900 overflow-hidden flex-shrink-0 flex items-center justify-center">
                         {v.primary_image_url ? (
-                          <img src={v.primary_image_url} alt={v.title} className="w-full h-full object-cover" />
+                          <img src={resolveMediaUrl(v.primary_image_url)} alt={v.title} className="w-full h-full object-cover" />
                         ) : (
                           <Car className="w-8 h-8 text-slate-700" />
                         )}
@@ -998,6 +1268,8 @@ export default function SellerInventoryView() {
                               setEditVehPrice(String(v.price));
                               setEditVehMileage(String(v.mileage));
                               setEditVehDescription(v.description || "");
+                              setEditVehPrimaryImageUrl(v.primary_image_url || "");
+                              setEditVehImages(Array.isArray(v.images) ? v.images : []);
                               setVehModalError("");
                             }}
                             className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors inline-flex items-center gap-1"
@@ -1128,11 +1400,19 @@ export default function SellerInventoryView() {
                   className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all space-y-4"
                 >
                   <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
-                          {p.brand}
-                        </span>
+                    <div className="flex items-start gap-4">
+                      <div className="w-20 h-16 rounded-2xl bg-slate-900 overflow-hidden flex-shrink-0 flex items-center justify-center">
+                        {p.primary_image_url ? (
+                          <img src={resolveMediaUrl(p.primary_image_url)} alt={p.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <Wrench className="w-6 h-6 text-slate-700" />
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
+                            {p.brand}
+                          </span>
                         {renderStatusBadge(p.status)}
                         {/* Availability Badge (Phase 3 Part A) */}
                         {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
@@ -1173,6 +1453,7 @@ export default function SellerInventoryView() {
                         )}
                       </div>
                     </div>
+                  </div>
 
                     <div className="text-right sm:self-center flex flex-col items-end">
                       <span className="text-xs text-slate-400">Retail Price</span>
@@ -1232,6 +1513,8 @@ export default function SellerInventoryView() {
                               setEditPartCompareAtPrice(p.compare_at_price ? String(p.compare_at_price) : "");
                               setEditPartCataloguePart(p.catalogue_part || "");
                               setEditPartDescription(p.description || "");
+                              setEditPartPrimaryImageUrl(p.primary_image_url || "");
+                              setEditPartImages(Array.isArray(p.images) ? p.images : []);
 
                               let currentVarId = "";
                               if (Array.isArray(p.compatible_variants) && p.compatible_variants.length > 0) {
@@ -1437,6 +1720,273 @@ export default function SellerInventoryView() {
       )}
 
       {/* =========================================================================
+          SECTION 3: CATALOGUE APPLICATIONS & PHOTO PROPOSALS
+      ========================================================================= */}
+      {activeSection === "applications" && (
+        <div className="space-y-8">
+          {/* Applications Subsection */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                  <FilePlus className="w-4 h-4 text-amber-500" />
+                  <span>Submitted Vehicle Applications</span>
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Applications to add unlisted vehicle makes/models into the approved DriverXtra catalogue.
+                </p>
+              </div>
+              <button
+                onClick={() => setAppModalOpen(true)}
+                className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5 text-amber-400" />
+                <span>New Application</span>
+              </button>
+            </div>
+
+            {applicationsLoading ? (
+              <div className="py-12 text-center bg-white rounded-3xl border border-slate-200">
+                <div className="w-6 h-6 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                <p className="text-xs text-slate-500 font-medium">Loading applications...</p>
+              </div>
+            ) : myApplications.length === 0 ? (
+              <div className="bg-white rounded-3xl p-8 text-center border border-slate-200 space-y-3">
+                <Car className="w-10 h-10 text-slate-300 mx-auto" />
+                <h4 className="text-sm font-bold text-slate-900">No Vehicle Applications Submitted</h4>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                  If you have a vehicle whose model is not in the DriverXtra catalogue, apply to have it added. Once approved by admin, you can list it for sale.
+                </p>
+                <button
+                  onClick={() => setAppModalOpen(true)}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-xl transition-colors inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Submit New Vehicle Application</span>
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {myApplications.map((app) => (
+                  <div key={app.id} className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-[11px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                            {app.make_name || "Custom Make"}
+                          </span>
+                          {app.status === "APPROVED" ? (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>Approved</span>
+                            </span>
+                          ) : app.status === "REJECTED" ? (
+                            <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
+                              <XCircle className="w-3 h-3" />
+                              <span>Rejected</span>
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              <span>Pending Review</span>
+                            </span>
+                          )}
+                        </div>
+                        <h4 className="text-base font-black text-slate-950">
+                          {app.model_name}
+                          {app.variant_name && <span className="text-slate-500 font-normal"> · {app.variant_name}</span>}
+                        </h4>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Production: {app.year_start}
+                          {app.year_end ? ` – ${app.year_end}` : " – Present"}
+                          {app.fuel_type && ` · ${app.fuel_type}`}
+                          {app.transmission && ` · ${app.transmission}`}
+                          {app.body_type && ` · ${app.body_type}`}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Image Preview */}
+                    {(app.primary_image_url || (app.images && app.images.length > 0)) && (
+                      <div className="flex items-center gap-2 pt-1 overflow-x-auto">
+                        {app.primary_image_url && (
+                          <div className="w-16 h-12 rounded-xl bg-slate-900 overflow-hidden flex-shrink-0 relative border border-amber-400">
+                            <img
+                              src={app.primary_image_url}
+                              alt="Primary"
+                              className="w-full h-full object-cover"
+                              onError={(e) => {
+                                (e.target as HTMLElement).style.display = "none";
+                              }}
+                            />
+                            <span className="absolute bottom-0 inset-x-0 bg-black/60 text-[8px] text-amber-300 text-center font-bold">
+                              Primary
+                            </span>
+                          </div>
+                        )}
+                        {app.images?.filter((img) => img !== app.primary_image_url).map((img, i) => (
+                          <div key={i} className="w-16 h-12 rounded-xl bg-slate-100 overflow-hidden flex-shrink-0 border border-slate-200">
+                            <img
+                              src={img}
+                              alt={`Thumbnail ${i + 1}`}
+                              className="w-full h-full object-cover"
+                              onError={(e) => {
+                                (e.target as HTMLElement).style.display = "none";
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Rejection / Reviewer feedback */}
+                    {app.status === "REJECTED" && app.rejection_reason && (
+                      <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-1">
+                        <span className="font-bold flex items-center gap-1">
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
+                          <span>Rejection Reason</span>
+                        </span>
+                        <p className="text-rose-800">{app.rejection_reason}</p>
+                      </div>
+                    )}
+                    {app.status === "APPROVED" && (
+                      <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center gap-2">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>Catalogue entry created. You can now select this vehicle when adding listings.</span>
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-slate-100 text-[10px] text-slate-400 flex items-center justify-between">
+                      <span>Submitted: {new Date(app.created_at).toLocaleDateString()}</span>
+                      {app.reviewed_at && <span>Reviewed: {new Date(app.reviewed_at).toLocaleDateString()}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Catalogue Photo Proposals Subsection */}
+          <div className="space-y-4 pt-4 border-t border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                  <Camera className="w-4 h-4 text-amber-500" />
+                  <span>Proposed Official Catalogue Photos</span>
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Proposals to update or provide high-resolution canonical photos for approved catalogue models.
+                </p>
+              </div>
+              <button
+                onClick={() => setPhotoProposalOpen(true)}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-400 text-xs font-bold rounded-xl transition-colors border border-slate-700 flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Propose Photo</span>
+              </button>
+            </div>
+
+            {myPhotoProposals.length === 0 ? (
+              <div className="bg-white rounded-3xl p-8 text-center border border-slate-200 space-y-3">
+                <Camera className="w-10 h-10 text-slate-300 mx-auto" />
+                <h4 className="text-sm font-bold text-slate-900">No Photo Proposals Submitted</h4>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                  Notice an approved vehicle model in the catalogue with missing or low-resolution imagery? Propose an updated official photo for admin moderation.
+                </p>
+                <button
+                  onClick={() => setPhotoProposalOpen(true)}
+                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors inline-flex items-center gap-1.5"
+                >
+                  <Camera className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Propose Official Photo</span>
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {myPhotoProposals.map((prop) => (
+                  <div key={prop.id} className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
+                          {prop.make_name || "Catalogue Model"}
+                        </span>
+                        <h4 className="text-sm font-black text-slate-950">{prop.model_name}</h4>
+                      </div>
+                      {prop.status === "APPROVED" ? (
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>Approved</span>
+                        </span>
+                      ) : prop.status === "REJECTED" ? (
+                        <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
+                          <XCircle className="w-3 h-3" />
+                          <span>Rejected</span>
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          <span>Pending Review</span>
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 pt-1">
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Current Official</span>
+                        <div className="h-20 bg-slate-100 rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center">
+                          {prop.current_image_url ? (
+                            <img src={prop.current_image_url} alt="Current" className="w-full h-full object-cover" />
+                          ) : (
+                            <span className="text-[10px] text-slate-400 italic">None</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-bold text-amber-600 uppercase tracking-wider block">Proposed</span>
+                        <div className="h-20 bg-slate-100 rounded-xl overflow-hidden border border-amber-300 flex items-center justify-center">
+                          <img
+                            src={prop.proposed_image_url}
+                            alt="Proposed"
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              (e.target as HTMLElement).style.display = "none";
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {prop.notes && (
+                      <p className="text-xs text-slate-600 bg-slate-50 p-2.5 rounded-xl border border-slate-100 italic">
+                        &quot;{prop.notes}&quot;
+                      </p>
+                    )}
+
+                    {prop.status === "REJECTED" && (prop.rejection_reason || prop.admin_notes) && (
+                      <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800">
+                        <strong>Rejection reason:</strong> {prop.rejection_reason || prop.admin_notes}
+                      </div>
+                    )}
+                    {prop.status === "APPROVED" && (
+                      <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-800">
+                        ✓ Approved: Catalogue vehicle image updated successfully.
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-slate-100 text-[10px] text-slate-400 flex items-center justify-between">
+                      <span>Submitted: {new Date(prop.created_at).toLocaleDateString()}</span>
+                      {prop.reviewed_at && <span>Reviewed: {new Date(prop.reviewed_at).toLocaleDateString()}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
           MODAL: ADD VEHICLE SUBMISSION
       ========================================================================= */}
       {addVehicleOpen && (
@@ -1526,6 +2076,19 @@ export default function SellerInventoryView() {
                       </option>
                     ))}
                   </select>
+                  <p className="text-[10px] text-slate-500 mt-1 flex items-center justify-between">
+                    <span>Model not listed?</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddVehicleOpen(false);
+                        setAppModalOpen(true);
+                      }}
+                      className="text-amber-600 hover:text-amber-700 font-bold underline"
+                    >
+                      Apply to add vehicle
+                    </button>
+                  </p>
                 </div>
 
                 <div>
@@ -1680,7 +2243,7 @@ export default function SellerInventoryView() {
               )}
 
               {/* Description & Image */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">Location City</label>
                   <input
@@ -1699,16 +2262,21 @@ export default function SellerInventoryView() {
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
                   />
                 </div>
-                <div>
-                  <label className="block text-slate-700 font-bold mb-1">Primary Image URL</label>
-                  <input
-                    type="url"
-                    placeholder="https://..."
-                    value={vehImageUrl}
-                    onChange={(e) => setVehImageUrl(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
-                  />
-                </div>
+              </div>
+
+              <div>
+                <ListingPhotoManager
+                  title="Vehicle Listing Photos"
+                  description="Add up to 10 photos of this vehicle from your computer. Choose a primary image for search cards."
+                  primaryImageUrl={vehPrimaryImageUrl}
+                  images={vehImages}
+                  onChange={(primary, imgs) => {
+                    setVehPrimaryImageUrl(primary);
+                    setVehImages(imgs);
+                  }}
+                  listingType="vehicle"
+                  maxImages={10}
+                />
               </div>
 
               <div>
@@ -1971,13 +2539,17 @@ export default function SellerInventoryView() {
               )}
 
               <div>
-                <label className="block text-slate-700 font-bold mb-1">Primary Image URL</label>
-                <input
-                  type="url"
-                  placeholder="https://..."
-                  value={partImageUrl}
-                  onChange={(e) => setPartImageUrl(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                <ListingPhotoManager
+                  title="Spare Part Photos"
+                  description="Add up to 10 photos of the spare part, packaging, or part number stamp from your computer."
+                  primaryImageUrl={partPrimaryImageUrl}
+                  images={partImages}
+                  onChange={(primary, imgs) => {
+                    setPartPrimaryImageUrl(primary);
+                    setPartImages(imgs);
+                  }}
+                  listingType="part"
+                  maxImages={10}
                 />
               </div>
 
@@ -2029,7 +2601,7 @@ export default function SellerInventoryView() {
       ========================================================================= */}
       {editingVehicle && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[calc(100dvh-2rem)] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <Car className="w-4 h-4 text-amber-500" />
@@ -2090,6 +2662,22 @@ export default function SellerInventoryView() {
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
                 />
               </div>
+
+              <div>
+                <ListingPhotoManager
+                  title="Vehicle Listing Photos"
+                  description="Update, upload, or reorder photos for this vehicle listing."
+                  primaryImageUrl={editVehPrimaryImageUrl}
+                  images={editVehImages}
+                  onChange={(primary, imgs) => {
+                    setEditVehPrimaryImageUrl(primary);
+                    setEditVehImages(imgs);
+                  }}
+                  listingType="vehicle"
+                  listingId={editingVehicle?.id}
+                  maxImages={10}
+                />
+              </div>
             </div>
 
             <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
@@ -2119,7 +2707,7 @@ export default function SellerInventoryView() {
       ========================================================================= */}
       {editingPart && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[calc(100dvh-2rem)] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <Wrench className="w-4 h-4 text-amber-500" />
@@ -2258,6 +2846,22 @@ export default function SellerInventoryView() {
                   value={editPartDescription}
                   onChange={(e) => setEditPartDescription(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <ListingPhotoManager
+                  title="Spare Part Photos"
+                  description="Update, upload, or reorder photos for this spare part listing."
+                  primaryImageUrl={editPartPrimaryImageUrl}
+                  images={editPartImages}
+                  onChange={(primary, imgs) => {
+                    setEditPartPrimaryImageUrl(primary);
+                    setEditPartImages(imgs);
+                  }}
+                  listingType="part"
+                  listingId={editingPart?.id}
+                  maxImages={10}
                 />
               </div>
             </div>
@@ -2705,6 +3309,440 @@ export default function SellerInventoryView() {
                 className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-colors"
               >
                 Acknowledge & Fix
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* =========================================================================
+          MODAL: SUBMIT VEHICLE CATALOGUE APPLICATION
+      ========================================================================= */}
+      {appModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <span className="text-[10px] font-bold text-amber-600 uppercase tracking-wider bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                  Catalogue Application
+                </span>
+                <h3 className="text-lg font-black text-slate-900 mt-1">Submit Vehicle for Catalogue Inclusion</h3>
+              </div>
+              <button
+                onClick={() => setAppModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {appModalError && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-xs font-bold text-red-900 flex items-center justify-between">
+                <span>{appModalError}</span>
+                <button
+                  type="button"
+                  onClick={() => setAppModalError("")}
+                  className="text-red-700 hover:text-red-950 p-1"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            <div className="p-3 bg-amber-50/70 rounded-2xl border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+              <HelpCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold block">Catalogue Approval Process</span>
+                <span className="text-slate-600">
+                  Approved applications create canonical vehicle models available to all sellers on DriverXtra.
+                  This does not automatically create your sales listing. Once approved, you can create a listing with this model.
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              {/* Make Mode */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-slate-700 font-bold">Vehicle Manufacturer / Make *</label>
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setAppMakeMode("SELECT")}
+                      className={`px-2 py-0.5 rounded-md font-bold ${
+                        appMakeMode === "SELECT" ? "bg-slate-900 text-white" : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      Existing Make
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAppMakeMode("CUSTOM")}
+                      className={`px-2 py-0.5 rounded-md font-bold ${
+                        appMakeMode === "CUSTOM" ? "bg-slate-900 text-white" : "text-slate-500 hover:text-slate-900"
+                      }`}
+                    >
+                      New Make
+                    </button>
+                  </div>
+                </div>
+
+                {appMakeMode === "SELECT" ? (
+                  <select
+                    value={appMakeId}
+                    onChange={(e) => setAppMakeId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-500"
+                  >
+                    <option value="">Select Existing Make</option>
+                    {makes.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder="Enter new manufacturer name (e.g. Lucid, Polestar, BYD)"
+                    value={appMakeName}
+                    onChange={(e) => setAppMakeName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-500"
+                  />
+                )}
+              </div>
+
+              {/* Model Name & Production Years */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-1">
+                  <label className="block text-slate-700 font-bold mb-1">Model Name *</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Air, Seal, Taycan"
+                    value={appModelName}
+                    onChange={(e) => setAppModelName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Start Year *</label>
+                  <input
+                    type="number"
+                    value={appYearStart}
+                    onChange={(e) => setAppYearStart(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">End Year (Optional)</label>
+                  <input
+                    type="number"
+                    placeholder="Leave blank if current"
+                    value={appYearEnd}
+                    onChange={(e) => setAppYearEnd(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Variant and Technical Specs */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Variant / Trim (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Pure, Performance AWD"
+                    value={appVariantName}
+                    onChange={(e) => setAppVariantName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Fuel Type</label>
+                  <select
+                    value={appFuel}
+                    onChange={(e) => setAppFuel(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  >
+                    <option value="PETROL">Petrol</option>
+                    <option value="DIESEL">Diesel</option>
+                    <option value="HYBRID">Hybrid</option>
+                    <option value="EV">Electric (EV)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Transmission</label>
+                  <select
+                    value={appTrans}
+                    onChange={(e) => setAppTrans(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  >
+                    <option value="AUTOMATIC">Automatic</option>
+                    <option value="MANUAL">Manual</option>
+                    <option value="DUAL_CLUTCH">Dual Clutch</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Body Type</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Saloon, SUV, Coupe"
+                    value={appBody}
+                    onChange={(e) => setAppBody(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Engine Code (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. B48B20"
+                    value={appEngineCode}
+                    onChange={(e) => setAppEngineCode(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Power (BHP)</label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 258"
+                    value={appPowerBhp}
+                    onChange={(e) => setAppPowerBhp(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Photos */}
+              <div>
+                <ListingPhotoManager
+                  title="Vehicle Model Photos"
+                  description="Upload official or clean press-quality images for this catalogue model. (Max 10 images)."
+                  primaryImageUrl={appPrimaryImageUrl}
+                  images={appImages}
+                  onChange={(primary, imgs) => {
+                    setAppPrimaryImageUrl(primary);
+                    setAppImages(imgs);
+                  }}
+                  listingType="catalogue"
+                  maxImages={10}
+                />
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Notes for Reviewer (Optional)</label>
+                <textarea
+                  rows={2}
+                  value={appNotes}
+                  onChange={(e) => setAppNotes(e.target.value)}
+                  placeholder="Official OEM specs link, brochures, VIN example..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setAppModalOpen(false)}
+                className="px-4 py-2 text-slate-600 hover:text-slate-900 text-xs font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitApplication}
+                disabled={appSubmitting}
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {appSubmitting && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                <span>Submit Application For Review</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: PROPOSE CATALOGUE PHOTO
+      ========================================================================= */}
+      {photoProposalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Camera className="w-4 h-4 text-amber-500" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Propose Official Catalogue Photo
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPhotoProposalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl text-xs text-amber-900">
+              Propose an updated or missing image for an approved catalogue vehicle model. Proposals require admin approval before the canonical catalogue image is changed.
+            </div>
+
+            {proposalError && (
+              <div className="p-3 bg-rose-50 border border-rose-300 text-rose-900 text-xs font-semibold rounded-xl">
+                {proposalError}
+              </div>
+            )}
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Vehicle Make *</label>
+                <select
+                  value={proposalMakeName}
+                  onChange={(e) => {
+                    const makeId = e.target.value;
+                    const makeObj = makes.find((m) => m.id === makeId);
+                    setProposalMakeName(makeId);
+                    setProposalModelId("");
+                    setProposalCurrentUrl("");
+                    if (makeId) {
+                      api.catalogue.getModels(makeId).then(setModels).catch(console.error);
+                    }
+                  }}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                >
+                  <option value="">Select Make</option>
+                  {makes.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Approved Model *</label>
+                <select
+                  value={proposalModelId}
+                  onChange={(e) => {
+                    const mid = e.target.value;
+                    setProposalModelId(mid);
+                    const selected = models.find((m) => m.id === mid);
+                    setProposalModelName(selected?.name || "");
+                    setProposalCurrentUrl(selected?.image_url || "");
+                  }}
+                  disabled={!proposalMakeName}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none disabled:opacity-50"
+                >
+                  <option value="">Select Model</option>
+                  {models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} ({m.year_start} – {m.year_end || "Present"})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Current photo preview */}
+              {proposalModelId && (
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                    Current Official Photo
+                  </span>
+                  {proposalCurrentUrl ? (
+                    <div className="h-24 rounded-lg bg-slate-900 overflow-hidden flex items-center justify-center">
+                      <img src={resolveMediaUrl(proposalCurrentUrl)} alt="Current" className="w-full h-full object-cover" />
+                    </div>
+                  ) : (
+                    <p className="text-slate-400 italic text-[11px]">No official photo currently set for this model.</p>
+                  )}
+                </div>
+              )}
+
+              <div>
+                <input
+                  type="file"
+                  ref={proposalFileInputRef}
+                  onChange={handleProposalFileUpload}
+                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                  className="hidden"
+                />
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-slate-700 font-bold">Proposed Image *</label>
+                  <button
+                    type="button"
+                    disabled={proposalUploading}
+                    onClick={() => proposalFileInputRef.current?.click()}
+                    className="text-amber-600 hover:text-amber-700 font-bold text-[11px] flex items-center gap-1 transition-colors"
+                  >
+                    {proposalUploading ? (
+                      <Loader2 className="w-3 h-3 animate-spin text-amber-500" />
+                    ) : (
+                      <Upload className="w-3 h-3 text-amber-500" />
+                    )}
+                    <span>{proposalUploading ? "Uploading..." : "Upload from Computer"}</span>
+                  </button>
+                </div>
+                <input
+                  type="url"
+                  placeholder="Paste URL or click 'Upload from Computer' above"
+                  value={proposedUrl}
+                  onChange={(e) => setProposedUrl(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              {/* Preview of proposed image */}
+              {proposedUrl && (
+                <div className="space-y-1">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                    Proposed Image Preview
+                  </span>
+                  <div className="h-28 rounded-xl bg-slate-900 overflow-hidden flex items-center justify-center border border-amber-400">
+                    <img
+                      src={resolveMediaUrl(proposedUrl)}
+                      alt="Proposed preview"
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = "none";
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Notes for Reviewer (Optional)</label>
+                <textarea
+                  rows={2}
+                  value={proposalNotes}
+                  onChange={(e) => setProposalNotes(e.target.value)}
+                  placeholder="e.g. Higher-resolution OEM press photo with transparent background..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPhotoProposalOpen(false)}
+                className="px-4 py-2 text-slate-600 hover:text-slate-900 text-xs font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleProposePhoto}
+                disabled={proposalLoading || !proposalModelId || !proposedUrl.trim()}
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {proposalLoading && <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+                <span>Submit Proposal</span>
               </button>
             </div>
           </div>

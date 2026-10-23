@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   api,
+  resolveMediaUrl,
   MarketplaceVehicleListing,
   MarketplacePartListing,
   VehicleMake,
@@ -35,6 +36,8 @@ import {
   ChevronRight,
   SlidersHorizontal,
   RotateCcw,
+  Heart,
+  ImageIcon,
 } from "lucide-react";
 
 export default function MarketplaceBrowseView() {
@@ -55,6 +58,15 @@ export default function MarketplaceBrowseView() {
   const [transmission, setTransmission] = useState("");
   const [maxVehiclePrice, setMaxVehiclePrice] = useState("");
   const [selectedVehicle, setSelectedVehicle] = useState<MarketplaceVehicleListing | null>(null);
+  const [selectedVehicleImageIdx, setSelectedVehicleImageIdx] = useState<number>(0);
+  const [selectedPartImageIdx, setSelectedPartImageIdx] = useState<number>(0);
+
+  // Favourites state
+  const [favouriteVehicleIds, setFavouriteVehicleIds] = useState<Set<string>>(new Set());
+  const [favouritePartIds, setFavouritePartIds] = useState<Set<string>>(new Set());
+  const [favouriteLoading, setFavouriteLoading] = useState<Record<string, boolean>>({});
+  const [favouritePartLoading, setFavouritePartLoading] = useState<Record<string, boolean>>({});
+  const [favouriteError, setFavouriteError] = useState<string | null>(null);
 
   // Parts state (Phase 3 Part D)
   const [parts, setParts] = useState<MarketplacePartListing[]>([]);
@@ -145,6 +157,107 @@ export default function MarketplaceBrowseView() {
       ignore = true;
     };
   }, [user]);
+
+  // Load buyer favourites when user is logged in
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+    let ignore = false;
+    api.marketplace
+      .listFavourites()
+      .then((favs) => {
+        if (!ignore) {
+          setFavouriteVehicleIds(new Set(favs.map((f) => f.vehicle_id)));
+        }
+      })
+      .catch((err: unknown) => {
+        console.error("Failed to load buyer vehicle favourites", err);
+      });
+
+    api.marketplace
+      .listPartFavourites()
+      .then((favs) => {
+        if (!ignore) {
+          setFavouritePartIds(new Set(favs.map((f) => f.part_id)));
+        }
+      })
+      .catch((err: unknown) => {
+        console.error("Failed to load buyer spare part favourites", err);
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [user]);
+
+  const handleToggleFavourite = async (e: React.MouseEvent, vehicleId: string) => {
+    e.stopPropagation();
+    if (!user) return;
+    if (favouriteLoading[vehicleId]) return;
+
+    setFavouriteLoading((prev) => ({ ...prev, [vehicleId]: true }));
+    setFavouriteError(null);
+    const isFav = favouriteVehicleIds.has(vehicleId);
+
+    try {
+      if (isFav) {
+        await api.marketplace.removeFavourite(vehicleId);
+        setFavouriteVehicleIds((prev) => {
+          const next = new Set(prev);
+          next.delete(vehicleId);
+          return next;
+        });
+      } else {
+        await api.marketplace.addFavourite(vehicleId);
+        setFavouriteVehicleIds((prev) => {
+          const next = new Set(prev);
+          next.add(vehicleId);
+          return next;
+        });
+      }
+    } catch (err: unknown) {
+      console.error("Failed to toggle favourite vehicle", err);
+      const msg = err instanceof Error ? err.message : "Failed to update favourite vehicle.";
+      setFavouriteError(msg);
+    } finally {
+      setFavouriteLoading((prev) => ({ ...prev, [vehicleId]: false }));
+    }
+  };
+
+  const handleTogglePartFavourite = async (e: React.MouseEvent, partId: string) => {
+    e.stopPropagation();
+    if (!user) return;
+    if (favouritePartLoading[partId]) return;
+
+    setFavouritePartLoading((prev) => ({ ...prev, [partId]: true }));
+    setFavouriteError(null);
+    const isFav = favouritePartIds.has(partId);
+
+    try {
+      if (isFav) {
+        await api.marketplace.removePartFavourite(partId);
+        setFavouritePartIds((prev) => {
+          const next = new Set(prev);
+          next.delete(partId);
+          return next;
+        });
+      } else {
+        await api.marketplace.addPartFavourite(partId);
+        setFavouritePartIds((prev) => {
+          const next = new Set(prev);
+          next.add(partId);
+          return next;
+        });
+      }
+    } catch (err: unknown) {
+      console.error("Failed to toggle spare part favourite", err);
+      const msg = err instanceof Error ? err.message : "Failed to update favourite spare part.";
+      setFavouriteError(msg);
+    } finally {
+      setFavouritePartLoading((prev) => ({ ...prev, [partId]: false }));
+    }
+  };
 
   // Selected garage vehicle info
   const selectedGarageVehicle = garageVehicles.find((v) => v.id === selectedVehicleId) || null;
@@ -270,6 +383,7 @@ export default function MarketplaceBrowseView() {
   // Open part inspector & load other offers for linked catalogue part (Phase 3 Part B)
   const handleSelectPart = (part: MarketplacePartListing) => {
     setSelectedPart(part);
+    setSelectedPartImageIdx(0);
     if (selectedVehicleId) {
       api.marketplace
         .getPart(part.id, { fits_vehicle: selectedVehicleId })
@@ -486,6 +600,20 @@ export default function MarketplaceBrowseView() {
           </div>
 
           {/* Vehicle Grid */}
+          {favouriteError && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-800 flex items-center justify-between">
+              <span>{favouriteError}</span>
+              <button
+                type="button"
+                onClick={() => setFavouriteError(null)}
+                className="text-rose-500 hover:text-rose-700"
+                aria-label="Dismiss favourite error message"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           {vehiclesLoading ? (
             <div className="py-20 text-center">
               <div className="w-8 h-8 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
@@ -524,20 +652,56 @@ export default function MarketplaceBrowseView() {
                     <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
                       {v.primary_image_url ? (
                         <img
-                          src={v.primary_image_url}
+                          src={resolveMediaUrl(v.primary_image_url)}
                           alt={v.title}
                           className="w-full h-full object-cover"
+                          onError={(e) => {
+                            e.currentTarget.style.display = "none";
+                            const fb = e.currentTarget.parentElement?.querySelector(".vehicle-card-fallback");
+                            if (fb) (fb as HTMLElement).style.display = "flex";
+                          }}
                         />
-                      ) : (
-                        <div className="text-center p-4">
-                          <Car className="w-12 h-12 text-slate-700 mx-auto mb-1" />
-                          <span className="text-[10px] text-slate-500 font-medium">Verified Dealer Vehicle</span>
-                        </div>
-                      )}
+                      ) : null}
+                      <div
+                        className={`vehicle-card-fallback text-center p-4 items-center justify-center flex-col ${
+                          v.primary_image_url ? "hidden" : "flex"
+                        }`}
+                      >
+                        <Car className="w-12 h-12 text-slate-700 mx-auto mb-1" />
+                        <span className="text-[10px] text-slate-500 font-medium">Verified Dealer Vehicle</span>
+                      </div>
                       <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/80 backdrop-blur-md text-[10px] font-bold text-emerald-400 border border-emerald-500/20">
                         <CheckCircle2 className="w-3 h-3" />
                         <span>Verified Approved</span>
                       </div>
+                      {/* Heart Favourite Button */}
+                      {user && (
+                        <button
+                          type="button"
+                          onClick={(e) => handleToggleFavourite(e, v.id)}
+                          disabled={favouriteLoading[v.id]}
+                          aria-label={
+                            favouriteVehicleIds.has(v.id)
+                              ? `Remove ${v.title} from favourites`
+                              : `Save ${v.title} to favourites`
+                          }
+                          className={`absolute top-3 right-3 p-2 rounded-full backdrop-blur-md transition-all shadow-md focus:outline-none focus:ring-2 focus:ring-amber-400 ${
+                            favouriteVehicleIds.has(v.id)
+                              ? "bg-rose-500/95 text-white hover:bg-rose-600 border border-rose-400"
+                              : "bg-slate-900/80 text-slate-300 hover:text-rose-400 hover:bg-slate-900 border border-slate-700/60"
+                          } ${favouriteLoading[v.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                        >
+                          {favouriteLoading[v.id] ? (
+                            <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Heart
+                              className={`w-3.5 h-3.5 transition-transform ${
+                                favouriteVehicleIds.has(v.id) ? "fill-current text-white scale-110" : ""
+                              }`}
+                            />
+                          )}
+                        </button>
+                      )}
                       <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm">
                         £{Number(v.price).toLocaleString()}
                       </div>
@@ -580,7 +744,10 @@ export default function MarketplaceBrowseView() {
                   {/* Action */}
                   <div className="p-5 pt-0">
                     <button
-                      onClick={() => setSelectedVehicle(v)}
+                      onClick={() => {
+                        setSelectedVehicle(v);
+                        setSelectedVehicleImageIdx(0);
+                      }}
                       className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
                     >
                       <Eye className="w-3.5 h-3.5 text-amber-400" />
@@ -1099,36 +1266,97 @@ export default function MarketplaceBrowseView() {
                         className={`bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-md transition-all flex flex-col justify-between ${p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK" ? "opacity-85" : ""
                           }`}
                       >
-                        <div className="p-5 space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
-                              {p.brand}
-                            </span>
-                            <div className="flex items-center gap-1.5">
-                              {p.fitment && renderFitmentBadge(p.fitment)}
-                              {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
-                                <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
-                                  <X className="w-3 h-3" />
-                                  <span>Out of Stock</span>
-                                </span>
-                              ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
-                                <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
-                                  <PackageCheck className="w-3 h-3" />
-                                  <span>Low Stock ({p.stock_quantity} left)</span>
-                                </span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3" />
-                                  <span>In Stock ({p.stock_quantity})</span>
-                                </span>
-                              )}
+                        <div>
+                          {/* Image / Header Banner */}
+                          <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
+                            {p.primary_image_url ? (
+                              <img
+                                src={resolveMediaUrl(p.primary_image_url)}
+                                alt={p.name}
+                                className="w-full h-full object-cover"
+                                onError={(e) => {
+                                  e.currentTarget.style.display = "none";
+                                  const fb = e.currentTarget.parentElement?.querySelector(".part-card-fallback");
+                                  if (fb) (fb as HTMLElement).style.display = "flex";
+                                }}
+                              />
+                            ) : null}
+                            <div
+                              className={`part-card-fallback text-center p-4 items-center justify-center flex-col ${
+                                p.primary_image_url ? "hidden" : "flex"
+                              }`}
+                            >
+                              <Wrench className="w-12 h-12 text-slate-700 mx-auto mb-1" />
+                              <span className="text-[10px] text-slate-500 font-medium">Verified Spare Part</span>
+                            </div>
+
+                            <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/80 backdrop-blur-md text-[10px] font-bold text-amber-400 border border-amber-500/20">
+                              <Tag className="w-3 h-3" />
+                              <span>{p.brand}</span>
+                            </div>
+
+                            {/* Heart Favourite Button */}
+                            {user && (
+                              <button
+                                type="button"
+                                onClick={(e) => handleTogglePartFavourite(e, p.id)}
+                                disabled={favouritePartLoading[p.id]}
+                                aria-label={
+                                  favouritePartIds.has(p.id)
+                                    ? `Remove ${p.name} from favourites`
+                                    : `Save ${p.name} to favourites`
+                                }
+                                className={`absolute top-3 right-3 p-2 rounded-full backdrop-blur-md transition-all shadow-md focus:outline-hidden focus:ring-2 focus:ring-amber-400 ${
+                                  favouritePartIds.has(p.id)
+                                    ? "bg-rose-500/95 text-white hover:bg-rose-600 border border-rose-400"
+                                    : "bg-slate-900/80 text-slate-300 hover:text-rose-400 hover:bg-slate-900 border border-slate-700/60"
+                                } ${favouritePartLoading[p.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                              >
+                                {favouritePartLoading[p.id] ? (
+                                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                ) : (
+                                  <Heart
+                                    className={`w-3.5 h-3.5 transition-transform ${
+                                      favouritePartIds.has(p.id) ? "fill-current text-white scale-110" : ""
+                                    }`}
+                                  />
+                                )}
+                              </button>
+                            )}
+                            <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm">
+                              £{Number(p.price).toFixed(2)}
                             </div>
                           </div>
 
-                          <div>
-                            <h4 className="text-sm font-black text-slate-950 line-clamp-1">{p.name}</h4>
-                            <p className="text-[11px] text-slate-500 font-mono mt-0.5">MPN: {p.mpn}</p>
-                          </div>
+                          <div className="p-5 space-y-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                {p.fitment && renderFitmentBadge(p.fitment)}
+                              </div>
+                              <div>
+                                {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
+                                    <X className="w-3 h-3" />
+                                    <span>Out of Stock</span>
+                                  </span>
+                                ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
+                                    <PackageCheck className="w-3 h-3" />
+                                    <span>Low Stock ({p.stock_quantity} left)</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>In Stock ({p.stock_quantity})</span>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div>
+                              <h4 className="text-sm font-black text-slate-950 line-clamp-1">{p.name}</h4>
+                              <p className="text-[11px] text-slate-500 font-mono mt-0.5">MPN: {p.mpn}</p>
+                            </div>
 
                           <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 text-xs space-y-1">
                             <div className="flex items-center justify-between text-slate-600">
@@ -1163,8 +1391,9 @@ export default function MarketplaceBrowseView() {
                             </div>
                           </div>
                         </div>
+                      </div>
 
-                        <div className="p-5 pt-0 space-y-2">
+                      <div className="p-5 pt-0 space-y-2">
                           <button
                             onClick={() => handleSelectPart(p)}
                             className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
@@ -1265,23 +1494,138 @@ export default function MarketplaceBrowseView() {
                 </span>
                 <h3 className="text-lg font-black text-slate-900 mt-1">{selectedVehicle.title}</h3>
               </div>
-              <button
-                onClick={() => setSelectedVehicle(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {user && (
+                  <button
+                    type="button"
+                    onClick={(e) => handleToggleFavourite(e, selectedVehicle.id)}
+                    disabled={favouriteLoading[selectedVehicle.id]}
+                    aria-label={
+                      favouriteVehicleIds.has(selectedVehicle.id)
+                        ? `Remove ${selectedVehicle.title} from favourites`
+                        : `Save ${selectedVehicle.title} to favourites`
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                      favouriteVehicleIds.has(selectedVehicle.id)
+                        ? "bg-rose-50 border-rose-200 text-rose-600 hover:bg-rose-100"
+                        : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200"
+                    } ${favouriteLoading[selectedVehicle.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                  >
+                    {favouriteLoading[selectedVehicle.id] ? (
+                      <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Heart
+                        className={`w-3.5 h-3.5 ${
+                          favouriteVehicleIds.has(selectedVehicle.id) ? "fill-current text-rose-600" : ""
+                        }`}
+                      />
+                    )}
+                    <span>
+                      {favouriteVehicleIds.has(selectedVehicle.id) ? "Saved in Favourites" : "Save to Favourites"}
+                    </span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedVehicle(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
-            {selectedVehicle.primary_image_url && (
-              <div className="rounded-2xl overflow-hidden h-60 bg-slate-900">
-                <img
-                  src={selectedVehicle.primary_image_url}
-                  alt={selectedVehicle.title}
-                  className="w-full h-full object-cover"
-                />
-              </div>
-            )}
+            {(() => {
+              const gallery = [selectedVehicle.primary_image_url, ...(selectedVehicle.images || [])]
+                .filter((url, idx, arr): url is string => Boolean(url && url.trim()) && arr.indexOf(url) === idx);
+              const activeIdx = Math.min(selectedVehicleImageIdx, Math.max(0, gallery.length - 1));
+              const activeImage = gallery[activeIdx];
+
+              if (gallery.length === 0) {
+                return (
+                  <div className="rounded-2xl h-52 bg-slate-950 flex flex-col items-center justify-center text-slate-500">
+                    <Car className="w-12 h-12 text-slate-700 mb-2" />
+                    <span className="text-xs">No photos provided for this vehicle</span>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  <div className="relative rounded-2xl overflow-hidden h-72 bg-slate-950 flex items-center justify-center">
+                    <img
+                      src={resolveMediaUrl(activeImage)}
+                      alt={`${selectedVehicle.title} - photo ${activeIdx + 1}`}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        const fb = e.currentTarget.parentElement?.querySelector(".gallery-vehicle-fallback");
+                        if (fb) (fb as HTMLElement).style.display = "flex";
+                      }}
+                    />
+                    <div className="gallery-vehicle-fallback hidden flex-col items-center justify-center text-slate-500 p-6 text-center">
+                      <ImageIcon className="w-12 h-12 text-slate-700 mb-2" />
+                      <span className="text-xs font-semibold text-slate-400">Photo could not be loaded</span>
+                      <span className="text-[10px] text-slate-600 mt-1 max-w-xs break-all">{activeImage}</span>
+                    </div>
+
+                    {gallery.length > 1 && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedVehicleImageIdx((prev) => (prev > 0 ? prev - 1 : gallery.length - 1))}
+                          className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Previous photo"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedVehicleImageIdx((prev) => (prev < gallery.length - 1 ? prev + 1 : 0))}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Next photo"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                        <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-slate-950/80 backdrop-blur-md text-white text-[10px] font-bold">
+                          {activeIdx + 1} / {gallery.length} Photos
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {gallery.length > 1 && (
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      {gallery.map((url, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setSelectedVehicleImageIdx(idx)}
+                          className={`relative flex-shrink-0 w-16 h-16 rounded-xl overflow-hidden border-2 transition-all ${
+                            idx === activeIdx
+                              ? "border-amber-400 ring-2 ring-amber-400/40"
+                              : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
+                          }`}
+                        >
+                          <img
+                            src={resolveMediaUrl(url)}
+                            alt={`Thumbnail ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = "none";
+                            }}
+                          />
+                          {idx === 0 && (
+                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5">
+                              Main
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -1356,13 +1700,139 @@ export default function MarketplaceBrowseView() {
                   {selectedPart.brand} · MPN: {selectedPart.mpn}
                 </p>
               </div>
-              <button
-                onClick={() => setSelectedPart(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {user && (
+                  <button
+                    type="button"
+                    onClick={(e) => handleTogglePartFavourite(e, selectedPart.id)}
+                    disabled={favouritePartLoading[selectedPart.id]}
+                    aria-label={
+                      favouritePartIds.has(selectedPart.id)
+                        ? `Remove ${selectedPart.name} from favourites`
+                        : `Save ${selectedPart.name} to favourites`
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                      favouritePartIds.has(selectedPart.id)
+                        ? "bg-rose-50 border-rose-200 text-rose-600 hover:bg-rose-100"
+                        : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200"
+                    } ${favouritePartLoading[selectedPart.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                  >
+                    {favouritePartLoading[selectedPart.id] ? (
+                      <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Heart
+                        className={`w-3.5 h-3.5 ${
+                          favouritePartIds.has(selectedPart.id) ? "fill-current text-rose-600" : ""
+                        }`}
+                      />
+                    )}
+                    <span>
+                      {favouritePartIds.has(selectedPart.id) ? "Saved in Favourites" : "Save to Favourites"}
+                    </span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedPart(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
+
+            {/* Multi-image gallery for spare part */}
+            {(() => {
+              const gallery = [selectedPart.primary_image_url, ...(selectedPart.images || [])]
+                .filter((url, idx, arr): url is string => Boolean(url && url.trim()) && arr.indexOf(url) === idx);
+              const activeIdx = Math.min(selectedPartImageIdx, Math.max(0, gallery.length - 1));
+              const activeImage = gallery[activeIdx];
+
+              if (gallery.length === 0) {
+                return (
+                  <div className="rounded-2xl h-48 bg-slate-950 flex flex-col items-center justify-center text-slate-500">
+                    <Wrench className="w-12 h-12 text-slate-700 mb-2" />
+                    <span className="text-xs">No photos provided for this spare part</span>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  <div className="relative rounded-2xl overflow-hidden h-64 bg-slate-950 flex items-center justify-center">
+                    <img
+                      src={resolveMediaUrl(activeImage)}
+                      alt={`${selectedPart.name} - photo ${activeIdx + 1}`}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        const fb = e.currentTarget.parentElement?.querySelector(".gallery-part-fallback");
+                        if (fb) (fb as HTMLElement).style.display = "flex";
+                      }}
+                    />
+                    <div className="gallery-part-fallback hidden flex-col items-center justify-center text-slate-500 p-6 text-center">
+                      <ImageIcon className="w-12 h-12 text-slate-700 mb-2" />
+                      <span className="text-xs font-semibold text-slate-400">Photo could not be loaded</span>
+                      <span className="text-[10px] text-slate-600 mt-1 max-w-xs break-all">{activeImage}</span>
+                    </div>
+
+                    {gallery.length > 1 && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPartImageIdx((prev) => (prev > 0 ? prev - 1 : gallery.length - 1))}
+                          className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Previous photo"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPartImageIdx((prev) => (prev < gallery.length - 1 ? prev + 1 : 0))}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Next photo"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                        <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-slate-950/80 backdrop-blur-md text-white text-[10px] font-bold">
+                          {activeIdx + 1} / {gallery.length} Photos
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {gallery.length > 1 && (
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      {gallery.map((url, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setSelectedPartImageIdx(idx)}
+                          className={`relative flex-shrink-0 w-16 h-16 rounded-xl overflow-hidden border-2 transition-all ${
+                            idx === activeIdx
+                              ? "border-amber-400 ring-2 ring-amber-400/40"
+                              : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
+                          }`}
+                        >
+                          <img
+                            src={resolveMediaUrl(url)}
+                            alt={`Thumbnail ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = "none";
+                            }}
+                          />
+                          {idx === 0 && (
+                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5">
+                              Main
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-3 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">

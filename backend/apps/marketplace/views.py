@@ -1,5 +1,9 @@
+import os
 import uuid
+from django.conf import settings
+from django.core.files.storage import default_storage
 from rest_framework import generics, permissions, status, views
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.exceptions import (
     PermissionDenied,
@@ -31,6 +35,8 @@ from apps.marketplace.models import (
     ListingStatusChoices,
     StockMovementReasonChoices,
     PartConditionChoices,
+    BuyerFavouriteVehicle,
+    BuyerFavouritePart,
 )
 from apps.marketplace.serializers import (
     VehicleListingSellerSerializer,
@@ -43,6 +49,8 @@ from apps.marketplace.serializers import (
     ListingReviewSerializer,
     StockMovementSerializer,
     StockAdjustmentSerializer,
+    BuyerFavouriteVehicleSerializer,
+    BuyerFavouritePartSerializer,
 )
 from apps.marketplace.services import adjust_stock, change_price
 
@@ -62,6 +70,23 @@ class IsSellerOrStaff(permissions.BasePermission):
             or user.has_role('ADMIN')
             or user.has_role('STAFF')
         )
+
+
+class IsBuyer(permissions.BasePermission):
+    """Allows access to authenticated users holding the BUYER role (or platform admins)."""
+    message = "You must have a Buyer account to access favourite vehicles."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return (
+            user.is_superuser
+            or user.has_role('ADMIN')
+            or user.has_role('MARKETPLACE_ADMIN')
+            or user.has_role('BUYER')
+        )
+
 
 
 # =====================================================================
@@ -1334,3 +1359,339 @@ class AdminPartListingReviewView(views.APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+# =====================================================================
+# 4. Buyer Favourites APIs
+# =====================================================================
+
+class BuyerFavouriteVehicleListCreateView(generics.ListCreateAPIView):
+    """List or add approved vehicles to the authenticated buyer's favourites list.
+
+    GET /api/v1/marketplace/favourites/
+    POST /api/v1/marketplace/favourites/
+    """
+    permission_classes = [permissions.IsAuthenticated, IsBuyer]
+    serializer_class = BuyerFavouriteVehicleSerializer
+
+    def get_queryset(self):
+        # Strict user isolation: Buyer only views their own favourites
+        # select_related prevents N+1 queries when loading nested vehicle details
+        return BuyerFavouriteVehicle.objects.filter(
+            user=self.request.user,
+        ).select_related(
+            'vehicle',
+            'vehicle__make',
+            'vehicle__model',
+            'vehicle__variant',
+            'vehicle__seller',
+            'vehicle__organisation',
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        vehicle = serializer.validated_data['vehicle']
+
+        # Determine ownership strictly from authenticated user, never from client input.
+        # Idempotent addition: prevents duplicate database records upon repeated requests.
+        favourite, created = BuyerFavouriteVehicle.objects.get_or_create(
+            user=request.user,
+            vehicle=vehicle,
+        )
+        out_serializer = self.get_serializer(favourite)
+        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(out_serializer.data, status=status_code)
+
+
+class BuyerFavouriteVehicleDetailView(views.APIView):
+    """Retrieve or remove a vehicle from the authenticated buyer's favourites.
+
+    GET /api/v1/marketplace/favourites/<id>/
+    DELETE /api/v1/marketplace/favourites/<id>/
+    Supports looking up either by favourite record ID or by vehicle ID.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsBuyer]
+
+    def get(self, request, id):
+        fav = BuyerFavouriteVehicle.objects.filter(user=request.user).filter(
+            Q(id=id) | Q(vehicle_id=id)
+        ).select_related(
+            'vehicle',
+            'vehicle__make',
+            'vehicle__model',
+            'vehicle__variant',
+            'vehicle__seller',
+            'vehicle__organisation',
+        ).first()
+
+        if not fav:
+            raise Http404("Favourite vehicle not found.")
+
+        serializer = BuyerFavouriteVehicleSerializer(fav, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, id):
+        fav = BuyerFavouriteVehicle.objects.filter(user=request.user).filter(
+            Q(id=id) | Q(vehicle_id=id)
+        ).first()
+
+        if fav:
+            fav.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        # Object-level isolation check:
+        # If this favourite exists but belongs to another buyer, return 404 (prevent access/deletion)
+        other_fav = BuyerFavouriteVehicle.objects.filter(
+            Q(id=id) | Q(vehicle_id=id)
+        ).exclude(user=request.user).first()
+
+        if other_fav:
+            return Response(
+                {"detail": "Favourite vehicle not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Safe repeated removal: if already removed, return 204 No Content
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class BuyerFavouritePartListCreateView(generics.ListCreateAPIView):
+    """List or add approved spare parts to the authenticated buyer's favourites list.
+
+    GET /api/v1/marketplace/favourites/parts/
+    POST /api/v1/marketplace/favourites/parts/
+    """
+    permission_classes = [permissions.IsAuthenticated, IsBuyer]
+    serializer_class = BuyerFavouritePartSerializer
+
+    def get_queryset(self):
+        # Strict user isolation: Buyer only views their own favourites
+        # select_related prevents N+1 queries when loading nested spare part details
+        return BuyerFavouritePart.objects.filter(
+            user=self.request.user,
+        ).select_related(
+            'part',
+            'part__category',
+            'part__seller',
+            'part__organisation',
+        ).order_by('-created_at')
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        part = serializer.validated_data['part']
+
+        # Determine ownership strictly from authenticated user, never from client input.
+        # Idempotent addition: prevents duplicate database records upon repeated requests.
+        favourite, created = BuyerFavouritePart.objects.get_or_create(
+            user=request.user,
+            part=part,
+        )
+        out_serializer = self.get_serializer(favourite)
+        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(out_serializer.data, status=status_code)
+
+
+class BuyerFavouritePartDetailView(views.APIView):
+    """Retrieve or remove a spare part from the authenticated buyer's favourites.
+
+    GET /api/v1/marketplace/favourites/parts/<id>/
+    DELETE /api/v1/marketplace/favourites/parts/<id>/
+    Supports looking up either by favourite record ID or by part ID.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsBuyer]
+
+    def get(self, request, id):
+        fav = BuyerFavouritePart.objects.filter(user=request.user).filter(
+            Q(id=id) | Q(part_id=id)
+        ).select_related(
+            'part',
+            'part__category',
+            'part__seller',
+            'part__organisation',
+        ).first()
+
+        if not fav:
+            raise Http404("Favourite part not found.")
+
+        serializer = BuyerFavouritePartSerializer(fav, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, id):
+        fav = BuyerFavouritePart.objects.filter(user=request.user).filter(
+            Q(id=id) | Q(part_id=id)
+        ).first()
+
+        if fav:
+            fav.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        # Object-level isolation check:
+        # If this favourite exists but belongs to another buyer, return 404 (prevent access/deletion)
+        other_fav = BuyerFavouritePart.objects.filter(
+            Q(id=id) | Q(part_id=id)
+        ).exclude(user=request.user).first()
+
+        if other_fav:
+            return Response(
+                {"detail": "Favourite part not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Safe repeated removal: if already removed, return 204 No Content
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MarketplaceImageUploadView(views.APIView):
+    """Secure endpoint for uploading listing and catalogue photos from a seller's computer.
+
+    POST /api/v1/marketplace/upload-image/
+    DELETE /api/v1/marketplace/upload-image/
+    """
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    permission_classes = [IsSellerOrStaff]
+
+    def post(self, request, *args, **kwargs):
+        # 1. Gather files from multipart request
+        files = request.FILES.getlist('files')
+        if not files:
+            files = request.FILES.getlist('file')
+
+        if not files:
+            raise DRFValidationError({"file": "No image file provided. Please attach an image under 'file' or 'files'."})
+
+        # 2. Check listing ownership & photo limit if listing_id is supplied
+        listing_type = request.data.get('listing_type', '').lower().strip()
+        listing_id = request.data.get('listing_id', '').strip()
+
+        if listing_id:
+            user = request.user
+            is_admin = user.is_staff or user.is_superuser or user.has_role('ADMIN') or user.has_role('MARKETPLACE_ADMIN')
+
+            if listing_type == 'vehicle':
+                listing = VehicleListing.objects.filter(id=listing_id, is_active=True).first()
+                if not listing:
+                    raise NotFound("Vehicle listing not found.")
+                is_owner = listing.seller_id == user.id
+                is_org_admin = False
+                if listing.organisation_id:
+                    is_org_admin = listing.organisation.get_member_role(user) in ('OWNER', 'ADMIN')
+                if not (is_admin or is_owner or is_org_admin):
+                    raise PermissionDenied("You do not have permission to upload photos for this listing.")
+                existing_count = len(listing.images or [])
+                if existing_count + len(files) > 10:
+                    raise DRFValidationError({"file": f"Listing already has {existing_count} photos. Adding {len(files)} would exceed the maximum limit of 10 photos."})
+            elif listing_type == 'part':
+                listing = SparePartListing.objects.filter(id=listing_id, is_active=True).first()
+                if not listing:
+                    raise NotFound("Spare part listing not found.")
+                is_owner = listing.seller_id == user.id
+                is_org_admin = False
+                if listing.organisation_id:
+                    is_org_admin = listing.organisation.get_member_role(user) in ('OWNER', 'ADMIN')
+                if not (is_admin or is_owner or is_org_admin):
+                    raise PermissionDenied("You do not have permission to upload photos for this listing.")
+                existing_count = len(listing.images or [])
+                if existing_count + len(files) > 10:
+                    raise DRFValidationError({"file": f"Listing already has {existing_count} photos. Adding {len(files)} would exceed the maximum limit of 10 photos."})
+        else:
+            if len(files) > 10:
+                raise DRFValidationError({"file": f"Cannot upload more than 10 images at once. Provided: {len(files)}."})
+
+        # 3. Validate each file (size, extension, and binary magic bytes)
+        max_size = getattr(settings, 'MAX_UPLOAD_SIZE_BYTES', 5 * 1024 * 1024)
+        allowed_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
+        validated_files = []
+
+        for f in files:
+            if f.size > max_size:
+                raise DRFValidationError({"file": f"File '{f.name}' exceeds the maximum allowed size of {max_size // (1024 * 1024)}MB."})
+
+            ext = os.path.splitext(f.name)[1].lower()
+            if ext not in allowed_extensions:
+                raise DRFValidationError({"file": f"File '{f.name}' has an unsupported extension '{ext}'. Allowed formats are JPEG, PNG, and WebP."})
+
+            # Inspect magic bytes to prevent spoofed/malicious file uploads
+            pos = f.tell() if hasattr(f, 'tell') else 0
+            header = f.read(32)
+            if hasattr(f, 'seek'):
+                f.seek(pos)
+
+            is_jpeg = header.startswith(b'\xff\xd8\xff')
+            is_png = header.startswith(b'\x89PNG\r\n\x1a\n')
+            is_webp = len(header) >= 12 and header.startswith(b'RIFF') and header[8:12] == b'WEBP'
+
+            if not (is_jpeg or is_png or is_webp):
+                raise DRFValidationError({"file": f"File '{f.name}' contains invalid or corrupted image data. Allowed types are genuine JPEG, PNG, and WebP images."})
+
+            canonical_ext = '.jpg' if is_jpeg else ('.png' if is_png else '.webp')
+            validated_files.append((f, canonical_ext))
+
+        # 4. Save validated files to default storage under safe unique names
+        category = listing_type if listing_type in ('vehicle', 'part', 'catalogue') else 'marketplace'
+        year_month = timezone.now().strftime("%Y/%m")
+        uploaded_results = []
+
+        for f, canonical_ext in validated_files:
+            unique_id = uuid.uuid4().hex
+            storage_path = f"uploads/{category}s/{year_month}/{unique_id}{canonical_ext}"
+            saved_name = default_storage.save(storage_path, f)
+            storage_url = default_storage.url(saved_name)
+            absolute_url = request.build_absolute_uri(storage_url)
+
+            uploaded_results.append({
+                "id": unique_id,
+                "url": storage_url,
+                "absolute_url": absolute_url,
+                "relative_url": storage_url,
+                "filename": f.name,
+                "size": f.size,
+                "content_type": f"image/{canonical_ext.lstrip('.')}",
+            })
+
+        # 5. Build structured response
+        if len(uploaded_results) == 1:
+            first = uploaded_results[0]
+            response_data = {
+                "status": "success",
+                "id": first["id"],
+                "url": first["url"],
+                "absolute_url": first["absolute_url"],
+                "relative_url": first["relative_url"],
+                "filename": first["filename"],
+                "size": first["size"],
+                "content_type": first["content_type"],
+                "images": uploaded_results,
+            }
+        else:
+            response_data = {
+                "status": "success",
+                "count": len(uploaded_results),
+                "images": uploaded_results,
+            }
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
+
+    def delete(self, request, *args, **kwargs):
+        url = request.data.get('url') or request.query_params.get('url', '')
+        if not url:
+            return Response({"error": "Missing 'url' parameter for deletion."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Security check: forbid directory traversal
+        if ".." in url:
+            return Response({"error": "Invalid file path."}, status=status.HTTP_400_BAD_REQUEST)
+
+        clean_path = url
+        if "/media/" in clean_path:
+            clean_path = clean_path.split("/media/", 1)[1]
+        elif clean_path.startswith("/"):
+            clean_path = clean_path.lstrip("/")
+
+        if not clean_path.startswith("uploads/"):
+            return Response({"error": "Only uploaded marketplace images may be deleted."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if default_storage.exists(clean_path):
+            default_storage.delete(clean_path)
+
+        return Response({"status": "success", "message": "Image deleted successfully."}, status=status.HTTP_200_OK)

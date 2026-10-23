@@ -370,3 +370,89 @@ class PriceChange(BaseUUIDModel):
         if not getattr(self, '_allow_delete', False):
             raise ImmutableRecordError("PriceChange records are immutable and cannot be deleted.")
         super().delete(*args, **kwargs)
+
+
+class BuyerFavouriteVehicle(BaseUUIDModel):
+    """Saves an approved vehicle listing to an authenticated buyer's favourites list."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='favourite_vehicles',
+        help_text="The buyer account who saved this vehicle.",
+    )
+    vehicle = models.ForeignKey(
+        VehicleListing,
+        on_delete=models.CASCADE,
+        related_name='favourited_by',
+        help_text="The vehicle listing saved as favourite.",
+    )
+
+    class Meta:
+        verbose_name = 'Buyer Favourite Vehicle'
+        verbose_name_plural = 'Buyer Favourite Vehicles'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'vehicle'],
+                name='unique_buyer_vehicle_favourite',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['vehicle']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} -> {self.vehicle.title} ({self.vehicle_id})"
+
+    @property
+    def buyer(self):
+        return self.user
+
+    @property
+    def listing(self):
+        return self.vehicle
+
+
+class BuyerFavouritePart(BaseUUIDModel):
+    """Saves an approved spare part listing to an authenticated buyer's favourites list."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='favourite_parts',
+        help_text="The buyer account who saved this spare part.",
+    )
+    part = models.ForeignKey(
+        SparePartListing,
+        on_delete=models.CASCADE,
+        related_name='favourited_by',
+        help_text="The spare part listing saved as favourite.",
+    )
+
+    class Meta:
+        verbose_name = 'Buyer Favourite Spare Part'
+        verbose_name_plural = 'Buyer Favourite Spare Parts'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'part'],
+                name='unique_buyer_part_favourite',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['part']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} -> {self.part.name} ({self.part_id})"
+
+    @property
+    def buyer(self):
+        return self.user
+
+    @property
+    def listing(self):
+        return self.part

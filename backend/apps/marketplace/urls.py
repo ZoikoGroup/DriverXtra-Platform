@@ -21,9 +21,18 @@ from apps.marketplace.views import (
     AdminPartListingListView,
     AdminPartListingDetailView,
     AdminPartListingReviewView,
+    BuyerFavouriteVehicleListCreateView,
+    BuyerFavouriteVehicleDetailView,
+    BuyerFavouritePartListCreateView,
+    BuyerFavouritePartDetailView,
+    MarketplaceImageUploadView,
 )
 
 urlpatterns = [
+    # 0. Media / Image Uploads
+    path('upload-image/', MarketplaceImageUploadView.as_view(), name='marketplace-upload-image'),
+    path('images/upload/', MarketplaceImageUploadView.as_view(), name='marketplace-images-upload'),
+
     # 1. Buyer Browse & Search (Approved items only)
     path('browse/vehicles/', MarketplaceVehicleListView.as_view(), name='marketplace-browse-vehicles'),
     path('browse/vehicles/<uuid:id>/', MarketplaceVehicleDetailView.as_view(), name='marketplace-browse-vehicle-detail'),
@@ -52,4 +61,17 @@ urlpatterns = [
     path('admin/parts/', AdminPartListingListView.as_view(), name='marketplace-admin-parts'),
     path('admin/parts/<uuid:id>/', AdminPartListingDetailView.as_view(), name='marketplace-admin-part-detail'),
     path('admin/parts/<uuid:id>/review/', AdminPartListingReviewView.as_view(), name='marketplace-admin-part-review'),
+
+    # 4. Buyer Saved Vehicle Favourites
+    path('favourites/', BuyerFavouriteVehicleListCreateView.as_view(), name='marketplace-buyer-favourites'),
+    path('favourites/<uuid:id>/', BuyerFavouriteVehicleDetailView.as_view(), name='marketplace-buyer-favourite-detail'),
+    # Resilient aliases for US/UK spelling
+    path('favorites/', BuyerFavouriteVehicleListCreateView.as_view(), name='marketplace-buyer-favorites'),
+    path('favorites/<uuid:id>/', BuyerFavouriteVehicleDetailView.as_view(), name='marketplace-buyer-favorite-detail'),
+
+    # 5. Buyer Saved Spare Part Favourites
+    path('favourites/parts/', BuyerFavouritePartListCreateView.as_view(), name='marketplace-buyer-favourite-parts'),
+    path('favourites/parts/<uuid:id>/', BuyerFavouritePartDetailView.as_view(), name='marketplace-buyer-favourite-part-detail'),
+    path('favorites/parts/', BuyerFavouritePartListCreateView.as_view(), name='marketplace-buyer-favorite-parts'),
+    path('favorites/parts/<uuid:id>/', BuyerFavouritePartDetailView.as_view(), name='marketplace-buyer-favorite-part-detail'),
 ]
