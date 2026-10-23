@@ -19,6 +19,9 @@ import {
   VehicleCatalogueApplication,
   CreateVehicleCatalogueApplicationPayload,
   CataloguePhotoProposal,
+  HsnClassificationOption,
+  VehicleEnquiry,
+  VehicleEnquiryStatus,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import ListingPhotoManager from "./ListingPhotoManager";
@@ -44,12 +47,31 @@ import {
   HelpCircle,
   Upload,
   Loader2,
+  MessageSquare,
+  Phone,
+  Mail,
+  MessageCircle,
+  Send,
+  Check,
+  Lock,
 } from "lucide-react";
 
 export default function SellerInventoryView() {
   const { user } = useAuth();
-  const [activeSection, setActiveSection] = useState<"vehicles" | "parts" | "applications">("vehicles");
+  const [activeSection, setActiveSection] = useState<"vehicles" | "parts" | "applications" | "enquiries">("vehicles");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
+
+  // Vehicle Enquiries state
+  const [enquiries, setEnquiries] = useState<VehicleEnquiry[]>([]);
+  const [enquiriesLoading, setEnquiriesLoading] = useState(false);
+  const [enquiryStatusFilter, setEnquiryStatusFilter] = useState<string>("ALL");
+  const [updatingEnquiryId, setUpdatingEnquiryId] = useState<string | null>(null);
+  const [sellerNotesDraft, setSellerNotesDraft] = useState<Record<string, string>>({});
+  const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
+  const [sellerReplyDraft, setSellerReplyDraft] = useState<Record<string, string>>({});
+  const [replyingEnquiryId, setReplyingEnquiryId] = useState<string | null>(null);
+  const [replySuccessId, setReplySuccessId] = useState<string | null>(null);
+  const [replyError, setReplyError] = useState<Record<string, string>>({});
 
   // Vehicles state
   const [vehicles, setVehicles] = useState<MarketplaceVehicleListing[]>([]);
@@ -79,6 +101,8 @@ export default function SellerInventoryView() {
   const [editPartCompatibilityNotes, setEditPartCompatibilityNotes] = useState("");
   const [editPartPrimaryImageUrl, setEditPartPrimaryImageUrl] = useState("");
   const [editPartImages, setEditPartImages] = useState<string[]>([]);
+  const [editPartHsnCode, setEditPartHsnCode] = useState<string>("8708");
+  const [editPartGstRate, setEditPartGstRate] = useState<string>("28.00");
 
   // Stock Adjust State (Phase 3 Part A)
   const [adjustingPart, setAdjustingPart] = useState<MarketplacePartListing | null>(null);
@@ -195,6 +219,9 @@ export default function SellerInventoryView() {
   const [partVariant, setPartVariant] = useState("");
   const [partCompatibilityNotes, setPartCompatibilityNotes] = useState("");
   const [partOrg, setPartOrg] = useState("");
+  const [partHsnCode, setPartHsnCode] = useState<string>("8708");
+  const [partGstRate, setPartGstRate] = useState<string>("28.00");
+  const [hsnOptions, setHsnOptions] = useState<HsnClassificationOption[]>([]);
 
   // Catalogue Application State
   const [appModalOpen, setAppModalOpen] = useState(false);
@@ -290,6 +317,8 @@ export default function SellerInventoryView() {
     setPartImages([]);
     setPartVariant("");
     setPartCompatibilityNotes("");
+    setPartHsnCode("8708");
+    setPartGstRate("28.00");
     setPartModalError("");
   };
 
@@ -438,6 +467,12 @@ export default function SellerInventoryView() {
     api.catalogue.getCategories().then(setCategories).catch(console.error);
     api.catalogue.getParts().then(setCatalogueParts).catch(console.error);
     api.catalogue.getVariants().then(setVariants).catch(console.error);
+    api.marketplace.getGstOptions().then((res) => {
+      if (res) {
+        const list = res.options || res.hsn_options || [];
+        setHsnOptions(list);
+      }
+    }).catch(console.error);
     api.organisations.list().then((paginated) => {
       const orgs = paginated.results || [];
       // Filter to user's organisations where they have admin/owner permission
@@ -524,11 +559,95 @@ export default function SellerInventoryView() {
       loadMyPhotoProposals();
     }
   });
-}
+} else if (activeSection === "enquiries") {
+      Promise.resolve().then(() => {
+        if (!ignore) {
+          setEnquiriesLoading(true);
+        }
+      });
+      const st = enquiryStatusFilter !== "ALL" ? enquiryStatusFilter : undefined;
+      api.marketplace.listSellerEnquiries({ status: st }).then((data) => {
+        if (!ignore) {
+          setEnquiries(data);
+          const drafts: Record<string, string> = {};
+          data.forEach((e) => {
+            drafts[e.id] = e.seller_notes || "";
+          });
+          setSellerNotesDraft(drafts);
+          setEnquiriesLoading(false);
+        }
+      }).catch((err) => {
+        if (!ignore) {
+          console.error("Failed to load seller enquiries", err);
+          setEnquiriesLoading(false);
+        }
+      });
+    }
     return () => {
       ignore = true;
     };
-  }, [activeSection, statusFilter]);
+  }, [activeSection, statusFilter, enquiryStatusFilter]);
+
+  const handleUpdateEnquiryStatus = async (enquiryId: string, newStatus: VehicleEnquiryStatus) => {
+    setUpdatingEnquiryId(enquiryId);
+    try {
+      const updated = await api.marketplace.updateSellerEnquiry(enquiryId, {
+        status: newStatus,
+        seller_notes: sellerNotesDraft[enquiryId],
+      });
+      setEnquiries((prev) => prev.map((e) => (e.id === enquiryId ? updated : e)));
+    } catch (err) {
+      console.error("Failed to update enquiry status", err);
+    } finally {
+      setUpdatingEnquiryId(null);
+    }
+  };
+
+  const handleSaveEnquiryNote = async (enquiryId: string) => {
+    setSavingNoteId(enquiryId);
+    try {
+      const note = sellerNotesDraft[enquiryId] || "";
+      const updated = await api.marketplace.updateSellerEnquiry(enquiryId, {
+        seller_notes: note,
+      });
+      setEnquiries((prev) => prev.map((e) => (e.id === enquiryId ? updated : e)));
+    } catch (err) {
+      console.error("Failed to save enquiry note", err);
+    } finally {
+      setSavingNoteId(null);
+    }
+  };
+
+  const handleSendSellerReply = async (enquiryId: string) => {
+    const replyText = (sellerReplyDraft[enquiryId] || "").trim();
+    if (!replyText) {
+      setReplyError((prev) => ({ ...prev, [enquiryId]: "Please type a reply message before sending." }));
+      return;
+    }
+
+    setReplyingEnquiryId(enquiryId);
+    setReplyError((prev) => ({ ...prev, [enquiryId]: "" }));
+    try {
+      const updated = await api.marketplace.updateSellerEnquiry(enquiryId, {
+        seller_reply: replyText,
+      });
+      setEnquiries((prev) => prev.map((e) => (e.id === enquiryId ? updated : e)));
+      setSellerReplyDraft((prev) => ({ ...prev, [enquiryId]: "" }));
+      setReplySuccessId(enquiryId);
+      setTimeout(() => {
+        setReplySuccessId((prev) => (prev === enquiryId ? null : prev));
+      }, 4000);
+    } catch (err: unknown) {
+      console.error("Failed to send seller reply", err);
+      const msg = err instanceof Error ? err.message : "Failed to send reply. Please try again.";
+      setReplyError((prev) => ({
+        ...prev,
+        [enquiryId]: msg,
+      }));
+    } finally {
+      setReplyingEnquiryId(null);
+    }
+  };
 
   // Submit New Vehicle
   const handleSubmitVehicle = async (asDraft: boolean) => {
@@ -665,6 +784,8 @@ export default function SellerInventoryView() {
         catalogue_part: partCataloguePart || null,
         price: parsedPrice,
         compare_at_price: parsedCompareAt,
+        hsn_code: partHsnCode || undefined,
+        gst_rate: partGstRate ? parseFloat(partGstRate) : undefined,
         currency: "GBP",
         stock_quantity: parsedStock,
         condition: partCondition,
@@ -856,6 +977,8 @@ export default function SellerInventoryView() {
         updatePayload.catalogue_part = editPartCataloguePart || null;
         updatePayload.compatible_variants = editPartVariant ? [editPartVariant] : [];
         updatePayload.compatibility_notes = editPartCompatibilityNotes.trim();
+        updatePayload.hsn_code = editPartHsnCode || undefined;
+        updatePayload.gst_rate = editPartGstRate ? parseFloat(editPartGstRate) : undefined;
       }
 
       await api.marketplace.updatePart(editingPart.id, updatePayload);
@@ -878,7 +1001,9 @@ export default function SellerInventoryView() {
         (editPartCataloguePart || null) !== (editingPart.catalogue_part || null) ||
         editPartDescription !== (editingPart.description || "") ||
         editPartVariant !== initialVarId ||
-        editPartCompatibilityNotes.trim() !== (editingPart.compatibility_notes || "").trim();
+        editPartCompatibilityNotes.trim() !== (editingPart.compatibility_notes || "").trim() ||
+        editPartHsnCode !== (editingPart.hsn_code || "") ||
+        parseFloat(editPartGstRate) !== Number(editingPart.gst_rate || 0);
       setSuccessMessage(
         editingPart.status === "APPROVED" && isMaterial
           ? "Spare part updated! Material fields were modified, so it has been returned to Pending Approval for review."
@@ -1075,7 +1200,7 @@ export default function SellerInventoryView() {
               <Plus className="w-4 h-4" />
               <span>Add Spare Part</span>
             </button>
-          ) : (
+          ) : activeSection === "applications" ? (
             <div className="flex items-center gap-2">
               <button
                 onClick={() => {
@@ -1100,6 +1225,25 @@ export default function SellerInventoryView() {
                 <span>Submit Vehicle to Catalogue</span>
               </button>
             </div>
+          ) : (
+            <button
+              onClick={() => {
+                setEnquiriesLoading(true);
+                api.marketplace
+                  .listSellerEnquiries({
+                    status: enquiryStatusFilter !== "ALL" ? enquiryStatusFilter : undefined,
+                  })
+                  .then((data) => {
+                    setEnquiries(data);
+                    setEnquiriesLoading(false);
+                  })
+                  .catch(() => setEnquiriesLoading(false));
+              }}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center gap-1.5"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+              <span>Refresh Enquiries</span>
+            </button>
           )}
         </div>
       </div>
@@ -1150,10 +1294,50 @@ export default function SellerInventoryView() {
             <FilePlus className="w-3.5 h-3.5" />
             <span>Catalogue Submissions</span>
           </button>
+          <button
+            onClick={() => {
+              setActiveSection("enquiries");
+              setEnquiryStatusFilter("ALL");
+            }}
+            className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+              activeSection === "enquiries"
+                ? "bg-white text-slate-900 shadow-sm"
+                : "text-slate-500 hover:text-slate-900"
+            }`}
+          >
+            <MessageSquare className="w-3.5 h-3.5 text-amber-500" />
+            <span>Vehicle Enquiries</span>
+            {enquiries.filter((e) => e.status === "NEW").length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500 text-slate-950">
+                {enquiries.filter((e) => e.status === "NEW").length}
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Status Pills */}
-        {activeSection !== "applications" ? (
+        {activeSection === "enquiries" ? (
+          <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
+            {[
+              { id: "ALL", label: "All Enquiries" },
+              { id: "NEW", label: "New Enquiries" },
+              { id: "RESPONDED", label: "Responded" },
+              { id: "CLOSED", label: "Closed" },
+            ].map((st) => (
+              <button
+                key={st.id}
+                onClick={() => setEnquiryStatusFilter(st.id)}
+                className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors ${
+                  enquiryStatusFilter === st.id
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                }`}
+              >
+                {st.label}
+              </button>
+            ))}
+          </div>
+        ) : activeSection !== "applications" ? (
           <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
             {(activeSection === "parts"
               ? ["ALL", "LOW_STOCK", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
@@ -1456,17 +1640,32 @@ export default function SellerInventoryView() {
                   </div>
 
                     <div className="text-right sm:self-center flex flex-col items-end">
-                      <span className="text-xs text-slate-400">Retail Price</span>
+                      <span className="text-xs text-slate-400">Retail Price (excl. GST)</span>
                       <div className="flex items-baseline gap-1.5">
                         {p.compare_at_price && Number(p.compare_at_price) > Number(p.price) && (
                           <span className="text-xs text-slate-400 line-through">
-                            £{Number(p.compare_at_price).toFixed(2)}
+                            ₹{Number(p.compare_at_price).toFixed(2)}
                           </span>
                         )}
                         <span className="text-xl font-black text-slate-950">
-                          £{Number(p.price).toFixed(2)}
+                          ₹{Number(p.price).toFixed(2)}
                         </span>
                       </div>
+                      {p.gst_rate !== undefined && p.gst_rate !== null && (
+                        <div className="text-right text-[11px] text-slate-500 mt-0.5 space-y-0.5">
+                          <div>
+                            GST ({Number(p.gst_rate).toFixed(0)}%): <span className="font-semibold text-slate-700">₹{p.gst_amount ? Number(p.gst_amount).toFixed(2) : (Number(p.price) * Number(p.gst_rate) / 100).toFixed(2)}</span>
+                          </div>
+                          <div className="text-[11px] font-bold text-emerald-700">
+                            Total: ₹{p.total_price ? Number(p.total_price).toFixed(2) : (Number(p.price) * (1 + Number(p.gst_rate) / 100)).toFixed(2)}
+                          </div>
+                          {p.hsn_code && (
+                            <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-100 text-slate-600 border border-slate-200">
+                              HSN {p.hsn_code} {p.is_tax_verified ? "✓ Verified" : "⚠️ Needs Verification"}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
                         {/* Adjust Stock Button (Phase 3 Part A) */}
                         {canManageListing(p) ? (
@@ -1515,6 +1714,8 @@ export default function SellerInventoryView() {
                               setEditPartDescription(p.description || "");
                               setEditPartPrimaryImageUrl(p.primary_image_url || "");
                               setEditPartImages(Array.isArray(p.images) ? p.images : []);
+                              setEditPartHsnCode(p.hsn_code || "8708");
+                              setEditPartGstRate(p.gst_rate !== undefined && p.gst_rate !== null ? String(p.gst_rate) : "28.00");
 
                               let currentVarId = "";
                               if (Array.isArray(p.compatible_variants) && p.compatible_variants.length > 0) {
@@ -1983,6 +2184,383 @@ export default function SellerInventoryView() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          SECTION 4: VEHICLE ENQUIRIES MANAGEMENT
+      ========================================================================= */}
+      {activeSection === "enquiries" && (
+        <div className="space-y-4">
+          {/* Header metrics */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="p-3.5 bg-white rounded-2xl border border-slate-200">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Total Enquiries</span>
+              <p className="text-xl font-black text-slate-900 mt-0.5">{enquiries.length}</p>
+            </div>
+            <div className="p-3.5 bg-white rounded-2xl border border-amber-200 bg-amber-50/30">
+              <span className="text-[10px] font-bold text-amber-600 uppercase tracking-wider block">New / Pending</span>
+              <p className="text-xl font-black text-amber-600 mt-0.5">
+                {enquiries.filter((e) => e.status === "NEW").length}
+              </p>
+            </div>
+            <div className="p-3.5 bg-white rounded-2xl border border-emerald-200 bg-emerald-50/30">
+              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider block">Responded</span>
+              <p className="text-xl font-black text-emerald-600 mt-0.5">
+                {enquiries.filter((e) => e.status === "RESPONDED").length}
+              </p>
+            </div>
+            <div className="p-3.5 bg-white rounded-2xl border border-slate-200">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Closed</span>
+              <p className="text-xl font-black text-slate-600 mt-0.5">
+                {enquiries.filter((e) => e.status === "CLOSED").length}
+              </p>
+            </div>
+          </div>
+
+          {enquiriesLoading ? (
+            <div className="p-12 text-center bg-white rounded-3xl border border-slate-200 flex flex-col items-center justify-center">
+              <Loader2 className="w-8 h-8 text-amber-500 animate-spin mb-3" />
+              <p className="text-sm font-bold text-slate-700">Loading incoming vehicle enquiries...</p>
+              <p className="text-xs text-slate-400 mt-1">Connecting to DriverXtra marketplace lead manager</p>
+            </div>
+          ) : enquiries.length === 0 ? (
+            <div className="p-12 text-center bg-white rounded-3xl border border-slate-200 max-w-lg mx-auto space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto">
+                <MessageSquare className="w-6 h-6" />
+              </div>
+              <h4 className="text-base font-black text-slate-900">No Vehicle Enquiries Found</h4>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                {enquiryStatusFilter !== "ALL"
+                  ? `There are currently no enquiries with status "${enquiryStatusFilter}".`
+                  : "When prospective buyers browse your approved vehicles on the marketplace and send direct questions, they will appear here with full buyer contact details."}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {enquiries.map((enq) => {
+                const isNew = enq.status === "NEW";
+                const isResponded = enq.status === "RESPONDED";
+                const isClosed = enq.status === "CLOSED";
+                const isUpdating = updatingEnquiryId === enq.id;
+                const isSavingNote = savingNoteId === enq.id;
+                const isReplying = replyingEnquiryId === enq.id;
+
+                return (
+                  <div
+                    key={enq.id}
+                    className={`bg-white rounded-3xl border transition-all p-5 space-y-4 ${
+                      isNew
+                        ? "border-amber-300 shadow-md ring-1 ring-amber-300/40"
+                        : "border-slate-200 shadow-sm hover:border-slate-300"
+                    }`}
+                  >
+                    {/* Top Row: Vehicle Summary + Status Badge */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                      <div className="flex items-center gap-3">
+                        {enq.listing_details?.primary_image_url ? (
+                          <img
+                            src={resolveMediaUrl(enq.listing_details.primary_image_url)}
+                            alt={enq.listing_details.title || "Vehicle"}
+                            className="w-12 h-12 rounded-xl object-cover border border-slate-200 flex-shrink-0"
+                          />
+                        ) : (
+                          <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400 flex-shrink-0">
+                            <Car className="w-6 h-6" />
+                          </div>
+                        )}
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-sm font-black text-slate-900">
+                              {enq.listing_details?.title || "Vehicle Listing"}
+                            </h4>
+                            <span className="text-xs font-mono font-bold text-amber-600">
+                              £{Number(enq.listing_details?.price || 0).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 flex items-center gap-2 mt-0.5">
+                            <span>Year: {enq.listing_details?.year || "N/A"}</span>
+                            <span>·</span>
+                            <span>Location: {enq.listing_details?.location_city || "UK"}</span>
+                            <span>·</span>
+                            <span className="font-mono text-[10px]">Ref: #{enq.id.slice(0, 8)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 self-start sm:self-auto">
+                        {isNew && (
+                          <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                            New Enquiry
+                          </span>
+                        )}
+                        {isResponded && (
+                          <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1.5">
+                            <Check className="w-3 h-3 text-emerald-600" />
+                            Responded
+                          </span>
+                        )}
+                        {isClosed && (
+                          <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-300">
+                            Closed
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Middle Row: Buyer details & Buyer message */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {/* Buyer Identity Card */}
+                      <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-2 text-xs">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                          Buyer Contact Details
+                        </span>
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">Name</span>
+                          <span className="font-bold text-slate-900">{enq.buyer_name || "DriverXtra Buyer"}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px]">Email</span>
+                          <a
+                            href={`mailto:${enq.buyer_email}`}
+                            className="font-medium text-amber-700 hover:underline flex items-center gap-1 truncate"
+                          >
+                            <Mail className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                            <span className="truncate">{enq.buyer_email}</span>
+                          </a>
+                        </div>
+                        {enq.buyer_phone ? (
+                          <div>
+                            <span className="text-slate-500 block text-[10px]">Callback Phone</span>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <a
+                                href={`tel:${enq.buyer_phone}`}
+                                className="font-mono text-slate-900 font-bold hover:underline flex items-center gap-1"
+                              >
+                                <Phone className="w-3 h-3 text-emerald-600" />
+                                <span>{enq.buyer_phone}</span>
+                              </a>
+                              <a
+                                href={`https://wa.me/${enq.buyer_phone.replace(/\D/g, "")}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-1 rounded-lg bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                title="Chat on WhatsApp"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                              </a>
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="text-slate-500 block text-[10px]">Callback Phone</span>
+                            <span className="text-slate-400 italic">None provided (Email only)</span>
+                          </div>
+                        )}
+                        <div className="pt-1 text-[10px] text-slate-400">
+                          Received: {new Date(enq.created_at).toLocaleString()}
+                        </div>
+                      </div>
+
+                      {/* Buyer Message Bubble & Seller Reply Section */}
+                      <div className="md:col-span-2 flex flex-col space-y-3">
+                        {/* Buyer Message */}
+                        <div className="p-4 bg-amber-50/60 rounded-2xl border border-amber-200/80 space-y-1.5">
+                          <div className="flex items-center justify-between text-[11px] font-bold text-amber-900">
+                            <span className="flex items-center gap-1">
+                              <MessageSquare className="w-3.5 h-3.5 text-amber-600" />
+                              <span>Buyer&apos;s Message</span>
+                            </span>
+                            <span className="font-normal text-[10px] text-amber-700">
+                              {new Date(enq.created_at).toLocaleDateString()}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-800 whitespace-pre-line leading-relaxed">
+                            {enq.message}
+                          </p>
+                        </div>
+
+                        {/* Existing In-Platform Reply Display */}
+                        {enq.seller_reply && (
+                          <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 space-y-1.5">
+                            <div className="flex items-center justify-between text-[11px] font-bold text-emerald-900">
+                              <span className="flex items-center gap-1.5">
+                                <Send className="w-3.5 h-3.5 text-emerald-600" />
+                                <span>Your Reply to Buyer (In-Platform)</span>
+                              </span>
+                              {enq.replied_at && (
+                                <span className="font-normal text-[10px] text-emerald-700">
+                                  Sent {new Date(enq.replied_at).toLocaleString()}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-800 whitespace-pre-line leading-relaxed">
+                              {enq.seller_reply}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Reply to Buyer Form */}
+                        <div className="p-4 bg-slate-50/90 rounded-2xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                              <MessageSquare className="w-3.5 h-3.5 text-amber-600" />
+                              <span>{enq.seller_reply ? "Update Reply to Buyer" : "Reply to Buyer"}</span>
+                            </label>
+                            <span className="text-[10px] text-amber-700 font-medium">
+                              Buyer will see this reply in their dashboard
+                            </span>
+                          </div>
+                          <textarea
+                            rows={2}
+                            value={sellerReplyDraft[enq.id] ?? ""}
+                            onChange={(e) => {
+                              setSellerReplyDraft((prev) => ({
+                                ...prev,
+                                [enq.id]: e.target.value,
+                              }));
+                              if (replyError[enq.id]) {
+                                setReplyError((prev) => ({ ...prev, [enq.id]: "" }));
+                              }
+                            }}
+                            placeholder="Type your message to the buyer (e.g. Yes, the vehicle is available for inspection this Saturday at 2 PM...)"
+                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-400 resize-none"
+                          />
+                          {replyError[enq.id] && (
+                            <div className="text-[11px] text-rose-600 font-medium flex items-center gap-1">
+                              <AlertTriangle className="w-3 h-3 text-rose-500" />
+                              <span>{replyError[enq.id]}</span>
+                            </div>
+                          )}
+                          {replySuccessId === enq.id && (
+                            <div className="text-[11px] text-emerald-700 font-medium flex items-center gap-1 bg-emerald-50 px-2.5 py-1.5 rounded-xl border border-emerald-200">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>Reply sent successfully! Buyer can now view it under My Enquiries.</span>
+                            </div>
+                          )}
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => handleSendSellerReply(enq.id)}
+                              disabled={isReplying || !(sellerReplyDraft[enq.id]?.trim())}
+                              className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {isReplying ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  <span>Sending...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="w-3.5 h-3.5" />
+                                  <span>Send Reply</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Internal Private Notes (Clearly separate from buyer reply) */}
+                        <div className="p-3 bg-slate-100/70 rounded-2xl border border-slate-200/80 space-y-2">
+                          <div className="flex items-center gap-1.5 text-slate-600">
+                            <Lock className="w-3 h-3 text-slate-500" />
+                            <span className="text-[10px] font-bold uppercase tracking-wider">
+                              Internal Private Notes (Not visible to buyer)
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={sellerNotesDraft[enq.id] ?? (enq.seller_notes || "")}
+                              onChange={(e) =>
+                                setSellerNotesDraft((prev) => ({
+                                  ...prev,
+                                  [enq.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="Add private note (e.g. called customer, arranged inspection)..."
+                              className="flex-1 px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveEnquiryNote(enq.id)}
+                              disabled={isSavingNote}
+                              className="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-bold transition-colors disabled:opacity-50"
+                            >
+                              {isSavingNote ? "Saving..." : "Save Note"}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Quick Lifecycle Action Buttons */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
+                          <div className="text-[11px] text-slate-500">
+                            {enq.responded_at && (
+                              <span>Responded on {new Date(enq.responded_at).toLocaleDateString()}</span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {enq.buyer_phone && (
+                              <a
+                                href={`tel:${enq.buyer_phone}`}
+                                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center gap-1"
+                              >
+                                <Phone className="w-3 h-3 text-emerald-600" />
+                                <span>Call</span>
+                              </a>
+                            )}
+                            <a
+                              href={`mailto:${enq.buyer_email}?subject=${encodeURIComponent(
+                                `RE: Enquiry for ${enq.listing_details?.title || "Vehicle"}`
+                              )}`}
+                              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold flex items-center gap-1"
+                            >
+                              <Mail className="w-3 h-3 text-amber-600" />
+                              <span>Email</span>
+                            </a>
+
+                            {isNew && (
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateEnquiryStatus(enq.id, "RESPONDED")}
+                                disabled={isUpdating}
+                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1 shadow-sm disabled:opacity-50"
+                              >
+                                <Check className="w-3 h-3" />
+                                <span>Mark Responded</span>
+                              </button>
+                            )}
+
+                            {!isClosed ? (
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateEnquiryStatus(enq.id, "CLOSED")}
+                                disabled={isUpdating}
+                                className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+                              >
+                                Close
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateEnquiryStatus(enq.id, "NEW")}
+                                disabled={isUpdating}
+                                className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+                              >
+                                Re-open
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -2479,6 +3057,110 @@ export default function SellerInventoryView() {
                 </div>
               </div>
 
+              {/* Statutory GST & HSN Classification */}
+              <div className="p-4 bg-slate-900 text-white rounded-2xl border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-amber-400">Statutory GST & HSN Classification</span>
+                    <span className="text-[10px] text-slate-400">(Indian CBIC Rules)</span>
+                  </div>
+                  {(() => {
+                    const selectedHsnObj = hsnOptions.find((h) => h.hsn_code === partHsnCode);
+                    return selectedHsnObj?.is_verified ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-500/30 text-[9px] font-bold">
+                        ✓ Verified Schedule
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-500/30 text-[9px] font-bold">
+                        ⚠️ Requires Admin Verification
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 text-[11px] font-bold mb-1">
+                      HSN / Product Classification *
+                    </label>
+                    <select
+                      value={partHsnCode}
+                      onChange={(e) => {
+                        const newHsn = e.target.value;
+                        setPartHsnCode(newHsn);
+                        const match = hsnOptions.find((h) => h.hsn_code === newHsn);
+                        if (match) {
+                          setPartGstRate(match.standard_rate);
+                        }
+                      }}
+                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 text-white rounded-xl focus:outline-none focus:border-amber-500 text-xs"
+                    >
+                      {hsnOptions.length > 0 ? (
+                        hsnOptions.map((opt) => (
+                          <option key={opt.hsn_code} value={opt.hsn_code}>
+                            HSN {opt.hsn_code} — {opt.description} ({opt.standard_rate}%)
+                          </option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="8708">HSN 8708 — Parts and accessories of motor vehicles (28%)</option>
+                          <option value="8421">HSN 8421 — Oil, air, fuel filters (18%)</option>
+                          <option value="8413">HSN 8413 — Fuel pumps, water pumps (18%)</option>
+                          <option value="8507">HSN 8507 — Electric accumulators & batteries (28%)</option>
+                          <option value="8409">HSN 8409 — Internal combustion engine parts (28%)</option>
+                          <option value="4011">HSN 4011 — Pneumatic tyres for motor vehicles (28%)</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 text-[11px] font-bold mb-1">
+                      Applicable GST Rate (%) *
+                    </label>
+                    <select
+                      value={partGstRate}
+                      onChange={(e) => setPartGstRate(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 text-white rounded-xl focus:outline-none focus:border-amber-500 text-xs font-mono"
+                    >
+                      {(() => {
+                        const selectedHsnObj = hsnOptions.find((h) => h.hsn_code === partHsnCode);
+                        const permitted: string[] = selectedHsnObj?.permitted_rates || selectedHsnObj?.allowed_rates || ["28.00", "18.00", "12.00", "5.00"];
+                        return permitted.map((r: string) => (
+                          <option key={r} value={r}>
+                            {r}% {r === selectedHsnObj?.standard_rate ? "(Statutory Standard)" : "(Concessional / Specific Variant)"}
+                          </option>
+                        ));
+                      })()}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Live Tax Breakdown Calculation */}
+                {(() => {
+                  const pNum = parseFloat(partPrice) || 0;
+                  const rNum = parseFloat(partGstRate) || 0;
+                  const taxAmount = (pNum * rNum / 100);
+                  const grandTotal = pNum + taxAmount;
+                  return (
+                    <div className="pt-2 border-t border-slate-800 grid grid-cols-3 gap-2 text-center text-xs">
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="text-[10px] text-slate-400 block">Part Price (excl.)</span>
+                        <span className="font-bold text-slate-200">₹{pNum.toFixed(2)}</span>
+                      </div>
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="text-[10px] text-slate-400 block">GST ({rNum.toFixed(0)}%)</span>
+                        <span className="font-bold text-amber-400">+ ₹{taxAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="bg-amber-500/10 border border-amber-500/30 p-2 rounded-xl">
+                        <span className="text-[10px] text-amber-300 block font-semibold">Total Price</span>
+                        <span className="font-black text-amber-400">₹{grandTotal.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
               <div>
                 <label className="block text-slate-700 font-bold mb-1">OEM Cross References (Comma-separated)</label>
                 <input
@@ -2826,6 +3508,112 @@ export default function SellerInventoryView() {
                     </span>
                   )}
                 </div>
+              </div>
+
+              {/* Statutory GST & HSN Classification (Edit Mode) */}
+              <div className="p-4 bg-slate-900 text-white rounded-2xl border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-amber-400">Statutory GST & HSN Classification</span>
+                    <span className="text-[10px] text-slate-400">(Indian CBIC Rules)</span>
+                  </div>
+                  {(() => {
+                    const selectedHsnObj = hsnOptions.find((h) => h.hsn_code === editPartHsnCode);
+                    return selectedHsnObj?.is_verified ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-500/30 text-[9px] font-bold">
+                        ✓ Verified Schedule
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-950 text-amber-400 border border-amber-500/30 text-[9px] font-bold">
+                        ⚠️ Requires Admin Verification
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 text-[11px] font-bold mb-1">
+                      HSN / Product Classification *
+                    </label>
+                    <select
+                      value={editPartHsnCode}
+                      onChange={(e) => {
+                        const newHsn = e.target.value;
+                        setEditPartHsnCode(newHsn);
+                        const match = hsnOptions.find((h) => h.hsn_code === newHsn);
+                        if (match) {
+                          setEditPartGstRate(match.standard_rate);
+                        }
+                      }}
+                      disabled={!canManageListing(editingPart)}
+                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 text-white rounded-xl focus:outline-none focus:border-amber-500 text-xs disabled:opacity-50"
+                    >
+                      {hsnOptions.length > 0 ? (
+                        hsnOptions.map((opt) => (
+                          <option key={opt.hsn_code} value={opt.hsn_code}>
+                            HSN {opt.hsn_code} — {opt.description} ({opt.standard_rate}%)
+                          </option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="8708">HSN 8708 — Parts and accessories of motor vehicles (28%)</option>
+                          <option value="8421">HSN 8421 — Oil, air, fuel filters (18%)</option>
+                          <option value="8413">HSN 8413 — Fuel pumps, water pumps (18%)</option>
+                          <option value="8507">HSN 8507 — Electric accumulators & batteries (28%)</option>
+                          <option value="8409">HSN 8409 — Internal combustion engine parts (28%)</option>
+                          <option value="4011">HSN 4011 — Pneumatic tyres for motor vehicles (28%)</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 text-[11px] font-bold mb-1">
+                      Applicable GST Rate (%) *
+                    </label>
+                    <select
+                      value={editPartGstRate}
+                      onChange={(e) => setEditPartGstRate(e.target.value)}
+                      disabled={!canManageListing(editingPart)}
+                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 text-white rounded-xl focus:outline-none focus:border-amber-500 text-xs font-mono disabled:opacity-50"
+                    >
+                      {(() => {
+                        const selectedHsnObj = hsnOptions.find((h) => h.hsn_code === editPartHsnCode);
+                        const permitted: string[] = selectedHsnObj?.permitted_rates || selectedHsnObj?.allowed_rates || ["28.00", "18.00", "12.00", "5.00"];
+                        return permitted.map((r: string) => (
+                          <option key={r} value={r}>
+                            {r}% {r === selectedHsnObj?.standard_rate ? "(Statutory Standard)" : "(Concessional / Specific Variant)"}
+                          </option>
+                        ));
+                      })()}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Live Tax Breakdown Calculation */}
+                {(() => {
+                  const pNum = parseFloat(editPartPrice) || 0;
+                  const rNum = parseFloat(editPartGstRate) || 0;
+                  const taxAmount = (pNum * rNum / 100);
+                  const grandTotal = pNum + taxAmount;
+                  return (
+                    <div className="pt-2 border-t border-slate-800 grid grid-cols-3 gap-2 text-center text-xs">
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="text-[10px] text-slate-400 block">Part Price (excl.)</span>
+                        <span className="font-bold text-slate-200">₹{pNum.toFixed(2)}</span>
+                      </div>
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="text-[10px] text-slate-400 block">GST ({rNum.toFixed(0)}%)</span>
+                        <span className="font-bold text-amber-400">+ ₹{taxAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="bg-amber-500/10 border border-amber-500/30 p-2 rounded-xl">
+                        <span className="text-[10px] text-amber-300 block font-semibold">Total Price</span>
+                        <span className="font-black text-amber-400">₹{grandTotal.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div>

@@ -1105,6 +1105,43 @@ export const api = {
       return res.listing;
     },
 
+    // Direct Buyer-Seller Enquiries
+    async enquireVehicle(listingId: string, payload: CreateVehicleEnquiryPayload): Promise<VehicleEnquiry> {
+      return apiRequest<VehicleEnquiry>(`/marketplace/vehicles/${listingId}/enquire/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listSellerEnquiries(params?: { status?: string; listing_id?: string }): Promise<VehicleEnquiry[]> {
+      const searchParams = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") searchParams.set("status", params.status);
+      if (params?.listing_id) searchParams.set("listing_id", params.listing_id);
+      const qs = searchParams.toString() ? `?${searchParams.toString()}` : "";
+      const res = await apiRequest<VehicleEnquiry[] | { results: VehicleEnquiry[] }>(
+        `/marketplace/seller/enquiries/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async updateSellerEnquiry(id: string, payload: UpdateVehicleEnquiryPayload): Promise<VehicleEnquiry> {
+      return apiRequest<VehicleEnquiry>(`/marketplace/seller/enquiries/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listBuyerEnquiries(): Promise<VehicleEnquiry[]> {
+      const res = await apiRequest<VehicleEnquiry[] | { results: VehicleEnquiry[] }>(
+        `/marketplace/buyer/enquiries/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
     async listMyParts(status?: string): Promise<MarketplacePartListing[]> {
       const qs = status ? `?status=${encodeURIComponent(status)}` : "";
       const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
@@ -1229,6 +1266,32 @@ export const api = {
       );
       return res.listing;
     },
+
+    // Tax Options & Checkout
+    async getGstOptions(): Promise<GSTOptionsResponse> {
+      return apiRequest<GSTOptionsResponse>("/marketplace/tax/gst-options/", {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+
+    
+    async checkout(payload: OrderCheckoutPayload): Promise<{ status: string; message: string; order: Record<string, unknown> }> {
+      return apiRequest<{ status: string; message: string; order: Record<string, unknown> }>("/marketplace/orders/checkout/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async calculateCheckout(payload: OrderCheckoutPayload): Promise<Record<string, unknown>> {
+      return apiRequest<Record<string, unknown>>("/marketplace/orders/calculate/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ ...payload, preview_only: true }),
+      });
+    },
+
   },
 };
 
@@ -1565,6 +1628,7 @@ export interface MarketplaceVehicleListing {
   location_city?: string;
   location_postcode?: string;
   status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+  seller_info?: SellerPublicInfo;
   submitted_at?: string;
   reviewed_at?: string | null;
   reviewed_by?: string | null;
@@ -1613,6 +1677,55 @@ export interface BuyerPartFitment {
   source: "CATALOGUE" | "SELLER" | "NONE";
 }
 
+export interface TaxBreakdown {
+  price_before_gst: string | number;
+  gst_rate: string | number;
+  gst_amount: string | number;
+  total_price: string | number;
+  tax_type?: "INTRA_STATE" | "INTER_STATE" | "NONE";
+  is_interstate?: boolean;
+  place_of_supply?: string;
+  seller_state?: string;
+  cgst_rate?: string | number;
+  cgst_amount?: string | number;
+  sgst_rate?: string | number;
+  sgst_amount?: string | number;
+  igst_rate?: string | number;
+  igst_amount?: string | number;
+}
+
+export interface HsnClassificationOption {
+  hsn_code: string;
+  description: string;
+  schedule: string;
+  standard_rate: string;
+  allowed_rates: string[];
+  permitted_rates?: string[];
+  is_verified: boolean;
+  legal_reference: string;
+  notes: string;
+}
+
+export interface GSTOptionsResponse {
+  status: string;
+  count: number;
+  options?: HsnClassificationOption[];
+  hsn_options: HsnClassificationOption[];
+  standard_slabs: string[];
+}
+
+export interface OrderCheckoutItemPayload {
+  listing_id: string;
+  quantity: number;
+}
+
+export interface OrderCheckoutPayload {
+  items: OrderCheckoutItemPayload[];
+  place_of_supply?: string;
+  currency?: string;
+  preview_only?: boolean;
+}
+
 export interface MarketplacePartListing {
   id: string;
   seller?: string;
@@ -1642,6 +1755,16 @@ export interface MarketplacePartListing {
   low_stock_threshold?: number;
   availability?: "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK";
   condition: string;
+
+  // Tax & Indian GST Fields
+  hsn_code?: string;
+  gst_rate?: string | number;
+  is_tax_verified?: boolean;
+  price_before_gst?: string | number;
+  gst_amount?: string | number;
+  total_price?: string | number;
+  tax_breakdown?: TaxBreakdown;
+
   primary_image_url?: string;
   images?: string[];
   compatible_variants?: VehicleVariant[];
@@ -1746,6 +1869,8 @@ export interface CreatePartListingPayload {
   stock_quantity?: number;
   low_stock_threshold?: number;
   condition?: string;
+  hsn_code?: string;
+  gst_rate?: number | string;
   primary_image_url?: string;
   images?: string[];
   compatible_variants?: string[];
@@ -1810,6 +1935,13 @@ export interface CataloguePartOffer {
   seller_name?: string;
   organisation_name?: string | null;
   primary_image_url?: string;
+  hsn_code?: string;
+  gst_rate?: string | number;
+  is_tax_verified?: boolean;
+  price_before_gst?: string | number;
+  gst_amount?: string | number;
+  total_price?: string | number;
+  tax_breakdown?: TaxBreakdown;
   created_at: string;
 }
 
@@ -1821,4 +1953,61 @@ export interface UploadedImageResponse {
   filename: string;
   size: number;
   content_type: string;
+}
+
+export interface SellerPublicInfo {
+  name: string;
+  seller_type: "DEALERSHIP" | "INDIVIDUAL_SELLER";
+  is_verified: boolean;
+  location_city: string;
+  phone: string | null;
+  has_phone: boolean;
+  whatsapp_url: string | null;
+  can_enquire: boolean;
+}
+
+export type VehicleEnquiryStatus = "NEW" | "RESPONDED" | "CLOSED";
+
+export interface VehicleEnquiry {
+  id: string;
+  listing: string;
+  listing_details?: {
+    id: string;
+    title: string;
+    make_name?: string;
+    model_name?: string;
+    year?: number;
+    price: string | number;
+    currency: string;
+    primary_image_url?: string;
+    location_city?: string;
+    status?: string;
+  };
+  buyer: string;
+  buyer_name?: string;
+  buyer_email?: string;
+  buyer_phone?: string;
+  seller: string;
+  seller_name?: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  message: string;
+  status: VehicleEnquiryStatus;
+  seller_notes?: string;
+  seller_reply?: string;
+  replied_at?: string | null;
+  responded_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateVehicleEnquiryPayload {
+  message: string;
+  buyer_phone?: string;
+}
+
+export interface UpdateVehicleEnquiryPayload {
+  status?: VehicleEnquiryStatus;
+  seller_notes?: string;
+  seller_reply?: string;
 }

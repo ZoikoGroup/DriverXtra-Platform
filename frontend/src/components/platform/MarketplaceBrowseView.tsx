@@ -38,6 +38,11 @@ import {
   RotateCcw,
   Heart,
   ImageIcon,
+  Building2,
+  MessageSquare,
+  Phone,
+  MessageCircle,
+  Send,
 } from "lucide-react";
 
 export default function MarketplaceBrowseView() {
@@ -60,6 +65,14 @@ export default function MarketplaceBrowseView() {
   const [selectedVehicle, setSelectedVehicle] = useState<MarketplaceVehicleListing | null>(null);
   const [selectedVehicleImageIdx, setSelectedVehicleImageIdx] = useState<number>(0);
   const [selectedPartImageIdx, setSelectedPartImageIdx] = useState<number>(0);
+
+  // Vehicle Enquiry Modal State
+  const [enquiryVehicle, setEnquiryVehicle] = useState<MarketplaceVehicleListing | null>(null);
+  const [enquiryMessage, setEnquiryMessage] = useState<string>("");
+  const [enquiryBuyerPhone, setEnquiryBuyerPhone] = useState<string>("");
+  const [enquirySubmitting, setEnquirySubmitting] = useState<boolean>(false);
+  const [enquirySuccess, setEnquirySuccess] = useState<string | null>(null);
+  const [enquiryError, setEnquiryError] = useState<string | null>(null);
 
   // Favourites state
   const [favouriteVehicleIds, setFavouriteVehicleIds] = useState<Set<string>>(new Set());
@@ -100,6 +113,59 @@ export default function MarketplaceBrowseView() {
     api.catalogue.getMakes().then(setMakes).catch(console.error);
     api.catalogue.getCategories().then(setCategories).catch(console.error);
   }, []);
+
+  const handleOpenEnquiryModal = (vehicle: MarketplaceVehicleListing) => {
+    setEnquiryVehicle(vehicle);
+    setEnquiryMessage(
+      "Hello, I am interested in your listed vehicle. Could you please share more details about its condition, availability and final price?"
+    );
+    setEnquiryBuyerPhone(user?.phone_number || "");
+    setEnquirySuccess(null);
+    setEnquiryError(null);
+  };
+
+  const handleSendEnquiry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!enquiryVehicle) return;
+    if (!user) {
+      setEnquiryError("Please log in to your DriverXtra account to send an enquiry to the seller.");
+      return;
+    }
+    if (enquiryMessage.trim().length < 10) {
+      setEnquiryError("Enquiry message must be at least 10 characters long.");
+      return;
+    }
+
+    setEnquirySubmitting(true);
+    setEnquiryError(null);
+    try {
+      const result = await api.marketplace.enquireVehicle(enquiryVehicle.id, {
+        message: enquiryMessage.trim(),
+        buyer_phone: enquiryBuyerPhone.trim(),
+      });
+      setEnquirySuccess(
+        `Your enquiry has been sent directly to ${
+          enquiryVehicle.seller_info?.name || enquiryVehicle.seller_name || "the seller"
+        }! Reference: #${result.id.slice(0, 8)}`
+      );
+        } catch (err: unknown) {
+      const error = err as {
+        details?: { detail?: unknown };
+        message?: string;
+      };
+
+      const msg =
+        error.details?.detail ??
+        error.message ??
+        "Failed to submit enquiry. Please try again.";
+
+      setEnquiryError(
+        typeof msg === "string" ? msg : JSON.stringify(msg)
+      );
+    } finally {
+      setEnquirySubmitting(false);
+    }
+  };
 
   // Update models when make changes
   useEffect(() => {
@@ -733,25 +799,42 @@ export default function MarketplaceBrowseView() {
 
                       {/* Privacy & Seller Tag */}
                       <div className="flex items-center justify-between text-[11px] text-slate-500">
-                        <span>Seller: <strong className="text-slate-800">{v.organisation_name || v.seller_name || "Verified Trader"}</strong></span>
-                        <span className="font-mono text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">
+                        <span className="flex items-center gap-1 truncate">
+                          Seller:{" "}
+                          <strong className="text-slate-800 truncate">
+                            {v.seller_info?.name || v.organisation_name || v.seller_name || "Verified Trader"}
+                          </strong>
+                          {v.seller_info?.is_verified && (
+                            <span title="Verified Seller" className="inline-flex">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                            </span>
+                          )}
+                        </span>
+                        <span className="font-mono text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 flex-shrink-0">
                           VIN: {v.masked_vin || "***********Verified"}
                         </span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Action */}
-                  <div className="p-5 pt-0">
+                  {/* Actions */}
+                  <div className="p-5 pt-0 grid grid-cols-2 gap-2">
                     <button
                       onClick={() => {
                         setSelectedVehicle(v);
                         setSelectedVehicleImageIdx(0);
                       }}
-                      className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                      className="py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
                     >
                       <Eye className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Inspect Vehicle Details</span>
+                      <span>Inspect</span>
+                    </button>
+                    <button
+                      onClick={() => handleOpenEnquiryModal(v)}
+                      className="py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span>Contact</span>
                     </button>
                   </div>
                 </div>
@@ -1323,8 +1406,9 @@ export default function MarketplaceBrowseView() {
                                 )}
                               </button>
                             )}
-                            <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm">
-                              £{Number(p.price).toFixed(2)}
+                            <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm text-right leading-tight">
+                              <div>₹{p.total_price ? Number(p.total_price).toFixed(2) : (Number(p.price) * (1 + Number(p.gst_rate || 18) / 100)).toFixed(2)}</div>
+                              <span className="text-[9px] text-amber-400 font-medium block">incl. GST</span>
                             </div>
                           </div>
 
@@ -1377,18 +1461,42 @@ export default function MarketplaceBrowseView() {
                             )}
                           </div>
 
-                          <div className="flex items-baseline justify-between pt-1">
-                            <span className="text-xs text-slate-500">Retail Price:</span>
-                            <div className="flex items-baseline gap-1.5">
-                              {p.compare_at_price && Number(p.compare_at_price) > Number(p.price) && (
-                                <span className="text-xs text-slate-400 line-through">
-                                  £{Number(p.compare_at_price).toFixed(2)}
+                          <div className="pt-2 border-t border-slate-100 space-y-1">
+                            <div className="flex items-baseline justify-between text-xs text-slate-600">
+                              <span>Part price:</span>
+                              <div className="flex items-baseline gap-1.5">
+                                {p.compare_at_price && Number(p.compare_at_price) > Number(p.price) && (
+                                  <span className="text-xs text-slate-400 line-through">
+                                    ₹{Number(p.compare_at_price).toFixed(2)}
+                                  </span>
+                                )}
+                                <span className="font-semibold text-slate-800">
+                                  ₹{Number(p.price).toFixed(2)}
                                 </span>
-                              )}
-                              <span className="text-lg font-black text-slate-950">
-                                £{Number(p.price).toFixed(2)}
+                              </div>
+                            </div>
+                            <div className="flex items-baseline justify-between text-xs text-slate-600">
+                              <span>GST ({p.gst_rate !== undefined && p.gst_rate !== null ? `${Number(p.gst_rate).toFixed(0)}%` : "18%"}):</span>
+                              <span className="font-semibold text-slate-800">
+                                ₹{p.gst_amount ? Number(p.gst_amount).toFixed(2) : (Number(p.price) * (Number(p.gst_rate || 18) / 100)).toFixed(2)}
                               </span>
                             </div>
+                            <div className="flex items-baseline justify-between text-sm font-black text-slate-950 pt-0.5 border-t border-dashed border-slate-200">
+                              <span>Total including GST:</span>
+                              <span className="text-base text-slate-950 font-black">
+                                ₹{p.total_price ? Number(p.total_price).toFixed(2) : (Number(p.price) * (1 + Number(p.gst_rate || 18) / 100)).toFixed(2)}
+                              </span>
+                            </div>
+                            {p.hsn_code && (
+                              <div className="text-[10px] text-slate-500 flex items-center justify-between pt-0.5">
+                                <span>HSN {p.hsn_code}</span>
+                                {p.is_tax_verified ? (
+                                  <span className="text-emerald-700 font-medium">✓ Statutory Rate</span>
+                                ) : (
+                                  <span className="text-amber-700 font-medium">⚠️ Pending Verification</span>
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1672,10 +1780,108 @@ export default function MarketplaceBrowseView() {
               </div>
             )}
 
-            <div className="pt-2 flex justify-end">
+            {/* Seller Information & Authorized Direct Contact */}
+            <div className="p-4 bg-slate-900 text-white rounded-2xl space-y-3 shadow-md border border-slate-800">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-amber-400" />
+                  <h5 className="font-bold text-sm text-white">Seller Information</h5>
+                </div>
+                {selectedVehicle.seller_info?.is_verified ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    Verified Seller
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
+                    Standard Seller
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Seller / Dealership Name</span>
+                  <span className="font-bold text-slate-100 text-sm">
+                    {selectedVehicle.seller_info?.name || selectedVehicle.organisation_name || selectedVehicle.seller_name || "Private Seller"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Seller Classification</span>
+                  <span className="font-medium text-slate-200">
+                    {selectedVehicle.seller_info?.seller_type === "DEALERSHIP" ? "Automotive Dealership" : "Individual Seller"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Location</span>
+                  <span className="font-medium text-slate-200 flex items-center gap-1">
+                    <MapPin className="w-3 h-3 text-slate-400" />
+                    {selectedVehicle.seller_info?.location_city || selectedVehicle.location_city || "Location available upon enquiry"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Public Business Phone</span>
+                  <span className="font-mono text-slate-200">
+                    {selectedVehicle.seller_info?.phone || "Direct phone not listed (Use enquiry)"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Direct Communication Buttons */}
+              <div className="pt-2 border-t border-slate-800 flex flex-wrap gap-2">
+                {selectedVehicle.seller_info?.phone && (
+                  <a
+                    href={`tel:${selectedVehicle.seller_info.phone}`}
+                    className="flex-1 min-w-[130px] py-2 px-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors border border-slate-700"
+                  >
+                    <Phone className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Call Seller</span>
+                  </a>
+                )}
+
+                {selectedVehicle.seller_info?.whatsapp_url && (
+                  <a
+                    href={selectedVehicle.seller_info.whatsapp_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex-1 min-w-[130px] py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>WhatsApp</span>
+                  </a>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = selectedVehicle;
+                    setSelectedVehicle(null);
+                    handleOpenEnquiryModal(target);
+                  }}
+                  className="flex-1 min-w-[150px] py-2 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                >
+                  <MessageSquare className="w-3.5 h-3.5 text-slate-950" />
+                  <span>Contact Seller</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2 flex items-center justify-between border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => {
+                  const target = selectedVehicle;
+                  setSelectedVehicle(null);
+                  handleOpenEnquiryModal(target);
+                }}
+                className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all flex items-center gap-1.5 shadow-sm"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>Contact Seller Directly</span>
+              </button>
               <button
                 onClick={() => setSelectedVehicle(null)}
-                className="px-5 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl"
+                className="px-5 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800"
               >
                 Close Inspector
               </button>
@@ -1836,15 +2042,15 @@ export default function MarketplaceBrowseView() {
 
             <div className="grid grid-cols-3 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                <span className="text-[10px] text-slate-500">Retail Price</span>
+                <span className="text-[10px] text-slate-500">Part Price (excl. GST)</span>
                 <div className="flex items-baseline gap-1.5 mt-0.5">
                   {selectedPart.compare_at_price && Number(selectedPart.compare_at_price) > Number(selectedPart.price) && (
                     <span className="text-xs text-slate-400 line-through">
-                      £{Number(selectedPart.compare_at_price).toFixed(2)}
+                      ₹{Number(selectedPart.compare_at_price).toFixed(2)}
                     </span>
                   )}
                   <p className="font-black text-base text-slate-950">
-                    £{Number(selectedPart.price).toFixed(2)}
+                    ₹{Number(selectedPart.price).toFixed(2)}
                   </p>
                 </div>
               </div>
@@ -1867,6 +2073,69 @@ export default function MarketplaceBrowseView() {
                 <span className="text-[10px] text-slate-500">Condition</span>
                 <p className="font-bold text-slate-900 mt-0.5">{selectedPart.condition}</p>
               </div>
+            </div>
+
+            {/* Statutory Indian GST Breakdown Panel */}
+            <div className="p-4 bg-gradient-to-br from-slate-900 to-slate-950 text-white rounded-2xl border border-slate-800 space-y-3 shadow-lg">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-[10px] font-bold border border-amber-500/30">
+                    GST Tax Breakdown (Indian CBIC Standard)
+                  </span>
+                  {selectedPart.hsn_code && (
+                    <span className="text-[11px] text-slate-300 font-mono">
+                      HSN: <strong className="text-white">{selectedPart.hsn_code}</strong>
+                    </span>
+                  )}
+                </div>
+                {selectedPart.is_tax_verified ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Statutory Rate Verified
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-500/30">
+                    <AlertTriangle className="w-3 h-3" />
+                    Pending Tax Verification
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                  <span className="text-[10px] text-slate-400 block">Part Price (before GST)</span>
+                  <span className="text-base font-bold text-slate-100 font-mono">
+                    ₹{Number(selectedPart.price).toFixed(2)}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                  <span className="text-[10px] text-slate-400 block">
+                    Applicable GST ({selectedPart.gst_rate !== undefined && selectedPart.gst_rate !== null ? `${Number(selectedPart.gst_rate).toFixed(0)}%` : "18%"})
+                  </span>
+                  <span className="text-base font-bold text-amber-400 font-mono">
+                    ₹{selectedPart.gst_amount ? Number(selectedPart.gst_amount).toFixed(2) : (Number(selectedPart.price) * (Number(selectedPart.gst_rate || 18) / 100)).toFixed(2)}
+                  </span>
+                </div>
+                <div className="p-3 bg-amber-500/10 rounded-xl border border-amber-500/30">
+                  <span className="text-[10px] text-amber-300 block font-medium">Total (inclusive of GST)</span>
+                  <span className="text-lg font-black text-amber-400 font-mono">
+                    ₹{selectedPart.total_price ? Number(selectedPart.total_price).toFixed(2) : (Number(selectedPart.price) * (1 + Number(selectedPart.gst_rate || 18) / 100)).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              {selectedPart.tax_breakdown && (
+                <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between text-[11px] text-slate-400">
+                  <div className="flex items-center gap-3">
+                    <span>CGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.cgst_amount || 0).toFixed(2)}</strong></span>
+                    <span>SGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.sgst_amount || 0).toFixed(2)}</strong></span>
+                    <span>IGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.igst_amount || 0).toFixed(2)}</strong></span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 italic">
+                    {selectedPart.tax_breakdown.is_interstate ? "Inter-state supply (IGST)" : "Intra-state supply (CGST + SGST)"}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Buyer Vehicle Fitment Verification (Phase 3 Part C) */}
@@ -1969,15 +2238,22 @@ export default function MarketplaceBrowseView() {
                           </div>
 
                           <div className="text-right flex sm:flex-col items-center sm:items-end justify-between sm:justify-center">
-                            <div className="flex items-baseline gap-1.5">
-                              {offer.compare_at_price && Number(offer.compare_at_price) > Number(offer.price) && (
-                                <span className="text-xs text-slate-400 line-through font-mono">
-                                  £{Number(offer.compare_at_price).toFixed(2)}
+                            <div className="flex flex-col items-end">
+                              <div className="flex items-baseline gap-1.5">
+                                {offer.compare_at_price && Number(offer.compare_at_price) > Number(offer.price) && (
+                                  <span className="text-xs text-slate-400 line-through font-mono">
+                                    ₹{Number(offer.compare_at_price).toFixed(2)}
+                                  </span>
+                                )}
+                                <span className="text-sm font-black text-slate-950 font-mono">
+                                  ₹{Number(offer.price).toFixed(2)}
+                                </span>
+                              </div>
+                              {offer.gst_rate !== undefined && (
+                                <span className="text-[10px] text-slate-500 font-mono">
+                                  + {Number(offer.gst_rate).toFixed(0)}% GST = ₹{Number(offer.total_price || (Number(offer.price) * (1 + Number(offer.gst_rate)/100))).toFixed(2)}
                                 </span>
                               )}
-                              <span className="text-sm font-black text-slate-950 font-mono">
-                                £{Number(offer.price).toFixed(2)}
-                              </span>
                             </div>
                             {offer.availability === "OUT_OF_STOCK" || offer.stock_quantity === 0 ? (
                               <span className="text-[10px] text-rose-600 font-bold mt-0.5">
@@ -2051,6 +2327,169 @@ export default function MarketplaceBrowseView() {
                 Close Inspector
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: DIRECT BUYER-SELLER VEHICLE ENQUIRY
+      ========================================================================= */}
+      {enquiryVehicle && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
+                  <MessageSquare className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Contact Seller</h3>
+                  <p className="text-xs text-slate-500">Direct Vehicle Purchase Enquiry</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEnquiryVehicle(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Vehicle Summary Card */}
+            <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-3">
+              {enquiryVehicle.primary_image_url ? (
+                <img
+                  src={resolveMediaUrl(enquiryVehicle.primary_image_url)}
+                  alt={enquiryVehicle.title}
+                  className="w-14 h-14 rounded-xl object-cover border border-slate-200 flex-shrink-0"
+                />
+              ) : (
+                <div className="w-14 h-14 rounded-xl bg-slate-200 flex items-center justify-center text-slate-400 flex-shrink-0">
+                  <Car className="w-6 h-6" />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <h4 className="text-xs font-black text-slate-900 truncate">{enquiryVehicle.title}</h4>
+                <div className="text-[11px] text-slate-500">
+                  <span>£{Number(enquiryVehicle.price).toLocaleString()}</span>
+                  <span className="mx-1.5">·</span>
+                  <span>{enquiryVehicle.year}</span>
+                  <span className="mx-1.5">·</span>
+                  <span>{enquiryVehicle.location_city || "UK"}</span>
+                </div>
+                <div className="text-[10px] text-slate-600 mt-0.5 flex items-center gap-1">
+                  <span>
+                    Seller: <strong>{enquiryVehicle.seller_info?.name || enquiryVehicle.seller_name || "Verified Trader"}</strong>
+                  </span>
+                  {enquiryVehicle.seller_info?.is_verified && (
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500 inline" />
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Success State */}
+            {enquirySuccess ? (
+              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-900 text-xs space-y-2">
+                <div className="flex items-center gap-2 font-bold text-emerald-800">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Enquiry Sent Successfully</span>
+                </div>
+                <p className="text-emerald-700 leading-relaxed">{enquirySuccess}</p>
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setEnquiryVehicle(null)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleSendEnquiry} className="space-y-4">
+                {enquiryError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                    <span>{enquiryError}</span>
+                  </div>
+                )}
+
+                {!user && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs flex items-center gap-2">
+                    <Info className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                    <span>You must be signed in to submit an enquiry to vehicle sellers.</span>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Your Enquiry Message <span className="text-rose-500">*</span>
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={enquiryMessage}
+                    onChange={(e) => setEnquiryMessage(e.target.value)}
+                    placeholder="Describe your questions about condition, availability, or pricing..."
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white resize-none"
+                    required
+                  />
+                  <span className="text-[10px] text-slate-400 block mt-1">
+                    Prefilled with recommended buyer questions. Feel free to customize before sending.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Your Contact Phone Number <span className="text-slate-400 font-normal">(Optional Callback)</span>
+                  </label>
+                  <input
+                    type="tel"
+                    value={enquiryBuyerPhone}
+                    onChange={(e) => setEnquiryBuyerPhone(e.target.value)}
+                    placeholder="+44 7123 456789"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white"
+                  />
+                  <span className="text-[10px] text-slate-400 block mt-1">
+                    Sellers can use this to call or text you regarding this vehicle.
+                  </span>
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                  <span>
+                    Your identity is verified via your DriverXtra account. Sensitive credentials are never exposed.
+                  </span>
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEnquiryVehicle(null)}
+                    className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:text-slate-900 rounded-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={enquirySubmitting || !user}
+                    className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {enquirySubmitting ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                        <span>Sending...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Send Enquiry</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

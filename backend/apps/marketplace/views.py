@@ -37,7 +37,10 @@ from apps.marketplace.models import (
     PartConditionChoices,
     BuyerFavouriteVehicle,
     BuyerFavouritePart,
+    VehicleEnquiry,
+    VehicleEnquiryStatusChoices,
 )
+from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
 from apps.marketplace.serializers import (
     VehicleListingSellerSerializer,
     SparePartListingSellerSerializer,
@@ -51,6 +54,10 @@ from apps.marketplace.serializers import (
     StockAdjustmentSerializer,
     BuyerFavouriteVehicleSerializer,
     BuyerFavouritePartSerializer,
+    VehicleEnquiryCreateSerializer,
+    VehicleEnquirySellerSerializer,
+    VehicleEnquiryBuyerSerializer,
+    VehicleEnquiryStatusUpdateSerializer,
 )
 from apps.marketplace.services import adjust_stock, change_price
 
@@ -1695,3 +1702,435 @@ class MarketplaceImageUploadView(views.APIView):
             default_storage.delete(clean_path)
 
         return Response({"status": "success", "message": "Image deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class GSTOptionsView(views.APIView):
+    """Public / Seller endpoint returning official automotive HSN classifications and valid GST rates."""
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        from apps.marketplace.tax import get_all_hsn_options
+        options = get_all_hsn_options()
+        return Response({
+            "status": "success",
+            "count": len(options),
+            "hsn_options": options,
+            "standard_slabs": ["5.00", "12.00", "18.00", "28.00"],
+        }, status=status.HTTP_200_OK)
+
+
+class OrderCheckoutView(views.APIView):
+    """Recalculates GST strictly on the backend and creates an immutable purchase order.
+
+    POST /api/v1/marketplace/orders/checkout/
+    Payload: {
+        items: [{ listing_id: UUID, quantity: int }],
+        place_of_supply?: str (e.g. "MH", "KA", "DL"),
+        currency?: str (default "INR"),
+        preview_only?: bool (if true, calculates and returns breakdown without persisting order)
+    }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from apps.marketplace.serializers import CheckoutPayloadSerializer, OrderSerializer
+        from apps.marketplace.models import Order, OrderItem, OrderStatusChoices
+        from apps.marketplace.tax import calculate_gst_breakdown, quantize_currency
+        from decimal import Decimal
+
+        serializer = CheckoutPayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        items_data = data['items']
+        place_of_supply = data.get('place_of_supply', '').strip()
+        currency = data.get('currency', 'INR').strip().upper()
+        preview_only = request.data.get('preview_only', False)
+
+        if not items_data:
+            return Response({"error": "At least one item is required for checkout."}, status=status.HTTP_400_BAD_REQUEST)
+
+        buyer = request.user
+
+        with transaction.atomic():
+            calculated_items = []
+            subtotal_taxable = Decimal('0.00')
+            cgst_total = Decimal('0.00')
+            sgst_total = Decimal('0.00')
+            igst_total = Decimal('0.00')
+            tax_total = Decimal('0.00')
+            grand_total = Decimal('0.00')
+
+            seller_state = ""
+
+            for item in items_data:
+                listing_id = item['listing_id']
+                qty = item['quantity']
+
+                if preview_only:
+                    listing = SparePartListing.objects.filter(id=listing_id, is_active=True).first()
+                else:
+                    listing = SparePartListing.objects.select_for_update().filter(id=listing_id, is_active=True).first()
+
+                if not listing:
+                    return Response(
+                        {"error": f"Spare part listing with ID {listing_id} not found or inactive."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                if listing.status != ListingStatusChoices.APPROVED:
+                    return Response(
+                        {"error": f"Part '{listing.name}' ({listing.mpn}) is not available for purchase (status: {listing.status})."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if listing.stock_quantity < qty:
+                    return Response(
+                        {
+                            "error": f"Insufficient stock for '{listing.name}'. Available: {listing.stock_quantity}, requested: {qty}."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if listing.organisation and listing.organisation.jurisdiction:
+                    seller_state = listing.organisation.jurisdiction
+
+                unit_price = listing.price
+                gst_rate = listing.gst_rate or Decimal('0.00')
+                line_taxable = quantize_currency(unit_price * qty)
+
+                breakdown = calculate_gst_breakdown(
+                    price=line_taxable,
+                    gst_rate=gst_rate,
+                    place_of_supply=place_of_supply,
+                    seller_state=seller_state,
+                )
+
+                line_gst = breakdown['gst_amount']
+                line_total = breakdown['total_price']
+                line_cgst = breakdown['cgst_amount']
+                line_sgst = breakdown['sgst_amount']
+                line_igst = breakdown['igst_amount']
+
+                subtotal_taxable += line_taxable
+                cgst_total += line_cgst
+                sgst_total += line_sgst
+                igst_total += line_igst
+                tax_total += line_gst
+                grand_total += line_total
+
+                calculated_items.append({
+                    "listing": listing,
+                    "item_type": "PART",
+                    "title": listing.name,
+                    "brand": listing.brand,
+                    "mpn": listing.mpn,
+                    "hsn_code": listing.hsn_code,
+                    "gst_rate": gst_rate,
+                    "is_tax_verified": listing.is_tax_verified,
+                    "unit_price": unit_price,
+                    "quantity": qty,
+                    "taxable_amount": line_taxable,
+                    "cgst_amount": line_cgst,
+                    "sgst_amount": line_sgst,
+                    "igst_amount": line_igst,
+                    "tax_amount": line_gst,
+                    "total_amount": line_total,
+                })
+
+            if preview_only:
+                return Response({
+                    "status": "success",
+                    "preview": True,
+                    "currency": currency or listing.currency,
+                    "place_of_supply": place_of_supply,
+                    "seller_state": seller_state,
+                    "subtotal_taxable_amount": str(subtotal_taxable),
+                    "cgst_amount": str(cgst_total),
+                    "sgst_amount": str(sgst_total),
+                    "igst_amount": str(igst_total),
+                    "total_tax_amount": str(tax_total),
+                    "total_amount": str(grand_total),
+                    "items": [
+                        {
+                            "listing_id": str(ci["listing"].id),
+                            "title": ci["title"],
+                            "brand": ci["brand"],
+                            "mpn": ci["mpn"],
+                            "hsn_code": ci["hsn_code"],
+                            "gst_rate": str(ci["gst_rate"]),
+                            "unit_price": str(ci["unit_price"]),
+                            "quantity": ci["quantity"],
+                            "taxable_amount": str(ci["taxable_amount"]),
+                            "cgst_amount": str(ci["cgst_amount"]),
+                            "sgst_amount": str(ci["sgst_amount"]),
+                            "igst_amount": str(ci["igst_amount"]),
+                            "tax_amount": str(ci["tax_amount"]),
+                            "total_amount": str(ci["total_amount"]),
+                        }
+                        for ci in calculated_items
+                    ],
+                }, status=status.HTTP_200_OK)
+
+            order_number = f"DX-ORD-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+            order = Order.objects.create(
+                buyer=buyer,
+                order_number=order_number,
+                status=OrderStatusChoices.CONFIRMED,
+                currency=currency,
+                place_of_supply=place_of_supply,
+                seller_state=seller_state,
+                subtotal_taxable_amount=subtotal_taxable,
+                cgst_amount=cgst_total,
+                sgst_amount=sgst_total,
+                igst_amount=igst_total,
+                total_tax_amount=tax_total,
+                total_amount=grand_total,
+            )
+
+            for ci in calculated_items:
+                OrderItem.objects.create(
+                    order=order,
+                    listing=ci["listing"],
+                    item_type=ci["item_type"],
+                    title=ci["title"],
+                    brand=ci["brand"],
+                    mpn=ci["mpn"],
+                    hsn_code=ci["hsn_code"],
+                    gst_rate=ci["gst_rate"],
+                    is_tax_verified=ci["is_tax_verified"],
+                    unit_price=ci["unit_price"],
+                    quantity=ci["quantity"],
+                    taxable_amount=ci["taxable_amount"],
+                    cgst_amount=ci["cgst_amount"],
+                    sgst_amount=ci["sgst_amount"],
+                    igst_amount=ci["igst_amount"],
+                    tax_amount=ci["tax_amount"],
+                    total_amount=ci["total_amount"],
+                )
+                adjust_stock(
+                    listing=ci["listing"],
+                    delta=-ci["quantity"],
+                    reason=StockMovementReasonChoices.SALE,
+                    actor=buyer,
+                    note=f"Customer order {order_number}",
+                )
+
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Order created successfully with verified GST tax snapshot.",
+                    "order": OrderSerializer(order).data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+
+# =====================================================================
+# 11. Vehicle Enquiry APIs (Direct Buyer–Seller Connection)
+# =====================================================================
+
+class VehicleEnquiryCreateView(views.APIView):
+    """
+    Submits a direct buyer enquiry for an approved vehicle listing.
+    POST /api/v1/marketplace/vehicles/<uuid:id>/enquire/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        try:
+            listing = VehicleListing.objects.select_related('seller', 'organisation').get(pk=id)
+        except VehicleListing.DoesNotExist:
+            return Response({"detail": "Vehicle listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if listing.status != ListingStatusChoices.APPROVED or not listing.is_active:
+            return Response(
+                {"detail": "Enquiries can only be submitted for active, approved vehicle listings."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if listing.seller_id == request.user.id:
+            return Response(
+                {"detail": "You cannot submit an enquiry on your own vehicle listing."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if listing.organisation and listing.organisation.is_member(request.user):
+            return Response(
+                {"detail": "You cannot submit an enquiry on a vehicle listing owned by your organisation."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Anti-spam & duplicate protection: 60s cooldown for same vehicle
+        recent = VehicleEnquiry.objects.filter(
+            buyer=request.user,
+            listing=listing,
+            created_at__gte=timezone.now() - timezone.timedelta(seconds=60),
+        ).exists()
+        if recent:
+            return Response(
+                {"detail": "You recently submitted an enquiry for this vehicle. Please wait a moment before sending another."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        serializer = VehicleEnquiryCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        enquiry = VehicleEnquiry.objects.create(
+            listing=listing,
+            buyer=request.user,
+            seller=listing.seller,
+            organisation=listing.organisation,
+            message=serializer.validated_data['message'],
+            buyer_phone=serializer.validated_data.get('buyer_phone', ''),
+        )
+
+        record_audit_entry(
+            event_type="marketplace.vehicle_enquiry.created",
+            action="marketplace:enquiry.create",
+            resource_type="VehicleEnquiry",
+            resource_id=str(enquiry.id),
+            actor_id=request.user.id,
+            operating_org_id=listing.organisation_id,
+            metadata={
+                "enquiry_id": str(enquiry.id),
+                "listing_id": str(listing.id),
+                "seller_id": str(listing.seller_id),
+                "buyer_email": request.user.email,
+            },
+        )
+
+        return Response(VehicleEnquiryBuyerSerializer(enquiry).data, status=status.HTTP_201_CREATED)
+
+
+class SellerVehicleEnquiryListView(generics.ListAPIView):
+    """
+    Allows a seller to view enquiries submitted for their vehicle listings.
+    GET /api/v1/marketplace/seller/enquiries/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = VehicleEnquirySellerSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        org_ids = OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True)
+
+        queryset = VehicleEnquiry.objects.filter(
+            Q(seller=user) | Q(organisation_id__in=org_ids)
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation'
+        ).distinct()
+
+        status_param = self.request.query_params.get('status')
+        if status_param and status_param.upper() != 'ALL':
+            queryset = queryset.filter(status=status_param.upper())
+
+        listing_id = self.request.query_params.get('listing_id')
+        if listing_id:
+            queryset = queryset.filter(listing_id=listing_id)
+
+        return queryset
+
+
+class SellerVehicleEnquiryDetailView(views.APIView):
+    """
+    Allows an authorized seller to view or update status/notes of an enquiry.
+    GET, PATCH /api/v1/marketplace/seller/enquiries/<uuid:id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_enquiry(self, user, enquiry_id):
+        org_ids = OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True)
+
+        try:
+            return VehicleEnquiry.objects.select_related(
+                'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation'
+            ).get(
+                Q(pk=enquiry_id) & (Q(seller=user) | Q(organisation_id__in=org_ids))
+            )
+        except VehicleEnquiry.DoesNotExist:
+            raise Http404("Enquiry not found or you are not authorized to view it.")
+
+    def get(self, request, id):
+        enquiry = self._get_enquiry(request.user, id)
+        return Response(VehicleEnquirySellerSerializer(enquiry).data)
+
+    def patch(self, request, id):
+        enquiry = self._get_enquiry(request.user, id)
+        serializer = VehicleEnquiryStatusUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        new_status = serializer.validated_data.get('status')
+        new_notes = serializer.validated_data.get('seller_notes')
+        new_reply = serializer.validated_data.get('seller_reply')
+
+        update_fields = ['updated_at']
+        if new_status:
+            enquiry.status = new_status
+            update_fields.append('status')
+            if new_status == VehicleEnquiryStatusChoices.RESPONDED and not enquiry.responded_at:
+                enquiry.responded_at = timezone.now()
+                update_fields.append('responded_at')
+
+        if new_notes is not None:
+            enquiry.seller_notes = new_notes
+            update_fields.append('seller_notes')
+
+        if new_reply is not None:
+            enquiry.seller_reply = new_reply
+            update_fields.append('seller_reply')
+            if new_reply.strip():
+                now = timezone.now()
+                enquiry.replied_at = now
+                update_fields.append('replied_at')
+                # If currently NEW and no status was explicitly given, automatically advance to RESPONDED
+                if enquiry.status == VehicleEnquiryStatusChoices.NEW and not new_status:
+                    enquiry.status = VehicleEnquiryStatusChoices.RESPONDED
+                    if 'status' not in update_fields:
+                        update_fields.append('status')
+                if not enquiry.responded_at:
+                    enquiry.responded_at = now
+                    if 'responded_at' not in update_fields:
+                        update_fields.append('responded_at')
+
+        enquiry.save(update_fields=update_fields)
+
+        record_audit_entry(
+            event_type="marketplace.vehicle_enquiry.updated",
+            action="marketplace:enquiry.update",
+            resource_type="VehicleEnquiry",
+            resource_id=str(enquiry.id),
+            actor_id=request.user.id,
+            operating_org_id=enquiry.organisation_id,
+            metadata={
+                "enquiry_id": str(enquiry.id),
+                "status": enquiry.status,
+                "has_reply": bool(enquiry.seller_reply),
+            },
+        )
+
+        return Response(VehicleEnquirySellerSerializer(enquiry).data)
+
+
+class BuyerVehicleEnquiryListView(generics.ListAPIView):
+    """
+    Allows an authenticated buyer to view all enquiries they have sent.
+    GET /api/v1/marketplace/buyer/enquiries/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = VehicleEnquiryBuyerSerializer
+
+    def get_queryset(self):
+        return VehicleEnquiry.objects.filter(
+            buyer=self.request.user
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'seller', 'organisation'
+        )

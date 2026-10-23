@@ -645,8 +645,9 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
 
                       {/* Price Badge */}
                       {p && (
-                        <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm">
-                          £{Number(p.price).toFixed(2)}
+                        <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm text-right leading-tight">
+                          <div>₹{p.total_price ? Number(p.total_price).toFixed(2) : (Number(p.price) * (1 + Number(p.gst_rate || 18) / 100)).toFixed(2)}</div>
+                          <span className="text-[9px] text-amber-400 font-medium block">incl. GST</span>
                         </div>
                       )}
                     </div>
@@ -705,6 +706,40 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
                             <span className="font-bold text-emerald-700 text-[10px] bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
                               {p.compatible_variants.length} Fits
                             </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* GST Price Breakdown */}
+                      {p && (
+                        <div className="pt-2 border-t border-slate-100 space-y-1">
+                          <div className="flex items-baseline justify-between text-xs text-slate-600">
+                            <span>Part price:</span>
+                            <span className="font-semibold text-slate-800">
+                              ₹{Number(p.price).toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline justify-between text-xs text-slate-600">
+                            <span>GST ({p.gst_rate !== undefined && p.gst_rate !== null ? `${Number(p.gst_rate).toFixed(0)}%` : "18%"}):</span>
+                            <span className="font-semibold text-slate-800">
+                              ₹{p.gst_amount ? Number(p.gst_amount).toFixed(2) : (Number(p.price) * (Number(p.gst_rate || 18) / 100)).toFixed(2)}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline justify-between text-sm font-black text-slate-950 pt-0.5 border-t border-dashed border-slate-200">
+                            <span>Total including GST:</span>
+                            <span className="text-base text-slate-950 font-black">
+                              ₹{p.total_price ? Number(p.total_price).toFixed(2) : (Number(p.price) * (1 + Number(p.gst_rate || 18) / 100)).toFixed(2)}
+                            </span>
+                          </div>
+                          {p.hsn_code && (
+                            <div className="text-[10px] text-slate-500 flex items-center justify-between pt-0.5">
+                              <span>HSN {p.hsn_code}</span>
+                              {p.is_tax_verified ? (
+                                <span className="text-emerald-700 font-medium">✓ Statutory</span>
+                              ) : (
+                                <span className="text-amber-700 font-medium">⚠️ Unverified</span>
+                              )}
+                            </div>
                           )}
                         </div>
                       )}
@@ -1037,9 +1072,9 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                <span className="text-[10px] text-slate-500">Retail Price</span>
+                <span className="text-[10px] text-slate-500">Part Price (excl. GST)</span>
                 <p className="font-black text-sm text-slate-950 mt-0.5">
-                  £{Number(selectedPart.price).toFixed(2)}
+                  ₹{Number(selectedPart.price).toFixed(2)}
                 </p>
               </div>
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -1058,6 +1093,69 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
                 <span className="text-[10px] text-slate-500">Condition</span>
                 <p className="font-bold text-slate-900 mt-0.5">{selectedPart.condition}</p>
               </div>
+            </div>
+
+            {/* Statutory GST Breakdown Panel */}
+            <div className="p-4 bg-gradient-to-br from-slate-900 to-slate-950 text-white rounded-2xl border border-slate-800 space-y-3 shadow-lg">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-[10px] font-bold border border-amber-500/30">
+                    GST Tax Breakdown (Indian CBIC Standard)
+                  </span>
+                  {selectedPart.hsn_code && (
+                    <span className="text-[11px] text-slate-300 font-mono">
+                      HSN: <strong className="text-white">{selectedPart.hsn_code}</strong>
+                    </span>
+                  )}
+                </div>
+                {selectedPart.is_tax_verified ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Statutory Rate Verified
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-500/30">
+                    <AlertTriangle className="w-3 h-3" />
+                    Pending Tax Verification
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                  <span className="text-[10px] text-slate-400 block">Part Price (before GST)</span>
+                  <span className="text-base font-bold text-slate-100 font-mono">
+                    ₹{Number(selectedPart.price).toFixed(2)}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                  <span className="text-[10px] text-slate-400 block">
+                    Applicable GST ({selectedPart.gst_rate !== undefined && selectedPart.gst_rate !== null ? `${Number(selectedPart.gst_rate).toFixed(0)}%` : "18%"})
+                  </span>
+                  <span className="text-base font-bold text-amber-400 font-mono">
+                    ₹{selectedPart.gst_amount ? Number(selectedPart.gst_amount).toFixed(2) : (Number(selectedPart.price) * (Number(selectedPart.gst_rate || 18) / 100)).toFixed(2)}
+                  </span>
+                </div>
+                <div className="p-3 bg-amber-500/10 rounded-xl border border-amber-500/30">
+                  <span className="text-[10px] text-amber-300 block font-medium">Total (inclusive of GST)</span>
+                  <span className="text-lg font-black text-amber-400 font-mono">
+                    ₹{selectedPart.total_price ? Number(selectedPart.total_price).toFixed(2) : (Number(selectedPart.price) * (1 + Number(selectedPart.gst_rate || 18) / 100)).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              {selectedPart.tax_breakdown && (
+                <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between text-[11px] text-slate-400">
+                  <div className="flex items-center gap-3">
+                    <span>CGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.cgst_amount || 0).toFixed(2)}</strong></span>
+                    <span>SGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.sgst_amount || 0).toFixed(2)}</strong></span>
+                    <span>IGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.igst_amount || 0).toFixed(2)}</strong></span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 italic">
+                    {selectedPart.tax_breakdown.is_interstate ? "Inter-state supply (IGST)" : "Intra-state supply (CGST + SGST)"}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Stock Availability status */}

@@ -26,6 +26,12 @@ from apps.marketplace.views import (
     BuyerFavouritePartListCreateView,
     BuyerFavouritePartDetailView,
     MarketplaceImageUploadView,
+    GSTOptionsView,
+    OrderCheckoutView,
+    VehicleEnquiryCreateView,
+    SellerVehicleEnquiryListView,
+    SellerVehicleEnquiryDetailView,
+    BuyerVehicleEnquiryListView,
 )
 
 urlpatterns = [
@@ -74,4 +80,15 @@ urlpatterns = [
     path('favourites/parts/<uuid:id>/', BuyerFavouritePartDetailView.as_view(), name='marketplace-buyer-favourite-part-detail'),
     path('favorites/parts/', BuyerFavouritePartListCreateView.as_view(), name='marketplace-buyer-favorite-parts'),
     path('favorites/parts/<uuid:id>/', BuyerFavouritePartDetailView.as_view(), name='marketplace-buyer-favorite-part-detail'),
+
+    # 6. Tax Options & Order Checkout
+    path('tax/gst-options/', GSTOptionsView.as_view(), name='marketplace-tax-gst-options'),
+    path('orders/checkout/', OrderCheckoutView.as_view(), name='marketplace-orders-checkout'),
+    path('orders/calculate/', OrderCheckoutView.as_view(), name='marketplace-orders-calculate'),
+
+    # 7. Direct Buyer–Seller Connection (Vehicle Enquiries)
+    path('vehicles/<uuid:id>/enquire/', VehicleEnquiryCreateView.as_view(), name='marketplace-vehicle-enquire'),
+    path('seller/enquiries/', SellerVehicleEnquiryListView.as_view(), name='marketplace-seller-enquiries-list'),
+    path('seller/enquiries/<uuid:id>/', SellerVehicleEnquiryDetailView.as_view(), name='marketplace-seller-enquiry-detail'),
+    path('buyer/enquiries/', BuyerVehicleEnquiryListView.as_view(), name='marketplace-buyer-enquiries-list'),
 ]
