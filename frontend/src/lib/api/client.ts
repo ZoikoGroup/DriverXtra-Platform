@@ -1293,6 +1293,43 @@ export const api = {
     },
 
   },
+
+  notifications: {
+    async list(params?: { unread?: boolean; page?: number }): Promise<PaginatedNotificationsResponse> {
+      const query = new URLSearchParams();
+      if (params?.unread) query.set("unread", "true");
+      if (params?.page) query.set("page", String(params.page));
+      const qs = query.toString();
+      return apiRequest<PaginatedNotificationsResponse>(`/notifications/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getUnreadCount(): Promise<number> {
+      const data = await apiRequest<{ status: string; unread_count: number }>("/notifications/unread-count/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+      return data.unread_count;
+    },
+
+    async markRead(id: string): Promise<PlatformNotification> {
+      const data = await apiRequest<{ status: string; message: string; notification: PlatformNotification }>(
+        `/notifications/${id}/read/`,
+        { method: "POST", requiresAuth: true }
+      );
+      return data.notification;
+    },
+
+    async markAllRead(): Promise<number> {
+      const data = await apiRequest<{ status: string; message: string; updated_count: number }>("/notifications/read-all/", {
+        method: "POST",
+        requiresAuth: true,
+      });
+      return data.updated_count;
+    },
+  },
 };
 
 // ==========================================
@@ -2010,4 +2047,28 @@ export interface UpdateVehicleEnquiryPayload {
   status?: VehicleEnquiryStatus;
   seller_notes?: string;
   seller_reply?: string;
+}
+
+// ==========================================
+// Notifications Type Definitions
+// ==========================================
+
+export interface PlatformNotification {
+  id: string;
+  event_type: string;
+  title: string;
+  message: string;
+  link: string;
+  resource_type: string;
+  resource_id: string;
+  is_read: boolean;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface PaginatedNotificationsResponse {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: PlatformNotification[];
 }

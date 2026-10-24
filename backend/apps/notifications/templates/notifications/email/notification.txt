@@ -1,0 +1,13 @@
+{% autoescape off %}Hello {{ recipient_name }},
+
+{{ title }}
+
+{{ message }}
+{% if link %}
+View it on DriverXtra:
+{{ link }}
+{% endif %}
+— The DriverXtra Team
+
+You are receiving this email because of activity on your DriverXtra account.
+{% endautoescape %}
