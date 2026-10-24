@@ -16,6 +16,8 @@ import SellerInventoryView from "@/components/platform/SellerInventoryView";
 import WorkshopLandingView from "@/components/platform/WorkshopLandingView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
+import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
+import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
 import {
   Bell,
   X
@@ -73,6 +75,8 @@ export default function PlatformDashboardPage() {
   const getTabLabel = (tab: string) => {
     const map: Record<string, string> = {
       marketplace_browse: "Marketplace — Approved Vehicles & Spare Parts",
+      favourites: "Saved Items — Vehicles & Spare Parts",
+      my_enquiries: "My Enquiries — Vehicle Questions & Seller Replies",
       seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
       admin_marketplace_review: "Admin Moderation — Listing Review Queue",
       admin_staff_management: "Staff Administration & Access Control",
@@ -109,7 +113,15 @@ export default function PlatformDashboardPage() {
         />
 
         <main className="flex-1 overflow-y-auto">
-          {currentTab === "marketplace_browse" ? (
+          {currentTab === "favourites" ? (
+            <BuyerFavouritesView
+              onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
+            />
+          ) : currentTab === "my_enquiries" ? (
+            <BuyerEnquiriesView
+              onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
+            />
+          ) : currentTab === "marketplace_browse" ? (
             <MarketplaceBrowseView />
           ) : currentTab === "workshop_landing" ? (
             <WorkshopLandingView />

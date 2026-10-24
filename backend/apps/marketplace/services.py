@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 from typing import Optional
 from django.conf import settings
@@ -7,6 +8,7 @@ from django.core.exceptions import ValidationError
 from platform_core.audit.writer import record_audit_entry
 from common.middleware import get_current_correlation_id
 from .models import (
+    VehicleListing,
     SparePartListing,
     StockMovement,
     StockMovementReasonChoices,
@@ -211,3 +213,90 @@ def change_price(
         )
 
         return price_change
+
+
+def get_seller_public_info(listing: VehicleListing) -> dict:
+    """
+    Resolves authorized public seller information for a vehicle listing.
+    Protects sensitive credentials and private phone numbers.
+    Only exposes public commercial contact numbers vetted through approved SellerApplication.
+    """
+    from apps.onboarding.models import (
+        SellerApplication,
+        SellerApplicationStatusChoices,
+        BusinessTypeChoices,
+    )
+    from apps.organisations.models import OrganisationTypeChoices
+
+    seller = listing.seller
+    organisation = listing.organisation
+
+    app = None
+    if organisation:
+        app = SellerApplication.objects.filter(
+            organisation=organisation,
+            status=SellerApplicationStatusChoices.APPROVED,
+        ).first()
+    if not app and seller:
+        app = SellerApplication.objects.filter(
+            user=seller,
+            status=SellerApplicationStatusChoices.APPROVED,
+        ).first()
+
+    is_verified = False
+    seller_type = "INDIVIDUAL_SELLER"
+    name = ""
+    phone = None
+    city = listing.location_city or ""
+
+    dealership_types = {
+        BusinessTypeChoices.DEALER,
+        BusinessTypeChoices.PARTS_MERCHANT,
+        BusinessTypeChoices.WORKSHOP,
+        BusinessTypeChoices.LTD,
+        BusinessTypeChoices.PLC,
+        BusinessTypeChoices.LLP,
+        BusinessTypeChoices.PARTNERSHIP,
+    }
+
+    if organisation:
+        name = organisation.name
+        if organisation.type in [OrganisationTypeChoices.DEALER_GROUP, OrganisationTypeChoices.WORKSHOP]:
+            seller_type = "DEALERSHIP"
+        if app:
+            is_verified = True
+            phone = app.contact_phone.strip() if app.contact_phone else None
+            if not city and app.city:
+                city = app.city
+        elif seller and seller.has_role('SELLER'):
+            is_verified = True
+    elif app:
+        name = app.business_name or (seller.full_name if seller else "Seller")
+        is_verified = True
+        if app.business_type in dealership_types:
+            seller_type = "DEALERSHIP"
+        phone = app.contact_phone.strip() if app.contact_phone else None
+        if not city and app.city:
+            city = app.city
+    else:
+        name = seller.full_name if seller else "Seller"
+        seller_type = "INDIVIDUAL_SELLER"
+        is_verified = False
+        phone = None
+
+    whatsapp_url = None
+    if phone:
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) >= 7:
+            whatsapp_url = f"https://wa.me/{digits}"
+
+    return {
+        "name": name,
+        "seller_type": seller_type,
+        "is_verified": is_verified,
+        "location_city": city,
+        "phone": phone,
+        "has_phone": bool(phone),
+        "whatsapp_url": whatsapp_url,
+        "can_enquire": True,
+    }

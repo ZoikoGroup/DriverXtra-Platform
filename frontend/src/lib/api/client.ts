@@ -93,6 +93,37 @@ function getBaseUrl(): string {
   return DEFAULT_BASE_URL;
 }
 
+export function getBackendOrigin(): string {
+  const apiBase = getBaseUrl();
+  try {
+    const parsed = new URL(apiBase);
+    return parsed.origin;
+  } catch {
+    return "http://127.0.0.1:8000";
+  }
+}
+
+/**
+ * Resolves an image URL:
+ * - Passes through http://, https://, data:, and blob: object URLs untouched.
+ * - Prefixes relative media paths (/media/...) with the Django backend origin (http://127.0.0.1:8000).
+ */
+export function resolveMediaUrl(url?: string | null): string {
+  if (!url) return "";
+  const trimmed = url.trim();
+  if (
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("blob:")
+  ) {
+    return trimmed;
+  }
+  const origin = getBackendOrigin();
+  const cleanPath = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return `${origin}${cleanPath}`;
+}
+
 // Concurrency lock for refresh requests
 let refreshPromise: Promise<string | null> | null = null;
 
@@ -159,10 +190,14 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
     ? endpoint
     : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
 
+  const isFormData = typeof FormData !== "undefined" && restOptions.body instanceof FormData;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(!isFormData ? { "Content-Type": "application/json" } : {}),
     ...(customHeaders as Record<string, string>),
   };
+  if (isFormData && headers["Content-Type"]) {
+    delete headers["Content-Type"];
+  }
 
   if (requiresAuth) {
     const token = tokenStorage.getAccessToken();
@@ -754,6 +789,87 @@ export const api = {
         body: JSON.stringify({ part_id: partId, variant_id: variantId }),
       });
     },
+
+    async listMakes(): Promise<VehicleMake[]> {
+      return this.getMakes();
+    },
+
+    async listModels(makeId?: string): Promise<VehicleModel[]> {
+      return this.getModels(makeId);
+    },
+
+    async listVariants(modelId?: string): Promise<VehicleVariant[]> {
+      return this.getVariants(modelId);
+    },
+
+    async listApplications(status?: string): Promise<VehicleCatalogueApplication[]> {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<VehicleCatalogueApplication[] | { results: VehicleCatalogueApplication[] }>(
+        `/catalogue/applications/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async submitApplication(payload: CreateVehicleCatalogueApplicationPayload): Promise<VehicleCatalogueApplication> {
+      return apiRequest<VehicleCatalogueApplication>("/catalogue/applications/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getApplication(id: string): Promise<VehicleCatalogueApplication> {
+      return apiRequest<VehicleCatalogueApplication>(`/catalogue/applications/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async reviewApplication(
+      id: string,
+      payload: ReviewCatalogueApplicationPayload
+    ): Promise<{ status: string; message: string; application: VehicleCatalogueApplication }> {
+      return apiRequest<{ status: string; message: string; application: VehicleCatalogueApplication }>(
+        `/catalogue/applications/${id}/review/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+
+    async listPhotoProposals(status?: string): Promise<CataloguePhotoProposal[]> {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<CataloguePhotoProposal[] | { results: CataloguePhotoProposal[] }>(
+        `/catalogue/photo-proposals/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async submitPhotoProposal(payload: CreateCataloguePhotoProposalPayload): Promise<CataloguePhotoProposal> {
+      return apiRequest<CataloguePhotoProposal>("/catalogue/photo-proposals/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async reviewPhotoProposal(
+      id: string,
+      payload: ReviewCataloguePhotoProposalPayload
+    ): Promise<{ status: string; message: string; proposal: CataloguePhotoProposal }> {
+      return apiRequest<{ status: string; message: string; proposal: CataloguePhotoProposal }>(
+        `/catalogue/photo-proposals/${id}/review/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
   },
 
   // Phase 2: Personal Vehicle Garage
@@ -827,6 +943,55 @@ export const api = {
       });
     },
 
+    // Buyer Saved Favourites
+    async listFavourites(): Promise<BuyerFavouriteVehicle[]> {
+      const res = await apiRequest<BuyerFavouriteVehicle[] | { results: BuyerFavouriteVehicle[] }>(
+        "/marketplace/favourites/",
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async addFavourite(vehicleId: string): Promise<BuyerFavouriteVehicle> {
+      return apiRequest<BuyerFavouriteVehicle>("/marketplace/favourites/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ vehicle_id: vehicleId }),
+      });
+    },
+
+    async removeFavourite(idOrVehicleId: string): Promise<void> {
+      return apiRequest<void>(`/marketplace/favourites/${idOrVehicleId}/`, {
+        method: "DELETE",
+        requiresAuth: true,
+      });
+    },
+
+    // Buyer Saved Part Favourites
+    async listPartFavourites(): Promise<BuyerFavouritePart[]> {
+      const res = await apiRequest<BuyerFavouritePart[] | { results: BuyerFavouritePart[] }>(
+        "/marketplace/favourites/parts/",
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async addPartFavourite(partId: string): Promise<BuyerFavouritePart> {
+      return apiRequest<BuyerFavouritePart>("/marketplace/favourites/parts/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ part_id: partId }),
+      });
+    },
+
+    async removePartFavourite(idOrPartId: string): Promise<void> {
+      return apiRequest<void>(`/marketplace/favourites/parts/${idOrPartId}/`, {
+        method: "DELETE",
+        requiresAuth: true,
+      });
+    },
+
+
     async browsePartsPaginated(params?: BrowsePartsParams): Promise<PaginatedPartListResponse> {
       const cleanParams: Record<string, string> = {};
       if (params) {
@@ -854,6 +1019,47 @@ export const api = {
       return apiRequest<MarketplacePartListing>(`/marketplace/browse/parts/${id}/${qs}`, {
         method: "GET",
         requiresAuth: Boolean(params?.fits_vehicle),
+      });
+    },
+
+    // Real Image Upload Management (Files from Seller's Computer)
+    async uploadImage(
+      file: File,
+      options?: { listingType?: "vehicle" | "part" | "catalogue"; listingId?: string }
+    ): Promise<UploadedImageResponse> {
+      const formData = new FormData();
+      formData.append("file", file);
+      if (options?.listingType) formData.append("listing_type", options.listingType);
+      if (options?.listingId) formData.append("listing_id", options.listingId);
+
+      return apiRequest<UploadedImageResponse>("/marketplace/upload-image/", {
+        method: "POST",
+        requiresAuth: true,
+        body: formData,
+      });
+    },
+
+    async uploadMultipleImages(
+      files: File[],
+      options?: { listingType?: "vehicle" | "part" | "catalogue"; listingId?: string }
+    ): Promise<{ status: string; count?: number; images: UploadedImageResponse[] }> {
+      const formData = new FormData();
+      files.forEach((f) => formData.append("files", f));
+      if (options?.listingType) formData.append("listing_type", options.listingType);
+      if (options?.listingId) formData.append("listing_id", options.listingId);
+
+      return apiRequest<{ status: string; count?: number; images: UploadedImageResponse[] }>("/marketplace/upload-image/", {
+        method: "POST",
+        requiresAuth: true,
+        body: formData,
+      });
+    },
+
+    async deleteUploadedImage(url: string): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>("/marketplace/upload-image/", {
+        method: "DELETE",
+        requiresAuth: true,
+        body: JSON.stringify({ url }),
       });
     },
 
@@ -897,6 +1103,43 @@ export const api = {
         { method: "POST", requiresAuth: true }
       );
       return res.listing;
+    },
+
+    // Direct Buyer-Seller Enquiries
+    async enquireVehicle(listingId: string, payload: CreateVehicleEnquiryPayload): Promise<VehicleEnquiry> {
+      return apiRequest<VehicleEnquiry>(`/marketplace/vehicles/${listingId}/enquire/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listSellerEnquiries(params?: { status?: string; listing_id?: string }): Promise<VehicleEnquiry[]> {
+      const searchParams = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") searchParams.set("status", params.status);
+      if (params?.listing_id) searchParams.set("listing_id", params.listing_id);
+      const qs = searchParams.toString() ? `?${searchParams.toString()}` : "";
+      const res = await apiRequest<VehicleEnquiry[] | { results: VehicleEnquiry[] }>(
+        `/marketplace/seller/enquiries/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async updateSellerEnquiry(id: string, payload: UpdateVehicleEnquiryPayload): Promise<VehicleEnquiry> {
+      return apiRequest<VehicleEnquiry>(`/marketplace/seller/enquiries/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listBuyerEnquiries(): Promise<VehicleEnquiry[]> {
+      const res = await apiRequest<VehicleEnquiry[] | { results: VehicleEnquiry[] }>(
+        `/marketplace/buyer/enquiries/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
     },
 
     async listMyParts(status?: string): Promise<MarketplacePartListing[]> {
@@ -1023,6 +1266,32 @@ export const api = {
       );
       return res.listing;
     },
+
+    // Tax Options & Checkout
+    async getGstOptions(): Promise<GSTOptionsResponse> {
+      return apiRequest<GSTOptionsResponse>("/marketplace/tax/gst-options/", {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+
+    
+    async checkout(payload: OrderCheckoutPayload): Promise<{ status: string; message: string; order: Record<string, unknown> }> {
+      return apiRequest<{ status: string; message: string; order: Record<string, unknown> }>("/marketplace/orders/checkout/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async calculateCheckout(payload: OrderCheckoutPayload): Promise<Record<string, unknown>> {
+      return apiRequest<Record<string, unknown>>("/marketplace/orders/calculate/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ ...payload, preview_only: true }),
+      });
+    },
+
   },
 };
 
@@ -1098,6 +1367,7 @@ export interface VehicleModel {
   name: string;
   year_start?: number | null;
   year_end?: number | null;
+  image_url?: string;
   body_type?: string;
   is_active: boolean;
   variants_count?: number;
@@ -1117,6 +1387,97 @@ export interface VehicleVariant {
   power_bhp?: number | null;
   drivetrain?: string;
   is_active: boolean;
+}
+
+export interface VehicleCatalogueApplication {
+  id: string;
+  seller: string;
+  seller_name: string;
+  make?: string | null;
+  make_name: string;
+  model_name: string;
+  year_start: number;
+  year_end?: number | null;
+  variant_name?: string;
+  year?: number | null;
+  fuel_type?: string;
+  transmission?: string;
+  body_type?: string;
+  engine_code?: string;
+  power_bhp?: number | null;
+  engine_capacity_cc?: number | null;
+  primary_image_url?: string;
+  images?: string[];
+  notes?: string;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+  rejection_reason?: string;
+  admin_notes?: string;
+  reviewed_by?: string | null;
+  reviewed_by_name?: string | null;
+  reviewed_at?: string | null;
+  created_model?: string | null;
+  created_model_name?: string | null;
+  created_variant?: string | null;
+  created_variant_display?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateVehicleCatalogueApplicationPayload {
+  make?: string | null;
+  make_name: string;
+  model_name: string;
+  year_start: number;
+  year_end?: number | null;
+  variant_name?: string;
+  year?: number | null;
+  fuel_type?: string;
+  transmission?: string;
+  body_type?: string;
+  engine_code?: string;
+  power_bhp?: number | null;
+  engine_capacity_cc?: number | null;
+  primary_image_url?: string;
+  images?: string[];
+  notes?: string;
+}
+
+export interface ReviewCatalogueApplicationPayload {
+  action: "APPROVE" | "REJECT" | "REQUEST_CHANGES";
+  rejection_reason?: string;
+  admin_notes?: string;
+}
+
+export interface CataloguePhotoProposal {
+  id: string;
+  model: string;
+  model_name: string;
+  make_name: string;
+  current_image_url?: string;
+  seller: string;
+  seller_name: string;
+  proposed_image_url: string;
+  notes?: string;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+  rejection_reason?: string;
+  admin_notes?: string;
+  reviewed_by?: string | null;
+  reviewed_by_name?: string | null;
+  reviewed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateCataloguePhotoProposalPayload {
+  model: string;
+  proposed_image_url: string;
+  notes?: string;
+}
+
+export interface ReviewCataloguePhotoProposalPayload {
+  action: "APPROVE" | "REJECT";
+  rejection_reason?: string;
+  admin_notes?: string;
 }
 
 export interface PartCategory {
@@ -1267,6 +1628,7 @@ export interface MarketplaceVehicleListing {
   location_city?: string;
   location_postcode?: string;
   status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+  seller_info?: SellerPublicInfo;
   submitted_at?: string;
   reviewed_at?: string | null;
   reviewed_by?: string | null;
@@ -1276,6 +1638,23 @@ export interface MarketplaceVehicleListing {
   created_at: string;
   updated_at: string;
 }
+
+export interface BuyerFavouriteVehicle {
+  id: string;
+  vehicle_id: string;
+  vehicle: MarketplaceVehicleListing;
+  is_available: boolean;
+  created_at: string;
+}
+
+export interface BuyerFavouritePart {
+  id: string;
+  part_id: string;
+  part: MarketplacePartListing;
+  is_available: boolean;
+  created_at: string;
+}
+
 
 export interface FitmentVerificationItem {
   variant_id: string;
@@ -1296,6 +1675,55 @@ export interface BuyerPartFitment {
   status: "VERIFIED" | "CONDITIONAL" | "CONFLICT" | "SELLER_CLAIMED" | "UNKNOWN";
   qualifications: string;
   source: "CATALOGUE" | "SELLER" | "NONE";
+}
+
+export interface TaxBreakdown {
+  price_before_gst: string | number;
+  gst_rate: string | number;
+  gst_amount: string | number;
+  total_price: string | number;
+  tax_type?: "INTRA_STATE" | "INTER_STATE" | "NONE";
+  is_interstate?: boolean;
+  place_of_supply?: string;
+  seller_state?: string;
+  cgst_rate?: string | number;
+  cgst_amount?: string | number;
+  sgst_rate?: string | number;
+  sgst_amount?: string | number;
+  igst_rate?: string | number;
+  igst_amount?: string | number;
+}
+
+export interface HsnClassificationOption {
+  hsn_code: string;
+  description: string;
+  schedule: string;
+  standard_rate: string;
+  allowed_rates: string[];
+  permitted_rates?: string[];
+  is_verified: boolean;
+  legal_reference: string;
+  notes: string;
+}
+
+export interface GSTOptionsResponse {
+  status: string;
+  count: number;
+  options?: HsnClassificationOption[];
+  hsn_options: HsnClassificationOption[];
+  standard_slabs: string[];
+}
+
+export interface OrderCheckoutItemPayload {
+  listing_id: string;
+  quantity: number;
+}
+
+export interface OrderCheckoutPayload {
+  items: OrderCheckoutItemPayload[];
+  place_of_supply?: string;
+  currency?: string;
+  preview_only?: boolean;
 }
 
 export interface MarketplacePartListing {
@@ -1327,6 +1755,16 @@ export interface MarketplacePartListing {
   low_stock_threshold?: number;
   availability?: "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK";
   condition: string;
+
+  // Tax & Indian GST Fields
+  hsn_code?: string;
+  gst_rate?: string | number;
+  is_tax_verified?: boolean;
+  price_before_gst?: string | number;
+  gst_amount?: string | number;
+  total_price?: string | number;
+  tax_breakdown?: TaxBreakdown;
+
   primary_image_url?: string;
   images?: string[];
   compatible_variants?: VehicleVariant[];
@@ -1431,6 +1869,8 @@ export interface CreatePartListingPayload {
   stock_quantity?: number;
   low_stock_threshold?: number;
   condition?: string;
+  hsn_code?: string;
+  gst_rate?: number | string;
   primary_image_url?: string;
   images?: string[];
   compatible_variants?: string[];
@@ -1495,5 +1935,79 @@ export interface CataloguePartOffer {
   seller_name?: string;
   organisation_name?: string | null;
   primary_image_url?: string;
+  hsn_code?: string;
+  gst_rate?: string | number;
+  is_tax_verified?: boolean;
+  price_before_gst?: string | number;
+  gst_amount?: string | number;
+  total_price?: string | number;
+  tax_breakdown?: TaxBreakdown;
   created_at: string;
+}
+
+export interface UploadedImageResponse {
+  id: string;
+  url: string;
+  absolute_url?: string;
+  relative_url?: string;
+  filename: string;
+  size: number;
+  content_type: string;
+}
+
+export interface SellerPublicInfo {
+  name: string;
+  seller_type: "DEALERSHIP" | "INDIVIDUAL_SELLER";
+  is_verified: boolean;
+  location_city: string;
+  phone: string | null;
+  has_phone: boolean;
+  whatsapp_url: string | null;
+  can_enquire: boolean;
+}
+
+export type VehicleEnquiryStatus = "NEW" | "RESPONDED" | "CLOSED";
+
+export interface VehicleEnquiry {
+  id: string;
+  listing: string;
+  listing_details?: {
+    id: string;
+    title: string;
+    make_name?: string;
+    model_name?: string;
+    year?: number;
+    price: string | number;
+    currency: string;
+    primary_image_url?: string;
+    location_city?: string;
+    status?: string;
+  };
+  buyer: string;
+  buyer_name?: string;
+  buyer_email?: string;
+  buyer_phone?: string;
+  seller: string;
+  seller_name?: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  message: string;
+  status: VehicleEnquiryStatus;
+  seller_notes?: string;
+  seller_reply?: string;
+  replied_at?: string | null;
+  responded_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateVehicleEnquiryPayload {
+  message: string;
+  buyer_phone?: string;
+}
+
+export interface UpdateVehicleEnquiryPayload {
+  status?: VehicleEnquiryStatus;
+  seller_notes?: string;
+  seller_reply?: string;
 }

@@ -1,6 +1,7 @@
 from django.db import models
 from django.utils.text import slugify
 from common.models import BaseUUIDModel
+from apps.identity.models import User
 
 
 class FuelTypeChoices(models.TextChoices):
@@ -51,6 +52,7 @@ class VehicleModel(BaseUUIDModel):
     name = models.CharField(max_length=150)
     year_start = models.PositiveIntegerField()
     year_end = models.PositiveIntegerField(null=True, blank=True)
+    image_url = models.URLField(blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -198,3 +200,139 @@ class PartCompatibility(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.part.mpn} -> {self.vehicle_variant} ({self.fitment_type})"
+
+
+class CatalogueApplicationStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Review'
+    APPROVED = 'APPROVED', 'Approved'
+    REJECTED = 'REJECTED', 'Rejected'
+    CHANGES_REQUESTED = 'CHANGES_REQUESTED', 'Changes Requested'
+
+
+class VehicleCatalogueApplication(BaseUUIDModel):
+    """Seller-submitted application for a vehicle model/variant not currently in the approved catalogue."""
+
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='catalogue_applications',
+    )
+    make = models.ForeignKey(
+        VehicleMake,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='catalogue_applications',
+    )
+    make_name = models.CharField(max_length=100)
+    model_name = models.CharField(max_length=150)
+    year_start = models.PositiveIntegerField()
+    year_end = models.PositiveIntegerField(null=True, blank=True)
+
+    # Optional trim/variant details
+    variant_name = models.CharField(max_length=200, blank=True, default='')
+    year = models.PositiveIntegerField(null=True, blank=True)
+    fuel_type = models.CharField(
+        max_length=20,
+        choices=FuelTypeChoices.choices,
+        default=FuelTypeChoices.PETROL,
+    )
+    transmission = models.CharField(
+        max_length=20,
+        choices=TransmissionChoices.choices,
+        default=TransmissionChoices.AUTOMATIC,
+    )
+    body_type = models.CharField(max_length=100, blank=True, default='')
+    engine_code = models.CharField(max_length=50, blank=True, default='')
+    power_bhp = models.PositiveIntegerField(null=True, blank=True)
+    engine_capacity_cc = models.PositiveIntegerField(null=True, blank=True)
+
+    # Photo management
+    primary_image_url = models.URLField(blank=True)
+    images = models.JSONField(default=list, blank=True)
+    notes = models.TextField(blank=True, default='')
+
+    # Review workflow
+    status = models.CharField(
+        max_length=20,
+        choices=CatalogueApplicationStatusChoices.choices,
+        default=CatalogueApplicationStatusChoices.PENDING,
+        db_index=True,
+    )
+    rejection_reason = models.TextField(blank=True, default='')
+    admin_notes = models.TextField(blank=True, default='')
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_catalogue_applications',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    # Created catalogue references populated on approval
+    created_model = models.ForeignKey(
+        VehicleModel,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    created_variant = models.ForeignKey(
+        VehicleVariant,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+
+    class Meta:
+        verbose_name = 'Vehicle Catalogue Application'
+        verbose_name_plural = 'Vehicle Catalogue Applications'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Application: {self.make_name} {self.model_name} ({self.status}) by {self.seller}"
+
+
+class CataloguePhotoProposal(BaseUUIDModel):
+    """Seller proposal to update the canonical image for an approved catalogue vehicle model."""
+
+    model = models.ForeignKey(
+        VehicleModel,
+        on_delete=models.CASCADE,
+        related_name='photo_proposals',
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='catalogue_photo_proposals',
+    )
+    proposed_image_url = models.URLField()
+    notes = models.TextField(blank=True, default='')
+
+    # Review workflow
+    status = models.CharField(
+        max_length=20,
+        choices=CatalogueApplicationStatusChoices.choices,
+        default=CatalogueApplicationStatusChoices.PENDING,
+        db_index=True,
+    )
+    rejection_reason = models.TextField(blank=True, default='')
+    admin_notes = models.TextField(blank=True, default='')
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_catalogue_photo_proposals',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Catalogue Photo Proposal'
+        verbose_name_plural = 'Catalogue Photo Proposals'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Photo Proposal: {self.model} ({self.status}) by {self.seller}"

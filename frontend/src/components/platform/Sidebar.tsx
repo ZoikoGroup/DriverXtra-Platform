@@ -13,7 +13,9 @@ import {
   ChevronRight,
   ShoppingBag,
   UserPlus,
-  Wrench
+  Wrench,
+  Heart,
+  MessageSquare,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -51,6 +53,8 @@ export default function Sidebar({
       { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
       { id: "admin_staff_management", label: "Staff Invitations & Roles", icon: UserPlus, badge: "Admin" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
+      { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Management" },
@@ -62,6 +66,8 @@ export default function Sidebar({
       { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
       { id: "workshop_landing", label: "Workshop Services", icon: Wrench, badge: "Workshop" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
+      { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "seller_onboarding", label: "Partner & Seller Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Workshop Teams", icon: Building2, badge: "Organisation" },
@@ -73,6 +79,8 @@ export default function Sidebar({
     roleNavItems = [
       { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
+      { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "seller_onboarding", label: "Seller Verification Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Teams", icon: Building2, badge: "Organisation" },
@@ -84,6 +92,8 @@ export default function Sidebar({
     roleNavItems = [
       { id: "workshop_landing", label: "Workshop Services", icon: Wrench, badge: "Workshop" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
+      { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
       { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
       { id: "seller_onboarding", label: "Partner Status", icon: FileCheck2, badge: "Workshop" },
@@ -94,6 +104,8 @@ export default function Sidebar({
     // Default: Buyer / Consumer (Search & Browse only)
     roleNavItems = [
       { id: "marketplace_browse", label: "Marketplace (Vehicles & Parts)", icon: ShoppingBag, badge: "Browse" },
+      { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
+      { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
       { id: "seller_onboarding", label: "Apply to sell / Apply as workshop", icon: FileCheck2, badge: "Apply" },

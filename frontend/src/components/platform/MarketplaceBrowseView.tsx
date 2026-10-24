@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   api,
+  resolveMediaUrl,
   MarketplaceVehicleListing,
   MarketplacePartListing,
   VehicleMake,
@@ -35,6 +36,13 @@ import {
   ChevronRight,
   SlidersHorizontal,
   RotateCcw,
+  Heart,
+  ImageIcon,
+  Building2,
+  MessageSquare,
+  Phone,
+  MessageCircle,
+  Send,
 } from "lucide-react";
 
 export default function MarketplaceBrowseView() {
@@ -55,6 +63,23 @@ export default function MarketplaceBrowseView() {
   const [transmission, setTransmission] = useState("");
   const [maxVehiclePrice, setMaxVehiclePrice] = useState("");
   const [selectedVehicle, setSelectedVehicle] = useState<MarketplaceVehicleListing | null>(null);
+  const [selectedVehicleImageIdx, setSelectedVehicleImageIdx] = useState<number>(0);
+  const [selectedPartImageIdx, setSelectedPartImageIdx] = useState<number>(0);
+
+  // Vehicle Enquiry Modal State
+  const [enquiryVehicle, setEnquiryVehicle] = useState<MarketplaceVehicleListing | null>(null);
+  const [enquiryMessage, setEnquiryMessage] = useState<string>("");
+  const [enquiryBuyerPhone, setEnquiryBuyerPhone] = useState<string>("");
+  const [enquirySubmitting, setEnquirySubmitting] = useState<boolean>(false);
+  const [enquirySuccess, setEnquirySuccess] = useState<string | null>(null);
+  const [enquiryError, setEnquiryError] = useState<string | null>(null);
+
+  // Favourites state
+  const [favouriteVehicleIds, setFavouriteVehicleIds] = useState<Set<string>>(new Set());
+  const [favouritePartIds, setFavouritePartIds] = useState<Set<string>>(new Set());
+  const [favouriteLoading, setFavouriteLoading] = useState<Record<string, boolean>>({});
+  const [favouritePartLoading, setFavouritePartLoading] = useState<Record<string, boolean>>({});
+  const [favouriteError, setFavouriteError] = useState<string | null>(null);
 
   // Parts state (Phase 3 Part D)
   const [parts, setParts] = useState<MarketplacePartListing[]>([]);
@@ -88,6 +113,59 @@ export default function MarketplaceBrowseView() {
     api.catalogue.getMakes().then(setMakes).catch(console.error);
     api.catalogue.getCategories().then(setCategories).catch(console.error);
   }, []);
+
+  const handleOpenEnquiryModal = (vehicle: MarketplaceVehicleListing) => {
+    setEnquiryVehicle(vehicle);
+    setEnquiryMessage(
+      "Hello, I am interested in your listed vehicle. Could you please share more details about its condition, availability and final price?"
+    );
+    setEnquiryBuyerPhone(user?.phone_number || "");
+    setEnquirySuccess(null);
+    setEnquiryError(null);
+  };
+
+  const handleSendEnquiry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!enquiryVehicle) return;
+    if (!user) {
+      setEnquiryError("Please log in to your DriverXtra account to send an enquiry to the seller.");
+      return;
+    }
+    if (enquiryMessage.trim().length < 10) {
+      setEnquiryError("Enquiry message must be at least 10 characters long.");
+      return;
+    }
+
+    setEnquirySubmitting(true);
+    setEnquiryError(null);
+    try {
+      const result = await api.marketplace.enquireVehicle(enquiryVehicle.id, {
+        message: enquiryMessage.trim(),
+        buyer_phone: enquiryBuyerPhone.trim(),
+      });
+      setEnquirySuccess(
+        `Your enquiry has been sent directly to ${
+          enquiryVehicle.seller_info?.name || enquiryVehicle.seller_name || "the seller"
+        }! Reference: #${result.id.slice(0, 8)}`
+      );
+        } catch (err: unknown) {
+      const error = err as {
+        details?: { detail?: unknown };
+        message?: string;
+      };
+
+      const msg =
+        error.details?.detail ??
+        error.message ??
+        "Failed to submit enquiry. Please try again.";
+
+      setEnquiryError(
+        typeof msg === "string" ? msg : JSON.stringify(msg)
+      );
+    } finally {
+      setEnquirySubmitting(false);
+    }
+  };
 
   // Update models when make changes
   useEffect(() => {
@@ -145,6 +223,107 @@ export default function MarketplaceBrowseView() {
       ignore = true;
     };
   }, [user]);
+
+  // Load buyer favourites when user is logged in
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+    let ignore = false;
+    api.marketplace
+      .listFavourites()
+      .then((favs) => {
+        if (!ignore) {
+          setFavouriteVehicleIds(new Set(favs.map((f) => f.vehicle_id)));
+        }
+      })
+      .catch((err: unknown) => {
+        console.error("Failed to load buyer vehicle favourites", err);
+      });
+
+    api.marketplace
+      .listPartFavourites()
+      .then((favs) => {
+        if (!ignore) {
+          setFavouritePartIds(new Set(favs.map((f) => f.part_id)));
+        }
+      })
+      .catch((err: unknown) => {
+        console.error("Failed to load buyer spare part favourites", err);
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [user]);
+
+  const handleToggleFavourite = async (e: React.MouseEvent, vehicleId: string) => {
+    e.stopPropagation();
+    if (!user) return;
+    if (favouriteLoading[vehicleId]) return;
+
+    setFavouriteLoading((prev) => ({ ...prev, [vehicleId]: true }));
+    setFavouriteError(null);
+    const isFav = favouriteVehicleIds.has(vehicleId);
+
+    try {
+      if (isFav) {
+        await api.marketplace.removeFavourite(vehicleId);
+        setFavouriteVehicleIds((prev) => {
+          const next = new Set(prev);
+          next.delete(vehicleId);
+          return next;
+        });
+      } else {
+        await api.marketplace.addFavourite(vehicleId);
+        setFavouriteVehicleIds((prev) => {
+          const next = new Set(prev);
+          next.add(vehicleId);
+          return next;
+        });
+      }
+    } catch (err: unknown) {
+      console.error("Failed to toggle favourite vehicle", err);
+      const msg = err instanceof Error ? err.message : "Failed to update favourite vehicle.";
+      setFavouriteError(msg);
+    } finally {
+      setFavouriteLoading((prev) => ({ ...prev, [vehicleId]: false }));
+    }
+  };
+
+  const handleTogglePartFavourite = async (e: React.MouseEvent, partId: string) => {
+    e.stopPropagation();
+    if (!user) return;
+    if (favouritePartLoading[partId]) return;
+
+    setFavouritePartLoading((prev) => ({ ...prev, [partId]: true }));
+    setFavouriteError(null);
+    const isFav = favouritePartIds.has(partId);
+
+    try {
+      if (isFav) {
+        await api.marketplace.removePartFavourite(partId);
+        setFavouritePartIds((prev) => {
+          const next = new Set(prev);
+          next.delete(partId);
+          return next;
+        });
+      } else {
+        await api.marketplace.addPartFavourite(partId);
+        setFavouritePartIds((prev) => {
+          const next = new Set(prev);
+          next.add(partId);
+          return next;
+        });
+      }
+    } catch (err: unknown) {
+      console.error("Failed to toggle spare part favourite", err);
+      const msg = err instanceof Error ? err.message : "Failed to update favourite spare part.";
+      setFavouriteError(msg);
+    } finally {
+      setFavouritePartLoading((prev) => ({ ...prev, [partId]: false }));
+    }
+  };
 
   // Selected garage vehicle info
   const selectedGarageVehicle = garageVehicles.find((v) => v.id === selectedVehicleId) || null;
@@ -270,6 +449,7 @@ export default function MarketplaceBrowseView() {
   // Open part inspector & load other offers for linked catalogue part (Phase 3 Part B)
   const handleSelectPart = (part: MarketplacePartListing) => {
     setSelectedPart(part);
+    setSelectedPartImageIdx(0);
     if (selectedVehicleId) {
       api.marketplace
         .getPart(part.id, { fits_vehicle: selectedVehicleId })
@@ -486,6 +666,20 @@ export default function MarketplaceBrowseView() {
           </div>
 
           {/* Vehicle Grid */}
+          {favouriteError && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-800 flex items-center justify-between">
+              <span>{favouriteError}</span>
+              <button
+                type="button"
+                onClick={() => setFavouriteError(null)}
+                className="text-rose-500 hover:text-rose-700"
+                aria-label="Dismiss favourite error message"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           {vehiclesLoading ? (
             <div className="py-20 text-center">
               <div className="w-8 h-8 border-2 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
@@ -524,20 +718,56 @@ export default function MarketplaceBrowseView() {
                     <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
                       {v.primary_image_url ? (
                         <img
-                          src={v.primary_image_url}
+                          src={resolveMediaUrl(v.primary_image_url)}
                           alt={v.title}
                           className="w-full h-full object-cover"
+                          onError={(e) => {
+                            e.currentTarget.style.display = "none";
+                            const fb = e.currentTarget.parentElement?.querySelector(".vehicle-card-fallback");
+                            if (fb) (fb as HTMLElement).style.display = "flex";
+                          }}
                         />
-                      ) : (
-                        <div className="text-center p-4">
-                          <Car className="w-12 h-12 text-slate-700 mx-auto mb-1" />
-                          <span className="text-[10px] text-slate-500 font-medium">Verified Dealer Vehicle</span>
-                        </div>
-                      )}
+                      ) : null}
+                      <div
+                        className={`vehicle-card-fallback text-center p-4 items-center justify-center flex-col ${
+                          v.primary_image_url ? "hidden" : "flex"
+                        }`}
+                      >
+                        <Car className="w-12 h-12 text-slate-700 mx-auto mb-1" />
+                        <span className="text-[10px] text-slate-500 font-medium">Verified Dealer Vehicle</span>
+                      </div>
                       <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/80 backdrop-blur-md text-[10px] font-bold text-emerald-400 border border-emerald-500/20">
                         <CheckCircle2 className="w-3 h-3" />
                         <span>Verified Approved</span>
                       </div>
+                      {/* Heart Favourite Button */}
+                      {user && (
+                        <button
+                          type="button"
+                          onClick={(e) => handleToggleFavourite(e, v.id)}
+                          disabled={favouriteLoading[v.id]}
+                          aria-label={
+                            favouriteVehicleIds.has(v.id)
+                              ? `Remove ${v.title} from favourites`
+                              : `Save ${v.title} to favourites`
+                          }
+                          className={`absolute top-3 right-3 p-2 rounded-full backdrop-blur-md transition-all shadow-md focus:outline-none focus:ring-2 focus:ring-amber-400 ${
+                            favouriteVehicleIds.has(v.id)
+                              ? "bg-rose-500/95 text-white hover:bg-rose-600 border border-rose-400"
+                              : "bg-slate-900/80 text-slate-300 hover:text-rose-400 hover:bg-slate-900 border border-slate-700/60"
+                          } ${favouriteLoading[v.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                        >
+                          {favouriteLoading[v.id] ? (
+                            <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Heart
+                              className={`w-3.5 h-3.5 transition-transform ${
+                                favouriteVehicleIds.has(v.id) ? "fill-current text-white scale-110" : ""
+                              }`}
+                            />
+                          )}
+                        </button>
+                      )}
                       <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm">
                         £{Number(v.price).toLocaleString()}
                       </div>
@@ -569,22 +799,42 @@ export default function MarketplaceBrowseView() {
 
                       {/* Privacy & Seller Tag */}
                       <div className="flex items-center justify-between text-[11px] text-slate-500">
-                        <span>Seller: <strong className="text-slate-800">{v.organisation_name || v.seller_name || "Verified Trader"}</strong></span>
-                        <span className="font-mono text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">
+                        <span className="flex items-center gap-1 truncate">
+                          Seller:{" "}
+                          <strong className="text-slate-800 truncate">
+                            {v.seller_info?.name || v.organisation_name || v.seller_name || "Verified Trader"}
+                          </strong>
+                          {v.seller_info?.is_verified && (
+                            <span title="Verified Seller" className="inline-flex">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                            </span>
+                          )}
+                        </span>
+                        <span className="font-mono text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 flex-shrink-0">
                           VIN: {v.masked_vin || "***********Verified"}
                         </span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Action */}
-                  <div className="p-5 pt-0">
+                  {/* Actions */}
+                  <div className="p-5 pt-0 grid grid-cols-2 gap-2">
                     <button
-                      onClick={() => setSelectedVehicle(v)}
-                      className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                      onClick={() => {
+                        setSelectedVehicle(v);
+                        setSelectedVehicleImageIdx(0);
+                      }}
+                      className="py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
                     >
                       <Eye className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Inspect Vehicle Details</span>
+                      <span>Inspect</span>
+                    </button>
+                    <button
+                      onClick={() => handleOpenEnquiryModal(v)}
+                      className="py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      <span>Contact</span>
                     </button>
                   </div>
                 </div>
@@ -1099,36 +1349,98 @@ export default function MarketplaceBrowseView() {
                         className={`bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-md transition-all flex flex-col justify-between ${p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK" ? "opacity-85" : ""
                           }`}
                       >
-                        <div className="p-5 space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
-                              {p.brand}
-                            </span>
-                            <div className="flex items-center gap-1.5">
-                              {p.fitment && renderFitmentBadge(p.fitment)}
-                              {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
-                                <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
-                                  <X className="w-3 h-3" />
-                                  <span>Out of Stock</span>
-                                </span>
-                              ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
-                                <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
-                                  <PackageCheck className="w-3 h-3" />
-                                  <span>Low Stock ({p.stock_quantity} left)</span>
-                                </span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3" />
-                                  <span>In Stock ({p.stock_quantity})</span>
-                                </span>
-                              )}
+                        <div>
+                          {/* Image / Header Banner */}
+                          <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
+                            {p.primary_image_url ? (
+                              <img
+                                src={resolveMediaUrl(p.primary_image_url)}
+                                alt={p.name}
+                                className="w-full h-full object-cover"
+                                onError={(e) => {
+                                  e.currentTarget.style.display = "none";
+                                  const fb = e.currentTarget.parentElement?.querySelector(".part-card-fallback");
+                                  if (fb) (fb as HTMLElement).style.display = "flex";
+                                }}
+                              />
+                            ) : null}
+                            <div
+                              className={`part-card-fallback text-center p-4 items-center justify-center flex-col ${
+                                p.primary_image_url ? "hidden" : "flex"
+                              }`}
+                            >
+                              <Wrench className="w-12 h-12 text-slate-700 mx-auto mb-1" />
+                              <span className="text-[10px] text-slate-500 font-medium">Verified Spare Part</span>
+                            </div>
+
+                            <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/80 backdrop-blur-md text-[10px] font-bold text-amber-400 border border-amber-500/20">
+                              <Tag className="w-3 h-3" />
+                              <span>{p.brand}</span>
+                            </div>
+
+                            {/* Heart Favourite Button */}
+                            {user && (
+                              <button
+                                type="button"
+                                onClick={(e) => handleTogglePartFavourite(e, p.id)}
+                                disabled={favouritePartLoading[p.id]}
+                                aria-label={
+                                  favouritePartIds.has(p.id)
+                                    ? `Remove ${p.name} from favourites`
+                                    : `Save ${p.name} to favourites`
+                                }
+                                className={`absolute top-3 right-3 p-2 rounded-full backdrop-blur-md transition-all shadow-md focus:outline-hidden focus:ring-2 focus:ring-amber-400 ${
+                                  favouritePartIds.has(p.id)
+                                    ? "bg-rose-500/95 text-white hover:bg-rose-600 border border-rose-400"
+                                    : "bg-slate-900/80 text-slate-300 hover:text-rose-400 hover:bg-slate-900 border border-slate-700/60"
+                                } ${favouritePartLoading[p.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                              >
+                                {favouritePartLoading[p.id] ? (
+                                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                ) : (
+                                  <Heart
+                                    className={`w-3.5 h-3.5 transition-transform ${
+                                      favouritePartIds.has(p.id) ? "fill-current text-white scale-110" : ""
+                                    }`}
+                                  />
+                                )}
+                              </button>
+                            )}
+                            <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-xl bg-slate-950/90 text-white font-black text-sm text-right leading-tight">
+                              <div>₹{p.total_price ? Number(p.total_price).toFixed(2) : (Number(p.price) * (1 + Number(p.gst_rate || 18) / 100)).toFixed(2)}</div>
+                              <span className="text-[9px] text-amber-400 font-medium block">incl. GST</span>
                             </div>
                           </div>
 
-                          <div>
-                            <h4 className="text-sm font-black text-slate-950 line-clamp-1">{p.name}</h4>
-                            <p className="text-[11px] text-slate-500 font-mono mt-0.5">MPN: {p.mpn}</p>
-                          </div>
+                          <div className="p-5 space-y-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                {p.fitment && renderFitmentBadge(p.fitment)}
+                              </div>
+                              <div>
+                                {p.availability === "OUT_OF_STOCK" || p.stock_quantity === 0 ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200 flex items-center gap-1">
+                                    <X className="w-3 h-3" />
+                                    <span>Out of Stock</span>
+                                  </span>
+                                ) : p.availability === "LOW_STOCK" || p.stock_quantity <= (p.low_stock_threshold ?? 3) ? (
+                                  <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-bold border border-amber-200 flex items-center gap-1">
+                                    <PackageCheck className="w-3 h-3" />
+                                    <span>Low Stock ({p.stock_quantity} left)</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>In Stock ({p.stock_quantity})</span>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div>
+                              <h4 className="text-sm font-black text-slate-950 line-clamp-1">{p.name}</h4>
+                              <p className="text-[11px] text-slate-500 font-mono mt-0.5">MPN: {p.mpn}</p>
+                            </div>
 
                           <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 text-xs space-y-1">
                             <div className="flex items-center justify-between text-slate-600">
@@ -1149,22 +1461,47 @@ export default function MarketplaceBrowseView() {
                             )}
                           </div>
 
-                          <div className="flex items-baseline justify-between pt-1">
-                            <span className="text-xs text-slate-500">Retail Price:</span>
-                            <div className="flex items-baseline gap-1.5">
-                              {p.compare_at_price && Number(p.compare_at_price) > Number(p.price) && (
-                                <span className="text-xs text-slate-400 line-through">
-                                  £{Number(p.compare_at_price).toFixed(2)}
+                          <div className="pt-2 border-t border-slate-100 space-y-1">
+                            <div className="flex items-baseline justify-between text-xs text-slate-600">
+                              <span>Part price:</span>
+                              <div className="flex items-baseline gap-1.5">
+                                {p.compare_at_price && Number(p.compare_at_price) > Number(p.price) && (
+                                  <span className="text-xs text-slate-400 line-through">
+                                    ₹{Number(p.compare_at_price).toFixed(2)}
+                                  </span>
+                                )}
+                                <span className="font-semibold text-slate-800">
+                                  ₹{Number(p.price).toFixed(2)}
                                 </span>
-                              )}
-                              <span className="text-lg font-black text-slate-950">
-                                £{Number(p.price).toFixed(2)}
+                              </div>
+                            </div>
+                            <div className="flex items-baseline justify-between text-xs text-slate-600">
+                              <span>GST ({p.gst_rate !== undefined && p.gst_rate !== null ? `${Number(p.gst_rate).toFixed(0)}%` : "18%"}):</span>
+                              <span className="font-semibold text-slate-800">
+                                ₹{p.gst_amount ? Number(p.gst_amount).toFixed(2) : (Number(p.price) * (Number(p.gst_rate || 18) / 100)).toFixed(2)}
                               </span>
                             </div>
+                            <div className="flex items-baseline justify-between text-sm font-black text-slate-950 pt-0.5 border-t border-dashed border-slate-200">
+                              <span>Total including GST:</span>
+                              <span className="text-base text-slate-950 font-black">
+                                ₹{p.total_price ? Number(p.total_price).toFixed(2) : (Number(p.price) * (1 + Number(p.gst_rate || 18) / 100)).toFixed(2)}
+                              </span>
+                            </div>
+                            {p.hsn_code && (
+                              <div className="text-[10px] text-slate-500 flex items-center justify-between pt-0.5">
+                                <span>HSN {p.hsn_code}</span>
+                                {p.is_tax_verified ? (
+                                  <span className="text-emerald-700 font-medium">✓ Statutory Rate</span>
+                                ) : (
+                                  <span className="text-amber-700 font-medium">⚠️ Pending Verification</span>
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
+                      </div>
 
-                        <div className="p-5 pt-0 space-y-2">
+                      <div className="p-5 pt-0 space-y-2">
                           <button
                             onClick={() => handleSelectPart(p)}
                             className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5"
@@ -1265,23 +1602,138 @@ export default function MarketplaceBrowseView() {
                 </span>
                 <h3 className="text-lg font-black text-slate-900 mt-1">{selectedVehicle.title}</h3>
               </div>
-              <button
-                onClick={() => setSelectedVehicle(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {user && (
+                  <button
+                    type="button"
+                    onClick={(e) => handleToggleFavourite(e, selectedVehicle.id)}
+                    disabled={favouriteLoading[selectedVehicle.id]}
+                    aria-label={
+                      favouriteVehicleIds.has(selectedVehicle.id)
+                        ? `Remove ${selectedVehicle.title} from favourites`
+                        : `Save ${selectedVehicle.title} to favourites`
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                      favouriteVehicleIds.has(selectedVehicle.id)
+                        ? "bg-rose-50 border-rose-200 text-rose-600 hover:bg-rose-100"
+                        : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200"
+                    } ${favouriteLoading[selectedVehicle.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                  >
+                    {favouriteLoading[selectedVehicle.id] ? (
+                      <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Heart
+                        className={`w-3.5 h-3.5 ${
+                          favouriteVehicleIds.has(selectedVehicle.id) ? "fill-current text-rose-600" : ""
+                        }`}
+                      />
+                    )}
+                    <span>
+                      {favouriteVehicleIds.has(selectedVehicle.id) ? "Saved in Favourites" : "Save to Favourites"}
+                    </span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedVehicle(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
-            {selectedVehicle.primary_image_url && (
-              <div className="rounded-2xl overflow-hidden h-60 bg-slate-900">
-                <img
-                  src={selectedVehicle.primary_image_url}
-                  alt={selectedVehicle.title}
-                  className="w-full h-full object-cover"
-                />
-              </div>
-            )}
+            {(() => {
+              const gallery = [selectedVehicle.primary_image_url, ...(selectedVehicle.images || [])]
+                .filter((url, idx, arr): url is string => Boolean(url && url.trim()) && arr.indexOf(url) === idx);
+              const activeIdx = Math.min(selectedVehicleImageIdx, Math.max(0, gallery.length - 1));
+              const activeImage = gallery[activeIdx];
+
+              if (gallery.length === 0) {
+                return (
+                  <div className="rounded-2xl h-52 bg-slate-950 flex flex-col items-center justify-center text-slate-500">
+                    <Car className="w-12 h-12 text-slate-700 mb-2" />
+                    <span className="text-xs">No photos provided for this vehicle</span>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  <div className="relative rounded-2xl overflow-hidden h-72 bg-slate-950 flex items-center justify-center">
+                    <img
+                      src={resolveMediaUrl(activeImage)}
+                      alt={`${selectedVehicle.title} - photo ${activeIdx + 1}`}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        const fb = e.currentTarget.parentElement?.querySelector(".gallery-vehicle-fallback");
+                        if (fb) (fb as HTMLElement).style.display = "flex";
+                      }}
+                    />
+                    <div className="gallery-vehicle-fallback hidden flex-col items-center justify-center text-slate-500 p-6 text-center">
+                      <ImageIcon className="w-12 h-12 text-slate-700 mb-2" />
+                      <span className="text-xs font-semibold text-slate-400">Photo could not be loaded</span>
+                      <span className="text-[10px] text-slate-600 mt-1 max-w-xs break-all">{activeImage}</span>
+                    </div>
+
+                    {gallery.length > 1 && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedVehicleImageIdx((prev) => (prev > 0 ? prev - 1 : gallery.length - 1))}
+                          className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Previous photo"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedVehicleImageIdx((prev) => (prev < gallery.length - 1 ? prev + 1 : 0))}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Next photo"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                        <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-slate-950/80 backdrop-blur-md text-white text-[10px] font-bold">
+                          {activeIdx + 1} / {gallery.length} Photos
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {gallery.length > 1 && (
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      {gallery.map((url, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setSelectedVehicleImageIdx(idx)}
+                          className={`relative flex-shrink-0 w-16 h-16 rounded-xl overflow-hidden border-2 transition-all ${
+                            idx === activeIdx
+                              ? "border-amber-400 ring-2 ring-amber-400/40"
+                              : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
+                          }`}
+                        >
+                          <img
+                            src={resolveMediaUrl(url)}
+                            alt={`Thumbnail ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = "none";
+                            }}
+                          />
+                          {idx === 0 && (
+                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5">
+                              Main
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
@@ -1328,10 +1780,108 @@ export default function MarketplaceBrowseView() {
               </div>
             )}
 
-            <div className="pt-2 flex justify-end">
+            {/* Seller Information & Authorized Direct Contact */}
+            <div className="p-4 bg-slate-900 text-white rounded-2xl space-y-3 shadow-md border border-slate-800">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-amber-400" />
+                  <h5 className="font-bold text-sm text-white">Seller Information</h5>
+                </div>
+                {selectedVehicle.seller_info?.is_verified ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    Verified Seller
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
+                    Standard Seller
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Seller / Dealership Name</span>
+                  <span className="font-bold text-slate-100 text-sm">
+                    {selectedVehicle.seller_info?.name || selectedVehicle.organisation_name || selectedVehicle.seller_name || "Private Seller"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Seller Classification</span>
+                  <span className="font-medium text-slate-200">
+                    {selectedVehicle.seller_info?.seller_type === "DEALERSHIP" ? "Automotive Dealership" : "Individual Seller"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Location</span>
+                  <span className="font-medium text-slate-200 flex items-center gap-1">
+                    <MapPin className="w-3 h-3 text-slate-400" />
+                    {selectedVehicle.seller_info?.location_city || selectedVehicle.location_city || "Location available upon enquiry"}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Public Business Phone</span>
+                  <span className="font-mono text-slate-200">
+                    {selectedVehicle.seller_info?.phone || "Direct phone not listed (Use enquiry)"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Direct Communication Buttons */}
+              <div className="pt-2 border-t border-slate-800 flex flex-wrap gap-2">
+                {selectedVehicle.seller_info?.phone && (
+                  <a
+                    href={`tel:${selectedVehicle.seller_info.phone}`}
+                    className="flex-1 min-w-[130px] py-2 px-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors border border-slate-700"
+                  >
+                    <Phone className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Call Seller</span>
+                  </a>
+                )}
+
+                {selectedVehicle.seller_info?.whatsapp_url && (
+                  <a
+                    href={selectedVehicle.seller_info.whatsapp_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex-1 min-w-[130px] py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>WhatsApp</span>
+                  </a>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = selectedVehicle;
+                    setSelectedVehicle(null);
+                    handleOpenEnquiryModal(target);
+                  }}
+                  className="flex-1 min-w-[150px] py-2 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                >
+                  <MessageSquare className="w-3.5 h-3.5 text-slate-950" />
+                  <span>Contact Seller</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2 flex items-center justify-between border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => {
+                  const target = selectedVehicle;
+                  setSelectedVehicle(null);
+                  handleOpenEnquiryModal(target);
+                }}
+                className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all flex items-center gap-1.5 shadow-sm"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>Contact Seller Directly</span>
+              </button>
               <button
                 onClick={() => setSelectedVehicle(null)}
-                className="px-5 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl"
+                className="px-5 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800"
               >
                 Close Inspector
               </button>
@@ -1356,25 +1906,151 @@ export default function MarketplaceBrowseView() {
                   {selectedPart.brand} · MPN: {selectedPart.mpn}
                 </p>
               </div>
-              <button
-                onClick={() => setSelectedPart(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {user && (
+                  <button
+                    type="button"
+                    onClick={(e) => handleTogglePartFavourite(e, selectedPart.id)}
+                    disabled={favouritePartLoading[selectedPart.id]}
+                    aria-label={
+                      favouritePartIds.has(selectedPart.id)
+                        ? `Remove ${selectedPart.name} from favourites`
+                        : `Save ${selectedPart.name} to favourites`
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                      favouritePartIds.has(selectedPart.id)
+                        ? "bg-rose-50 border-rose-200 text-rose-600 hover:bg-rose-100"
+                        : "bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200"
+                    } ${favouritePartLoading[selectedPart.id] ? "opacity-60 cursor-not-allowed" : ""}`}
+                  >
+                    {favouritePartLoading[selectedPart.id] ? (
+                      <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Heart
+                        className={`w-3.5 h-3.5 ${
+                          favouritePartIds.has(selectedPart.id) ? "fill-current text-rose-600" : ""
+                        }`}
+                      />
+                    )}
+                    <span>
+                      {favouritePartIds.has(selectedPart.id) ? "Saved in Favourites" : "Save to Favourites"}
+                    </span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedPart(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
+
+            {/* Multi-image gallery for spare part */}
+            {(() => {
+              const gallery = [selectedPart.primary_image_url, ...(selectedPart.images || [])]
+                .filter((url, idx, arr): url is string => Boolean(url && url.trim()) && arr.indexOf(url) === idx);
+              const activeIdx = Math.min(selectedPartImageIdx, Math.max(0, gallery.length - 1));
+              const activeImage = gallery[activeIdx];
+
+              if (gallery.length === 0) {
+                return (
+                  <div className="rounded-2xl h-48 bg-slate-950 flex flex-col items-center justify-center text-slate-500">
+                    <Wrench className="w-12 h-12 text-slate-700 mb-2" />
+                    <span className="text-xs">No photos provided for this spare part</span>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-3">
+                  <div className="relative rounded-2xl overflow-hidden h-64 bg-slate-950 flex items-center justify-center">
+                    <img
+                      src={resolveMediaUrl(activeImage)}
+                      alt={`${selectedPart.name} - photo ${activeIdx + 1}`}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        const fb = e.currentTarget.parentElement?.querySelector(".gallery-part-fallback");
+                        if (fb) (fb as HTMLElement).style.display = "flex";
+                      }}
+                    />
+                    <div className="gallery-part-fallback hidden flex-col items-center justify-center text-slate-500 p-6 text-center">
+                      <ImageIcon className="w-12 h-12 text-slate-700 mb-2" />
+                      <span className="text-xs font-semibold text-slate-400">Photo could not be loaded</span>
+                      <span className="text-[10px] text-slate-600 mt-1 max-w-xs break-all">{activeImage}</span>
+                    </div>
+
+                    {gallery.length > 1 && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPartImageIdx((prev) => (prev > 0 ? prev - 1 : gallery.length - 1))}
+                          className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Previous photo"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPartImageIdx((prev) => (prev < gallery.length - 1 ? prev + 1 : 0))}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md transition-all shadow-md"
+                          aria-label="Next photo"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                        <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-slate-950/80 backdrop-blur-md text-white text-[10px] font-bold">
+                          {activeIdx + 1} / {gallery.length} Photos
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {gallery.length > 1 && (
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      {gallery.map((url, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setSelectedPartImageIdx(idx)}
+                          className={`relative flex-shrink-0 w-16 h-16 rounded-xl overflow-hidden border-2 transition-all ${
+                            idx === activeIdx
+                              ? "border-amber-400 ring-2 ring-amber-400/40"
+                              : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
+                          }`}
+                        >
+                          <img
+                            src={resolveMediaUrl(url)}
+                            alt={`Thumbnail ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = "none";
+                            }}
+                          />
+                          {idx === 0 && (
+                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5">
+                              Main
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-3 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                <span className="text-[10px] text-slate-500">Retail Price</span>
+                <span className="text-[10px] text-slate-500">Part Price (excl. GST)</span>
                 <div className="flex items-baseline gap-1.5 mt-0.5">
                   {selectedPart.compare_at_price && Number(selectedPart.compare_at_price) > Number(selectedPart.price) && (
                     <span className="text-xs text-slate-400 line-through">
-                      £{Number(selectedPart.compare_at_price).toFixed(2)}
+                      ₹{Number(selectedPart.compare_at_price).toFixed(2)}
                     </span>
                   )}
                   <p className="font-black text-base text-slate-950">
-                    £{Number(selectedPart.price).toFixed(2)}
+                    ₹{Number(selectedPart.price).toFixed(2)}
                   </p>
                 </div>
               </div>
@@ -1397,6 +2073,69 @@ export default function MarketplaceBrowseView() {
                 <span className="text-[10px] text-slate-500">Condition</span>
                 <p className="font-bold text-slate-900 mt-0.5">{selectedPart.condition}</p>
               </div>
+            </div>
+
+            {/* Statutory Indian GST Breakdown Panel */}
+            <div className="p-4 bg-gradient-to-br from-slate-900 to-slate-950 text-white rounded-2xl border border-slate-800 space-y-3 shadow-lg">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-[10px] font-bold border border-amber-500/30">
+                    GST Tax Breakdown (Indian CBIC Standard)
+                  </span>
+                  {selectedPart.hsn_code && (
+                    <span className="text-[11px] text-slate-300 font-mono">
+                      HSN: <strong className="text-white">{selectedPart.hsn_code}</strong>
+                    </span>
+                  )}
+                </div>
+                {selectedPart.is_tax_verified ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Statutory Rate Verified
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded-full border border-amber-500/30">
+                    <AlertTriangle className="w-3 h-3" />
+                    Pending Tax Verification
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                  <span className="text-[10px] text-slate-400 block">Part Price (before GST)</span>
+                  <span className="text-base font-bold text-slate-100 font-mono">
+                    ₹{Number(selectedPart.price).toFixed(2)}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                  <span className="text-[10px] text-slate-400 block">
+                    Applicable GST ({selectedPart.gst_rate !== undefined && selectedPart.gst_rate !== null ? `${Number(selectedPart.gst_rate).toFixed(0)}%` : "18%"})
+                  </span>
+                  <span className="text-base font-bold text-amber-400 font-mono">
+                    ₹{selectedPart.gst_amount ? Number(selectedPart.gst_amount).toFixed(2) : (Number(selectedPart.price) * (Number(selectedPart.gst_rate || 18) / 100)).toFixed(2)}
+                  </span>
+                </div>
+                <div className="p-3 bg-amber-500/10 rounded-xl border border-amber-500/30">
+                  <span className="text-[10px] text-amber-300 block font-medium">Total (inclusive of GST)</span>
+                  <span className="text-lg font-black text-amber-400 font-mono">
+                    ₹{selectedPart.total_price ? Number(selectedPart.total_price).toFixed(2) : (Number(selectedPart.price) * (1 + Number(selectedPart.gst_rate || 18) / 100)).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              {selectedPart.tax_breakdown && (
+                <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between text-[11px] text-slate-400">
+                  <div className="flex items-center gap-3">
+                    <span>CGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.cgst_amount || 0).toFixed(2)}</strong></span>
+                    <span>SGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.sgst_amount || 0).toFixed(2)}</strong></span>
+                    <span>IGST: <strong className="text-slate-200">₹{Number(selectedPart.tax_breakdown.igst_amount || 0).toFixed(2)}</strong></span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 italic">
+                    {selectedPart.tax_breakdown.is_interstate ? "Inter-state supply (IGST)" : "Intra-state supply (CGST + SGST)"}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Buyer Vehicle Fitment Verification (Phase 3 Part C) */}
@@ -1499,15 +2238,22 @@ export default function MarketplaceBrowseView() {
                           </div>
 
                           <div className="text-right flex sm:flex-col items-center sm:items-end justify-between sm:justify-center">
-                            <div className="flex items-baseline gap-1.5">
-                              {offer.compare_at_price && Number(offer.compare_at_price) > Number(offer.price) && (
-                                <span className="text-xs text-slate-400 line-through font-mono">
-                                  £{Number(offer.compare_at_price).toFixed(2)}
+                            <div className="flex flex-col items-end">
+                              <div className="flex items-baseline gap-1.5">
+                                {offer.compare_at_price && Number(offer.compare_at_price) > Number(offer.price) && (
+                                  <span className="text-xs text-slate-400 line-through font-mono">
+                                    ₹{Number(offer.compare_at_price).toFixed(2)}
+                                  </span>
+                                )}
+                                <span className="text-sm font-black text-slate-950 font-mono">
+                                  ₹{Number(offer.price).toFixed(2)}
+                                </span>
+                              </div>
+                              {offer.gst_rate !== undefined && (
+                                <span className="text-[10px] text-slate-500 font-mono">
+                                  + {Number(offer.gst_rate).toFixed(0)}% GST = ₹{Number(offer.total_price || (Number(offer.price) * (1 + Number(offer.gst_rate)/100))).toFixed(2)}
                                 </span>
                               )}
-                              <span className="text-sm font-black text-slate-950 font-mono">
-                                £{Number(offer.price).toFixed(2)}
-                              </span>
                             </div>
                             {offer.availability === "OUT_OF_STOCK" || offer.stock_quantity === 0 ? (
                               <span className="text-[10px] text-rose-600 font-bold mt-0.5">
@@ -1581,6 +2327,169 @@ export default function MarketplaceBrowseView() {
                 Close Inspector
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: DIRECT BUYER-SELLER VEHICLE ENQUIRY
+      ========================================================================= */}
+      {enquiryVehicle && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
+                  <MessageSquare className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Contact Seller</h3>
+                  <p className="text-xs text-slate-500">Direct Vehicle Purchase Enquiry</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEnquiryVehicle(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Vehicle Summary Card */}
+            <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-3">
+              {enquiryVehicle.primary_image_url ? (
+                <img
+                  src={resolveMediaUrl(enquiryVehicle.primary_image_url)}
+                  alt={enquiryVehicle.title}
+                  className="w-14 h-14 rounded-xl object-cover border border-slate-200 flex-shrink-0"
+                />
+              ) : (
+                <div className="w-14 h-14 rounded-xl bg-slate-200 flex items-center justify-center text-slate-400 flex-shrink-0">
+                  <Car className="w-6 h-6" />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <h4 className="text-xs font-black text-slate-900 truncate">{enquiryVehicle.title}</h4>
+                <div className="text-[11px] text-slate-500">
+                  <span>£{Number(enquiryVehicle.price).toLocaleString()}</span>
+                  <span className="mx-1.5">·</span>
+                  <span>{enquiryVehicle.year}</span>
+                  <span className="mx-1.5">·</span>
+                  <span>{enquiryVehicle.location_city || "UK"}</span>
+                </div>
+                <div className="text-[10px] text-slate-600 mt-0.5 flex items-center gap-1">
+                  <span>
+                    Seller: <strong>{enquiryVehicle.seller_info?.name || enquiryVehicle.seller_name || "Verified Trader"}</strong>
+                  </span>
+                  {enquiryVehicle.seller_info?.is_verified && (
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500 inline" />
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Success State */}
+            {enquirySuccess ? (
+              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-900 text-xs space-y-2">
+                <div className="flex items-center gap-2 font-bold text-emerald-800">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Enquiry Sent Successfully</span>
+                </div>
+                <p className="text-emerald-700 leading-relaxed">{enquirySuccess}</p>
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setEnquiryVehicle(null)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleSendEnquiry} className="space-y-4">
+                {enquiryError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                    <span>{enquiryError}</span>
+                  </div>
+                )}
+
+                {!user && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs flex items-center gap-2">
+                    <Info className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                    <span>You must be signed in to submit an enquiry to vehicle sellers.</span>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Your Enquiry Message <span className="text-rose-500">*</span>
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={enquiryMessage}
+                    onChange={(e) => setEnquiryMessage(e.target.value)}
+                    placeholder="Describe your questions about condition, availability, or pricing..."
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white resize-none"
+                    required
+                  />
+                  <span className="text-[10px] text-slate-400 block mt-1">
+                    Prefilled with recommended buyer questions. Feel free to customize before sending.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Your Contact Phone Number <span className="text-slate-400 font-normal">(Optional Callback)</span>
+                  </label>
+                  <input
+                    type="tel"
+                    value={enquiryBuyerPhone}
+                    onChange={(e) => setEnquiryBuyerPhone(e.target.value)}
+                    placeholder="+44 7123 456789"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white"
+                  />
+                  <span className="text-[10px] text-slate-400 block mt-1">
+                    Sellers can use this to call or text you regarding this vehicle.
+                  </span>
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                  <span>
+                    Your identity is verified via your DriverXtra account. Sensitive credentials are never exposed.
+                  </span>
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEnquiryVehicle(null)}
+                    className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:text-slate-900 rounded-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={enquirySubmitting || !user}
+                    className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {enquirySubmitting ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                        <span>Sending...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Send Enquiry</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

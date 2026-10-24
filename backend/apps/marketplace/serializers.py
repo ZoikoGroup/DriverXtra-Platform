@@ -10,21 +10,37 @@ from apps.marketplace.models import (
     StockMovementReasonChoices,
     PriceChange,
     ListingStatusChoices,
+    BuyerFavouriteVehicle,
+    BuyerFavouritePart,
+    Order,
+    OrderItem,
+    OrderStatusChoices,
+    VehicleEnquiry,
+    VehicleEnquiryStatusChoices,
 )
 from apps.catalogue.models import Part
-from apps.marketplace.services import change_price, _UNSET
+from apps.marketplace.services import change_price, _UNSET, get_seller_public_info
 from apps.marketplace.fitment import (
     evaluate_listing_fitment,
     get_conflicting_variants,
     evaluate_listing_single_variant,
 )
+from apps.marketplace.tax import (
+    validate_gst_classification,
+    get_official_hsn_entry,
+    resolve_default_hsn_for_category,
+    calculate_gst_breakdown,
+)
 from platform_core.audit.writer import record_denied_audit_entry
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 from apps.organisations.models import Organisation, OrganisationRoleChoices
 from apps.catalogue.serializers import (
     VehicleMakeSerializer,
     VehicleModelSerializer,
     VehicleVariantSerializer,
     PartCategorySerializer,
+    validate_image_url_list,
 )
 
 
@@ -101,6 +117,7 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
     masked_vin = serializers.CharField(read_only=True)
     masked_registration = serializers.CharField(read_only=True)
     reviewed_by_name = serializers.CharField(source='reviewed_by.full_name', read_only=True, allow_null=True)
+    primary_image_url = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = VehicleListing
@@ -187,6 +204,21 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Please provide a valid manufacturing year.")
         return value
 
+    def validate_primary_image_url(self, value):
+        if not value:
+            return ""
+        val = value.strip()
+        if not (val.startswith('/media/') or val.startswith('/static/')):
+            validator = URLValidator()
+            try:
+                validator(val)
+            except DjangoValidationError:
+                raise serializers.ValidationError(f"Primary image URL is not a valid URL: '{value}'.")
+        return val
+
+    def validate_images(self, value):
+        return validate_image_url_list(value, max_count=10)
+
     def validate(self, attrs):
         make = attrs.get('make')
         model = attrs.get('model')
@@ -195,6 +227,15 @@ class VehicleListingSellerSerializer(serializers.ModelSerializer):
         variant = attrs.get('variant')
         if variant and model and variant.model_id != model.id:
             raise serializers.ValidationError({"variant": "Selected variant does not belong to the selected vehicle model."})
+
+        # Sync primary image and images
+        primary = attrs.get('primary_image_url', getattr(self.instance, 'primary_image_url', ''))
+        imgs = attrs.get('images', getattr(self.instance, 'images', []))
+        if not primary and imgs:
+            attrs['primary_image_url'] = imgs[0]
+        elif primary and primary not in imgs and len(imgs) < 10:
+            attrs['images'] = [primary] + [i for i in imgs if i != primary]
+
         return attrs
 
 
@@ -219,6 +260,16 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
     )
     fitment_verification = serializers.SerializerMethodField(read_only=True)
     fitment_summary = serializers.SerializerMethodField(read_only=True)
+    primary_image_url = serializers.CharField(required=False, allow_blank=True)
+
+    # Tax & HSN fields (Indian GST compliance)
+    hsn_code = serializers.CharField(required=False, allow_blank=True, default='')
+    gst_rate = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    is_tax_verified = serializers.BooleanField(read_only=True)
+    price_before_gst = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
+    gst_amount = serializers.SerializerMethodField(read_only=True)
+    total_price = serializers.SerializerMethodField(read_only=True)
+    tax_breakdown = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = SparePartListing
@@ -239,6 +290,13 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'description',
             'price',
             'compare_at_price',
+            'hsn_code',
+            'gst_rate',
+            'is_tax_verified',
+            'price_before_gst',
+            'gst_amount',
+            'total_price',
+            'tax_breakdown',
             'price_flags',
             'currency',
             'stock_quantity',
@@ -268,6 +326,11 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'price_flags',
             'fitment_verification',
             'fitment_summary',
+            'is_tax_verified',
+            'price_before_gst',
+            'gst_amount',
+            'total_price',
+            'tax_breakdown',
             'status',
             'reviewed_by',
             'reviewed_by_name',
@@ -322,6 +385,15 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
     def get_price_flags(self, obj) -> dict:
         return compute_price_flags(obj)
 
+    def get_gst_amount(self, obj) -> Decimal:
+        return obj.gst_amount
+
+    def get_total_price(self, obj) -> Decimal:
+        return obj.total_price
+
+    def get_tax_breakdown(self, obj) -> dict:
+        return obj.tax_breakdown
+
     def validate(self, attrs):
         if self.instance is not None:
             initial_data = getattr(self, 'initial_data', {})
@@ -347,7 +419,91 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
                     'compare_at_price': "Compare-at price must be strictly greater than retail price."
                 })
 
+        # GST classification & rate validation
+        if self.instance is None:
+            # Creation mode: provide smart defaults if not supplied
+            hsn = attrs.get('hsn_code')
+            rate = attrs.get('gst_rate')
+            cat = attrs.get('category')
+            cat_name = getattr(cat, 'name', '') if cat else ''
+            part_name = attrs.get('name', '')
+
+            if not hsn and rate is None:
+                default_hsn, default_rate = resolve_default_hsn_for_category(cat_name, part_name)
+                attrs['hsn_code'] = default_hsn
+                attrs['gst_rate'] = default_rate
+                attrs['is_tax_verified'] = True
+            elif hsn and rate is None:
+                entry = get_official_hsn_entry(hsn)
+                if entry:
+                    attrs['gst_rate'] = entry['standard_rate']
+                    attrs['is_tax_verified'] = entry['is_verified']
+                else:
+                    attrs['gst_rate'] = Decimal("18.00")
+                    attrs['is_tax_verified'] = False
+            else:
+                is_valid, err_msg, is_verified = validate_gst_classification(hsn, rate)
+                if not is_valid:
+                    raise serializers.ValidationError({
+                        'gst_rate': err_msg or "Invalid GST rate for specified HSN classification."
+                    })
+                attrs['is_tax_verified'] = is_verified
+        else:
+            # Update mode: only process tax fields if explicitly supplied in the request payload
+            has_hsn_input = 'hsn_code' in getattr(self, 'initial_data', {})
+            has_rate_input = 'gst_rate' in getattr(self, 'initial_data', {})
+            if has_hsn_input or has_rate_input:
+                effective_hsn = attrs.get('hsn_code', self.instance.hsn_code)
+                effective_rate = attrs.get('gst_rate', self.instance.gst_rate)
+                cat = attrs.get('category') or getattr(self.instance, 'category', None)
+                cat_name = getattr(cat, 'name', '') if cat else ''
+                part_name = attrs.get('name') or getattr(self.instance, 'name', '')
+
+                if not effective_hsn and effective_rate is None:
+                    default_hsn, default_rate = resolve_default_hsn_for_category(cat_name, part_name)
+                    attrs['hsn_code'] = default_hsn
+                    attrs['gst_rate'] = default_rate
+                    attrs['is_tax_verified'] = True
+                elif effective_hsn and effective_rate is None:
+                    entry = get_official_hsn_entry(effective_hsn)
+                    if entry:
+                        attrs['gst_rate'] = entry['standard_rate']
+                        attrs['is_tax_verified'] = entry['is_verified']
+                    else:
+                        attrs['gst_rate'] = Decimal("18.00")
+                        attrs['is_tax_verified'] = False
+                else:
+                    is_valid, err_msg, is_verified = validate_gst_classification(effective_hsn, effective_rate)
+                    if not is_valid:
+                        raise serializers.ValidationError({
+                            'gst_rate': err_msg or "Invalid GST rate for specified HSN classification."
+                        })
+                    attrs['is_tax_verified'] = is_verified
+
+        # Sync primary image and images
+        primary = attrs.get('primary_image_url', getattr(self.instance, 'primary_image_url', ''))
+        imgs = attrs.get('images', getattr(self.instance, 'images', []))
+        if not primary and imgs:
+            attrs['primary_image_url'] = imgs[0]
+        elif primary and primary not in imgs and len(imgs) < 10:
+            attrs['images'] = [primary] + [i for i in imgs if i != primary]
+
         return attrs
+
+    def validate_primary_image_url(self, value):
+        if not value:
+            return ""
+        val = value.strip()
+        if not (val.startswith('/media/') or val.startswith('/static/')):
+            validator = URLValidator()
+            try:
+                validator(val)
+            except DjangoValidationError:
+                raise serializers.ValidationError(f"Primary image URL is not a valid URL: '{value}'.")
+        return val
+
+    def validate_images(self, value):
+        return validate_image_url_list(value, max_count=10)
 
     def validate_organisation(self, value):
         if not value:
@@ -434,7 +590,8 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             material_fields = {
                 'description', 'name', 'brand', 'mpn', 'oem_numbers',
                 'category', 'images', 'primary_image_url',
-                'condition', 'compatible_variants'
+                'condition', 'compatible_variants',
+                'hsn_code', 'gst_rate'
             }
             other_material_changed = False
             for field in material_fields:
@@ -568,6 +725,10 @@ class VehicleListingPublicSerializer(serializers.ModelSerializer):
     organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
     masked_vin = serializers.CharField(read_only=True)
     masked_registration = serializers.CharField(read_only=True)
+    seller_info = serializers.SerializerMethodField()
+
+    def get_seller_info(self, obj):
+        return get_seller_public_info(obj)
 
     class Meta:
         model = VehicleListing
@@ -597,6 +758,7 @@ class VehicleListingPublicSerializer(serializers.ModelSerializer):
             'location_postcode',
             'seller_name',
             'organisation_name',
+            'seller_info',
             'status',
             'created_at',
         ]
@@ -610,6 +772,15 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
     compatible_variants = VehicleVariantSerializer(many=True, read_only=True)
     availability = serializers.SerializerMethodField()
     fitment = serializers.SerializerMethodField()
+
+    # Tax & GST Transparency
+    hsn_code = serializers.CharField(read_only=True)
+    gst_rate = serializers.DecimalField(max_digits=5, decimal_places=2, read_only=True)
+    is_tax_verified = serializers.BooleanField(read_only=True)
+    price_before_gst = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
+    gst_amount = serializers.SerializerMethodField(read_only=True)
+    total_price = serializers.SerializerMethodField(read_only=True)
+    tax_breakdown = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = SparePartListing
@@ -626,6 +797,13 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'description',
             'price',
             'compare_at_price',
+            'hsn_code',
+            'gst_rate',
+            'is_tax_verified',
+            'price_before_gst',
+            'gst_amount',
+            'total_price',
+            'tax_breakdown',
             'currency',
             'stock_quantity',
             'low_stock_threshold',
@@ -641,6 +819,15 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'status',
             'created_at',
         ]
+
+    def get_gst_amount(self, obj) -> Decimal:
+        return obj.gst_amount
+
+    def get_total_price(self, obj) -> Decimal:
+        return obj.total_price
+
+    def get_tax_breakdown(self, obj) -> dict:
+        return obj.tax_breakdown
 
     def get_availability(self, obj) -> str:
         if obj.stock_quantity == 0:
@@ -684,12 +871,27 @@ class CataloguePartOfferSerializer(serializers.ModelSerializer):
     availability = serializers.SerializerMethodField()
     is_available = serializers.SerializerMethodField()
 
+    hsn_code = serializers.CharField(read_only=True)
+    gst_rate = serializers.DecimalField(max_digits=5, decimal_places=2, read_only=True)
+    is_tax_verified = serializers.BooleanField(read_only=True)
+    price_before_gst = serializers.DecimalField(source='price', max_digits=10, decimal_places=2, read_only=True)
+    gst_amount = serializers.SerializerMethodField(read_only=True)
+    total_price = serializers.SerializerMethodField(read_only=True)
+    tax_breakdown = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = SparePartListing
         fields = [
             'id',
             'price',
             'compare_at_price',
+            'hsn_code',
+            'gst_rate',
+            'is_tax_verified',
+            'price_before_gst',
+            'gst_amount',
+            'total_price',
+            'tax_breakdown',
             'currency',
             'condition',
             'stock_quantity',
@@ -701,6 +903,15 @@ class CataloguePartOfferSerializer(serializers.ModelSerializer):
             'primary_image_url',
             'created_at',
         ]
+
+    def get_gst_amount(self, obj) -> Decimal:
+        return obj.gst_amount
+
+    def get_total_price(self, obj) -> Decimal:
+        return obj.total_price
+
+    def get_tax_breakdown(self, obj) -> dict:
+        return obj.tax_breakdown
 
     def get_availability(self, obj) -> str:
         if obj.stock_quantity == 0:
@@ -746,3 +957,325 @@ class AdminPartListingReviewSerializer(SparePartListingSellerSerializer):
 
 
 PartListingReviewSerializer = AdminPartListingReviewSerializer
+
+
+class BuyerFavouriteVehicleSerializer(serializers.ModelSerializer):
+    """Serializer for saved buyer favourite vehicle listings."""
+
+    vehicle = VehicleListingPublicSerializer(read_only=True)
+    vehicle_id = serializers.UUIDField(write_only=True, required=False)
+    is_available = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = BuyerFavouriteVehicle
+        fields = [
+            'id',
+            'vehicle_id',
+            'vehicle',
+            'is_available',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'vehicle', 'is_available', 'created_at']
+
+    def get_is_available(self, obj) -> bool:
+        if not obj.vehicle:
+            return False
+        return (
+            obj.vehicle.status == ListingStatusChoices.APPROVED
+            and bool(obj.vehicle.is_active)
+        )
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if instance.vehicle_id:
+            ret['vehicle_id'] = str(instance.vehicle_id)
+        return ret
+
+    def validate(self, attrs):
+        initial = getattr(self, 'initial_data', {}) or {}
+        raw_vid = (
+            attrs.get('vehicle_id')
+            or initial.get('vehicle_id')
+            or initial.get('listing_id')
+            or initial.get('vehicle')
+        )
+        if not raw_vid:
+            raise serializers.ValidationError({"vehicle_id": "Vehicle listing ID is required."})
+
+        try:
+            vehicle = VehicleListing.objects.get(id=raw_vid)
+        except (VehicleListing.DoesNotExist, ValueError):
+            raise serializers.ValidationError({"vehicle_id": "Vehicle listing not found."})
+
+        # Eligibility check: Only approved and active vehicle listings may be newly favourited
+        if vehicle.status != ListingStatusChoices.APPROVED or not vehicle.is_active:
+            raise serializers.ValidationError({
+                "vehicle_id": "Only approved and active vehicle listings can be added to favourites."
+            })
+
+        attrs['vehicle'] = vehicle
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        user = request.user if request else None
+        vehicle = validated_data['vehicle']
+        favourite, _ = BuyerFavouriteVehicle.objects.get_or_create(
+            user=user,
+            vehicle=vehicle,
+        )
+        return favourite
+
+
+class BuyerFavouritePartSerializer(serializers.ModelSerializer):
+    """Serializer for saved buyer favourite spare part listings."""
+
+    part = SparePartListingPublicSerializer(read_only=True)
+    part_id = serializers.UUIDField(write_only=True, required=False)
+    is_available = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = BuyerFavouritePart
+        fields = [
+            'id',
+            'part_id',
+            'part',
+            'is_available',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'part', 'is_available', 'created_at']
+
+    def get_is_available(self, obj) -> bool:
+        if not obj.part:
+            return False
+        return (
+            obj.part.status == ListingStatusChoices.APPROVED
+            and bool(obj.part.is_active)
+        )
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if instance.part_id:
+            ret['part_id'] = str(instance.part_id)
+        return ret
+
+    def validate(self, attrs):
+        initial = getattr(self, 'initial_data', {}) or {}
+        raw_pid = (
+            attrs.get('part_id')
+            or initial.get('part_id')
+            or initial.get('listing_id')
+            or initial.get('part')
+        )
+        if not raw_pid:
+            raise serializers.ValidationError({"part_id": "Spare part listing ID is required."})
+
+        try:
+            part = SparePartListing.objects.get(id=raw_pid)
+        except (SparePartListing.DoesNotExist, ValueError):
+            raise serializers.ValidationError({"part_id": "Spare part listing not found."})
+
+        # Eligibility check: Only approved and active spare part listings may be newly favourited
+        if part.status != ListingStatusChoices.APPROVED or not part.is_active:
+            raise serializers.ValidationError({
+                "part_id": "Only approved and active spare part listings can be added to favourites."
+            })
+
+        attrs['part'] = part
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        user = request.user if request else None
+        part = validated_data['part']
+        favourite, _ = BuyerFavouritePart.objects.get_or_create(
+            user=user,
+            part=part,
+        )
+        return favourite
+
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderItem
+        fields = [
+            'id',
+            'item_type',
+            'title',
+            'brand',
+            'mpn',
+            'hsn_code',
+            'gst_rate',
+            'is_tax_verified',
+            'unit_price',
+            'quantity',
+            'taxable_amount',
+            'cgst_amount',
+            'sgst_amount',
+            'igst_amount',
+            'tax_amount',
+            'total_amount',
+        ]
+        read_only_fields = fields
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, read_only=True)
+    buyer_email = serializers.CharField(source='buyer.email', read_only=True)
+    buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            'id',
+            'order_number',
+            'buyer_email',
+            'buyer_name',
+            'status',
+            'currency',
+            'place_of_supply',
+            'seller_state',
+            'subtotal_taxable_amount',
+            'cgst_amount',
+            'sgst_amount',
+            'igst_amount',
+            'total_tax_amount',
+            'total_amount',
+            'items',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class CheckoutItemPayloadSerializer(serializers.Serializer):
+    listing_id = serializers.UUIDField(required=True)
+    quantity = serializers.IntegerField(min_value=1, default=1)
+
+
+class CheckoutPayloadSerializer(serializers.Serializer):
+    items = CheckoutItemPayloadSerializer(many=True, required=True)
+    place_of_supply = serializers.CharField(required=False, allow_blank=True, default='')
+    currency = serializers.CharField(required=False, default='INR')
+
+
+class VehicleEnquiryCreateSerializer(serializers.ModelSerializer):
+    """Serializer for submitting a direct enquiry about a vehicle listing."""
+    message = serializers.CharField(
+        min_length=10,
+        max_length=2000,
+        required=True,
+        error_messages={
+            'min_length': 'Your enquiry message must be at least 10 characters long.',
+            'max_length': 'Your enquiry message cannot exceed 2000 characters.',
+        }
+    )
+    buyer_phone = serializers.CharField(
+        max_length=30,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+
+    class Meta:
+        model = VehicleEnquiry
+        fields = ['message', 'buyer_phone']
+
+
+class VehicleEnquiryListingSummarySerializer(serializers.ModelSerializer):
+    make_name = serializers.CharField(source='make.name', read_only=True)
+    model_name = serializers.CharField(source='model.name', read_only=True)
+
+    class Meta:
+        model = VehicleListing
+        fields = [
+            'id',
+            'title',
+            'make_name',
+            'model_name',
+            'year',
+            'price',
+            'currency',
+            'primary_image_url',
+            'location_city',
+            'status',
+        ]
+
+
+class VehicleEnquirySellerSerializer(serializers.ModelSerializer):
+    """Full detail view of an enquiry for authorized sellers/organisations."""
+    listing_details = VehicleEnquiryListingSummarySerializer(source='listing', read_only=True)
+    buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+    buyer_email = serializers.EmailField(source='buyer.email', read_only=True)
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = VehicleEnquiry
+        fields = [
+            'id',
+            'listing',
+            'listing_details',
+            'buyer',
+            'buyer_name',
+            'buyer_email',
+            'buyer_phone',
+            'seller',
+            'seller_name',
+            'organisation',
+            'organisation_name',
+            'message',
+            'status',
+            'seller_notes',
+            'seller_reply',
+            'replied_at',
+            'responded_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'listing', 'listing_details', 'buyer', 'buyer_name',
+            'buyer_email', 'seller', 'seller_name', 'organisation',
+            'organisation_name', 'message', 'created_at', 'updated_at',
+        ]
+
+
+class VehicleEnquiryBuyerSerializer(serializers.ModelSerializer):
+    """View of an enquiry for the authenticated buyer who submitted it."""
+    listing_details = VehicleEnquiryListingSummarySerializer(source='listing', read_only=True)
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = VehicleEnquiry
+        fields = [
+            'id',
+            'listing',
+            'listing_details',
+            'seller_name',
+            'organisation_name',
+            'message',
+            'buyer_phone',
+            'status',
+            'seller_reply',
+            'replied_at',
+            'responded_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class VehicleEnquiryStatusUpdateSerializer(serializers.Serializer):
+    """Allows a seller to update enquiry lifecycle status, add internal notes, and send replies."""
+    status = serializers.ChoiceField(
+        choices=VehicleEnquiryStatusChoices.choices,
+        required=False,
+    )
+    seller_notes = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+    seller_reply = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )

@@ -13,6 +13,12 @@ from apps.catalogue.views import (
     PartCompatibilityListCreateView,
     PartCompatibilityDetailView,
     FitmentEvaluationView,
+    VehicleCatalogueApplicationListCreateView,
+    VehicleCatalogueApplicationDetailView,
+    VehicleCatalogueApplicationReviewView,
+    CataloguePhotoProposalListCreateView,
+    CataloguePhotoProposalDetailView,
+    CataloguePhotoProposalReviewView,
 )
 
 urlpatterns = [
@@ -23,6 +29,16 @@ urlpatterns = [
     path('catalogue/models/<uuid:id>/', VehicleModelDetailView.as_view(), name='catalogue-model-detail'),
     path('catalogue/variants/', VehicleVariantListCreateView.as_view(), name='catalogue-variants-list'),
     path('catalogue/variants/<uuid:id>/', VehicleVariantDetailView.as_view(), name='catalogue-variant-detail'),
+
+    # Vehicle Applications
+    path('catalogue/applications/', VehicleCatalogueApplicationListCreateView.as_view(), name='catalogue-applications-list'),
+    path('catalogue/applications/<uuid:id>/', VehicleCatalogueApplicationDetailView.as_view(), name='catalogue-application-detail'),
+    path('catalogue/applications/<uuid:id>/review/', VehicleCatalogueApplicationReviewView.as_view(), name='catalogue-application-review'),
+
+    # Photo Proposals
+    path('catalogue/photo-proposals/', CataloguePhotoProposalListCreateView.as_view(), name='catalogue-photo-proposals-list'),
+    path('catalogue/photo-proposals/<uuid:id>/', CataloguePhotoProposalDetailView.as_view(), name='catalogue-photo-proposal-detail'),
+    path('catalogue/photo-proposals/<uuid:id>/review/', CataloguePhotoProposalReviewView.as_view(), name='catalogue-photo-proposal-review'),
 
     # Parts & Categories
     path('catalogue/categories/', PartCategoryListCreateView.as_view(), name='catalogue-categories-list'),

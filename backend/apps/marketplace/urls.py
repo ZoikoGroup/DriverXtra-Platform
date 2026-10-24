@@ -21,9 +21,24 @@ from apps.marketplace.views import (
     AdminPartListingListView,
     AdminPartListingDetailView,
     AdminPartListingReviewView,
+    BuyerFavouriteVehicleListCreateView,
+    BuyerFavouriteVehicleDetailView,
+    BuyerFavouritePartListCreateView,
+    BuyerFavouritePartDetailView,
+    MarketplaceImageUploadView,
+    GSTOptionsView,
+    OrderCheckoutView,
+    VehicleEnquiryCreateView,
+    SellerVehicleEnquiryListView,
+    SellerVehicleEnquiryDetailView,
+    BuyerVehicleEnquiryListView,
 )
 
 urlpatterns = [
+    # 0. Media / Image Uploads
+    path('upload-image/', MarketplaceImageUploadView.as_view(), name='marketplace-upload-image'),
+    path('images/upload/', MarketplaceImageUploadView.as_view(), name='marketplace-images-upload'),
+
     # 1. Buyer Browse & Search (Approved items only)
     path('browse/vehicles/', MarketplaceVehicleListView.as_view(), name='marketplace-browse-vehicles'),
     path('browse/vehicles/<uuid:id>/', MarketplaceVehicleDetailView.as_view(), name='marketplace-browse-vehicle-detail'),
@@ -52,4 +67,28 @@ urlpatterns = [
     path('admin/parts/', AdminPartListingListView.as_view(), name='marketplace-admin-parts'),
     path('admin/parts/<uuid:id>/', AdminPartListingDetailView.as_view(), name='marketplace-admin-part-detail'),
     path('admin/parts/<uuid:id>/review/', AdminPartListingReviewView.as_view(), name='marketplace-admin-part-review'),
+
+    # 4. Buyer Saved Vehicle Favourites
+    path('favourites/', BuyerFavouriteVehicleListCreateView.as_view(), name='marketplace-buyer-favourites'),
+    path('favourites/<uuid:id>/', BuyerFavouriteVehicleDetailView.as_view(), name='marketplace-buyer-favourite-detail'),
+    # Resilient aliases for US/UK spelling
+    path('favorites/', BuyerFavouriteVehicleListCreateView.as_view(), name='marketplace-buyer-favorites'),
+    path('favorites/<uuid:id>/', BuyerFavouriteVehicleDetailView.as_view(), name='marketplace-buyer-favorite-detail'),
+
+    # 5. Buyer Saved Spare Part Favourites
+    path('favourites/parts/', BuyerFavouritePartListCreateView.as_view(), name='marketplace-buyer-favourite-parts'),
+    path('favourites/parts/<uuid:id>/', BuyerFavouritePartDetailView.as_view(), name='marketplace-buyer-favourite-part-detail'),
+    path('favorites/parts/', BuyerFavouritePartListCreateView.as_view(), name='marketplace-buyer-favorite-parts'),
+    path('favorites/parts/<uuid:id>/', BuyerFavouritePartDetailView.as_view(), name='marketplace-buyer-favorite-part-detail'),
+
+    # 6. Tax Options & Order Checkout
+    path('tax/gst-options/', GSTOptionsView.as_view(), name='marketplace-tax-gst-options'),
+    path('orders/checkout/', OrderCheckoutView.as_view(), name='marketplace-orders-checkout'),
+    path('orders/calculate/', OrderCheckoutView.as_view(), name='marketplace-orders-calculate'),
+
+    # 7. Direct Buyer–Seller Connection (Vehicle Enquiries)
+    path('vehicles/<uuid:id>/enquire/', VehicleEnquiryCreateView.as_view(), name='marketplace-vehicle-enquire'),
+    path('seller/enquiries/', SellerVehicleEnquiryListView.as_view(), name='marketplace-seller-enquiries-list'),
+    path('seller/enquiries/<uuid:id>/', SellerVehicleEnquiryDetailView.as_view(), name='marketplace-seller-enquiry-detail'),
+    path('buyer/enquiries/', BuyerVehicleEnquiryListView.as_view(), name='marketplace-buyer-enquiries-list'),
 ]

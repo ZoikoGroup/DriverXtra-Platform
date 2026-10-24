@@ -1,6 +1,8 @@
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from common.permissions import IsPlatformStaff, HasPermission
 from platform_core.audit.writer import record_audit_entry
 from apps.catalogue.models import (
@@ -11,6 +13,9 @@ from apps.catalogue.models import (
     Part,
     PartCompatibility,
     FitmentTypeChoices,
+    VehicleCatalogueApplication,
+    CataloguePhotoProposal,
+    CatalogueApplicationStatusChoices,
 )
 from apps.catalogue.serializers import (
     VehicleMakeSerializer,
@@ -20,6 +25,10 @@ from apps.catalogue.serializers import (
     PartSerializer,
     PartCompatibilitySerializer,
     FitmentCheckSerializer,
+    VehicleCatalogueApplicationSerializer,
+    VehicleCatalogueApplicationReviewSerializer,
+    CataloguePhotoProposalSerializer,
+    CataloguePhotoProposalReviewSerializer,
 )
 from apps.catalogue.services import evaluate_canonical_fitment
 
@@ -535,3 +544,337 @@ class FitmentEvaluationView(views.APIView):
             serializer.validated_data['vehicle_variant_id'],
         )
         return Response(result, status=status.HTTP_200_OK)
+
+
+class VehicleCatalogueApplicationListCreateView(generics.ListCreateAPIView):
+    """List vehicle catalogue applications or submit a new vehicle for catalogue inclusion.
+
+    GET /api/v1/catalogue/applications/
+    POST /api/v1/catalogue/applications/
+    """
+    serializer_class = VehicleCatalogueApplicationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = VehicleCatalogueApplication.objects.select_related(
+            'seller', 'make', 'reviewed_by', 'created_model', 'created_variant'
+        )
+        is_reviewer = (
+            user.is_staff
+            or user.has_role('ADMIN')
+            or user.has_role('MARKETPLACE_ADMIN')
+            or user.has_role('STAFF')
+        )
+        if not is_reviewer:
+            qs = qs.filter(seller=user)
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param.upper())
+        return qs
+
+    def perform_create(self, serializer):
+        instance = serializer.save(seller=self.request.user)
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.application.submitted",
+            action="catalogue:application.submit",
+            resource_type="VehicleCatalogueApplication",
+            resource_id=instance.id,
+            metadata={"make_name": instance.make_name, "model_name": instance.model_name},
+        )
+
+
+class VehicleCatalogueApplicationDetailView(generics.RetrieveAPIView):
+    """Retrieve details of a vehicle catalogue application.
+
+    GET /api/v1/catalogue/applications/<id>/
+    """
+    serializer_class = VehicleCatalogueApplicationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = VehicleCatalogueApplication.objects.select_related(
+            'seller', 'make', 'reviewed_by', 'created_model', 'created_variant'
+        )
+        is_reviewer = (
+            user.is_staff
+            or user.has_role('ADMIN')
+            or user.has_role('MARKETPLACE_ADMIN')
+            or user.has_role('STAFF')
+        )
+        if not is_reviewer:
+            qs = qs.filter(seller=user)
+        return qs
+
+
+class VehicleCatalogueApplicationReviewView(views.APIView):
+    """Review (approve, reject, or request changes on) a vehicle catalogue application.
+
+    POST /api/v1/catalogue/applications/<id>/review/
+    """
+    permission_classes = [IsPlatformStaff, HasPermission('catalogue.manage')]
+
+    def post(self, request, id):
+        app = VehicleCatalogueApplication.objects.filter(id=id).first()
+        if not app:
+            return Response({"error": "Vehicle catalogue application not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if app.seller == request.user and not request.user.is_superuser:
+            return Response(
+                {"error": "Self-approval violation: You cannot review or approve your own vehicle catalogue application."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = VehicleCatalogueApplicationReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        action = serializer.validated_data['action']
+        rejection_reason = serializer.validated_data.get('rejection_reason', '')
+        admin_notes = serializer.validated_data.get('admin_notes', '')
+
+        if action == 'APPROVE':
+            with transaction.atomic():
+                if app.make:
+                    make = app.make
+                else:
+                    make, _ = VehicleMake.objects.get_or_create(
+                        name__iexact=app.make_name.strip(),
+                        defaults={'name': app.make_name.strip(), 'is_active': True},
+                    )
+
+                model, created = VehicleModel.objects.get_or_create(
+                    make=make,
+                    name__iexact=app.model_name.strip(),
+                    defaults={
+                        'name': app.model_name.strip(),
+                        'year_start': app.year_start,
+                        'year_end': app.year_end,
+                        'image_url': app.primary_image_url,
+                        'is_active': True,
+                    },
+                )
+                if not created and not model.image_url and app.primary_image_url:
+                    model.image_url = app.primary_image_url
+                    model.save(update_fields=['image_url'])
+
+                created_variant = None
+                if app.variant_name and app.year:
+                    created_variant, _ = VehicleVariant.objects.get_or_create(
+                        model=model,
+                        name__iexact=app.variant_name.strip(),
+                        year=app.year,
+                        engine_code=app.engine_code.strip(),
+                        defaults={
+                            'name': app.variant_name.strip(),
+                            'fuel_type': app.fuel_type,
+                            'transmission': app.transmission,
+                            'body_type': app.body_type,
+                            'power_bhp': app.power_bhp,
+                            'engine_capacity_cc': app.engine_capacity_cc,
+                            'is_active': True,
+                        },
+                    )
+
+                app.created_model = model
+                app.created_variant = created_variant
+                app.status = CatalogueApplicationStatusChoices.APPROVED
+                app.rejection_reason = ""
+                app.reviewed_by = request.user
+                app.reviewed_at = timezone.now()
+                if admin_notes:
+                    app.admin_notes = admin_notes
+                app.save()
+
+            log_catalogue_audit(
+                request,
+                event_type="catalogue.application.approved",
+                action="catalogue:application.approve",
+                resource_type="VehicleCatalogueApplication",
+                resource_id=app.id,
+                metadata={"action": "APPROVE", "model_id": str(model.id)},
+            )
+
+        elif action == 'REJECT':
+            app.status = CatalogueApplicationStatusChoices.REJECTED
+            app.rejection_reason = rejection_reason
+            app.reviewed_by = request.user
+            app.reviewed_at = timezone.now()
+            if admin_notes:
+                app.admin_notes = admin_notes
+            app.save()
+            log_catalogue_audit(
+                request,
+                event_type="catalogue.application.rejected",
+                action="catalogue:application.reject",
+                resource_type="VehicleCatalogueApplication",
+                resource_id=app.id,
+                metadata={"action": "REJECT", "reason": rejection_reason},
+            )
+
+        elif action == 'REQUEST_CHANGES':
+            app.status = CatalogueApplicationStatusChoices.CHANGES_REQUESTED
+            app.rejection_reason = rejection_reason
+            app.reviewed_by = request.user
+            app.reviewed_at = timezone.now()
+            if admin_notes:
+                app.admin_notes = admin_notes
+            app.save()
+            log_catalogue_audit(
+                request,
+                event_type="catalogue.application.changes_requested",
+                action="catalogue:application.request_changes",
+                resource_type="VehicleCatalogueApplication",
+                resource_id=app.id,
+                metadata={"action": "REQUEST_CHANGES", "reason": rejection_reason},
+            )
+
+        detail = VehicleCatalogueApplicationSerializer(app, context={'request': request})
+        return Response(
+            {
+                "status": "success",
+                "message": f"Catalogue application {action.lower()}d successfully.",
+                "application": detail.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class CataloguePhotoProposalListCreateView(generics.ListCreateAPIView):
+    """List or submit photo update proposals for approved catalogue models.
+
+    GET /api/v1/catalogue/photo-proposals/
+    POST /api/v1/catalogue/photo-proposals/
+    """
+    serializer_class = CataloguePhotoProposalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = CataloguePhotoProposal.objects.select_related(
+            'seller', 'model', 'model__make', 'reviewed_by'
+        )
+        is_reviewer = (
+            user.is_staff
+            or user.has_role('ADMIN')
+            or user.has_role('MARKETPLACE_ADMIN')
+            or user.has_role('STAFF')
+        )
+        if not is_reviewer:
+            qs = qs.filter(seller=user)
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param.upper())
+        return qs
+
+    def perform_create(self, serializer):
+        instance = serializer.save(seller=self.request.user)
+        log_catalogue_audit(
+            self.request,
+            event_type="catalogue.photo_proposal.submitted",
+            action="catalogue:photo_proposal.submit",
+            resource_type="CataloguePhotoProposal",
+            resource_id=instance.id,
+            metadata={"model_id": str(instance.model_id), "proposed_image_url": instance.proposed_image_url},
+        )
+
+
+class CataloguePhotoProposalDetailView(generics.RetrieveAPIView):
+    """Retrieve details of a catalogue photo proposal.
+
+    GET /api/v1/catalogue/photo-proposals/<id>/
+    """
+    serializer_class = CataloguePhotoProposalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = CataloguePhotoProposal.objects.select_related(
+            'seller', 'model', 'model__make', 'reviewed_by'
+        )
+        is_reviewer = (
+            user.is_staff
+            or user.has_role('ADMIN')
+            or user.has_role('MARKETPLACE_ADMIN')
+            or user.has_role('STAFF')
+        )
+        if not is_reviewer:
+            qs = qs.filter(seller=user)
+        return qs
+
+
+class CataloguePhotoProposalReviewView(views.APIView):
+    """Review (approve or reject) a catalogue photo proposal.
+
+    POST /api/v1/catalogue/photo-proposals/<id>/review/
+    """
+    permission_classes = [IsPlatformStaff, HasPermission('catalogue.manage')]
+
+    def post(self, request, id):
+        proposal = CataloguePhotoProposal.objects.filter(id=id).first()
+        if not proposal:
+            return Response({"error": "Catalogue photo proposal not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if proposal.seller == request.user and not request.user.is_superuser:
+            return Response(
+                {"error": "Self-approval violation: You cannot review or approve your own catalogue photo proposal."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = CataloguePhotoProposalReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        action = serializer.validated_data['action']
+        rejection_reason = serializer.validated_data.get('rejection_reason', '')
+        admin_notes = serializer.validated_data.get('admin_notes', '')
+
+        if action == 'APPROVE':
+            with transaction.atomic():
+                proposal.model.image_url = proposal.proposed_image_url
+                proposal.model.save(update_fields=['image_url'])
+                proposal.status = CatalogueApplicationStatusChoices.APPROVED
+                proposal.rejection_reason = ""
+                proposal.reviewed_by = request.user
+                proposal.reviewed_at = timezone.now()
+                if admin_notes:
+                    proposal.admin_notes = admin_notes
+                proposal.save()
+
+            log_catalogue_audit(
+                request,
+                event_type="catalogue.photo_proposal.approved",
+                action="catalogue:photo_proposal.approve",
+                resource_type="CataloguePhotoProposal",
+                resource_id=proposal.id,
+                metadata={"model_id": str(proposal.model_id), "image_url": proposal.proposed_image_url},
+            )
+
+        elif action == 'REJECT':
+            proposal.status = CatalogueApplicationStatusChoices.REJECTED
+            proposal.rejection_reason = rejection_reason
+            proposal.reviewed_by = request.user
+            proposal.reviewed_at = timezone.now()
+            if admin_notes:
+                proposal.admin_notes = admin_notes
+            proposal.save()
+            log_catalogue_audit(
+                request,
+                event_type="catalogue.photo_proposal.rejected",
+                action="catalogue:photo_proposal.reject",
+                resource_type="CataloguePhotoProposal",
+                resource_id=proposal.id,
+                metadata={"model_id": str(proposal.model_id), "reason": rejection_reason},
+            )
+
+        detail = CataloguePhotoProposalSerializer(proposal, context={'request': request})
+        return Response(
+            {
+                "status": "success",
+                "message": f"Catalogue photo proposal {action.lower()}d successfully.",
+                "proposal": detail.data,
+            },
+            status=status.HTTP_200_OK,
+        )

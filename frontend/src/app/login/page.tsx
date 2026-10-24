@@ -212,13 +212,16 @@ console.log("[Login] Auth error:", authError);
                 <div className="relative">
 
 <input
-  type="email"
-  name="login-email"
-  autoComplete="off"
-  value={email}
-  onChange={(e) => setEmail(e.target.value)}
+  type="text"
+  name="mfa-code"
+  autoComplete="one-time-code"
+  inputMode="numeric"
+  pattern="[0-9]{6}"
+  maxLength={6}
+  value={mfaCode}
+  onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
   required
-  placeholder="name@organization.com"
+  placeholder="Enter 6-digit code"
   className="w-full h-11 px-3.5 pl-10 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder:text-slate-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
 />
 
@@ -260,13 +263,15 @@ console.log("[Login] Auth error:", authError);
                 </label>
                 <div className="relative">
                   <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    placeholder="name@organization.com"
-                    className="w-full h-11 px-3.5 pl-10 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder:text-slate-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
-                  />
+  type="email"
+  name="login-email"
+  autoComplete="off"
+  value={email}
+  onChange={(e) => setEmail(e.target.value)}
+  required
+  placeholder="name@organization.com"
+  className="w-full h-11 px-3.5 pl-10 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder:text-slate-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+/>
                   <Mail className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5 pointer-events-none" />
                 </div>
               </div>
@@ -285,13 +290,15 @@ console.log("[Login] Auth error:", authError);
                 </div>
                 <div className="relative">
                   <input
-                    type={showPassword ? "text" : "password"}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    placeholder="••••••••••••"
-                    className="w-full h-11 px-3.5 pl-10 pr-10 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder:text-slate-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
-                  />
+  type={showPassword ? "text" : "password"}
+  name="login-password"
+  autoComplete="new-password"
+  value={password}
+  onChange={(e) => setPassword(e.target.value)}
+  required
+  placeholder="Enter your password"
+  className="w-full h-11 px-3.5 pl-10 pr-10 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder:text-slate-600 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-400"
+/>
                   <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5 pointer-events-none" />
                   <button
                     type="button"

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from django.db import models
 from django.utils import timezone
 from common.models import BaseUUIDModel
@@ -12,6 +13,7 @@ from apps.catalogue.models import (
     FuelTypeChoices,
     TransmissionChoices,
 )
+from apps.marketplace.tax import calculate_gst_breakdown
 
 
 class ListingStatusChoices(models.TextChoices):
@@ -211,6 +213,20 @@ class SparePartListing(BaseUUIDModel):
         choices=PartConditionChoices.choices,
         default=PartConditionChoices.NEW,
     )
+    # Tax & HSN classification (Indian GST compliance)
+    hsn_code = models.CharField(max_length=20, blank=True, default='')
+    gst_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Applicable GST percentage (e.g. 5.00, 12.00, 18.00, 28.00).",
+    )
+    is_tax_verified = models.BooleanField(
+        default=True,
+        help_text="Indicates whether the HSN and GST rate combination is verified against official CBIC schedules.",
+    )
+
     primary_image_url = models.URLField(blank=True)
     images = models.JSONField(default=list, blank=True)
 
@@ -256,6 +272,30 @@ class SparePartListing(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.brand} {self.mpn} - {self.name} (£{self.price}) - {self.status}"
+
+    @property
+    def price_before_gst(self) -> Decimal:
+        return self.price
+
+    @property
+    def tax_breakdown(self) -> dict:
+        return calculate_gst_breakdown(self.price, self.gst_rate)
+
+    @property
+    def gst_amount(self) -> Decimal:
+        return self.tax_breakdown['gst_amount']
+
+    @property
+    def total_price(self) -> Decimal:
+        return self.tax_breakdown['total_price']
+
+    def get_tax_breakdown(self, place_of_supply=None, seller_state=None) -> dict:
+        return calculate_gst_breakdown(
+            price=self.price,
+            gst_rate=self.gst_rate,
+            place_of_supply=place_of_supply,
+            seller_state=seller_state,
+        )
 
 
 class StockMovement(BaseUUIDModel):
@@ -370,3 +410,237 @@ class PriceChange(BaseUUIDModel):
         if not getattr(self, '_allow_delete', False):
             raise ImmutableRecordError("PriceChange records are immutable and cannot be deleted.")
         super().delete(*args, **kwargs)
+
+
+class BuyerFavouriteVehicle(BaseUUIDModel):
+    """Saves an approved vehicle listing to an authenticated buyer's favourites list."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='favourite_vehicles',
+        help_text="The buyer account who saved this vehicle.",
+    )
+    vehicle = models.ForeignKey(
+        VehicleListing,
+        on_delete=models.CASCADE,
+        related_name='favourited_by',
+        help_text="The vehicle listing saved as favourite.",
+    )
+
+    class Meta:
+        verbose_name = 'Buyer Favourite Vehicle'
+        verbose_name_plural = 'Buyer Favourite Vehicles'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'vehicle'],
+                name='unique_buyer_vehicle_favourite',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['vehicle']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} -> {self.vehicle.title} ({self.vehicle_id})"
+
+    @property
+    def buyer(self):
+        return self.user
+
+    @property
+    def listing(self):
+        return self.vehicle
+
+
+class BuyerFavouritePart(BaseUUIDModel):
+    """Saves an approved spare part listing to an authenticated buyer's favourites list."""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='favourite_parts',
+        help_text="The buyer account who saved this spare part.",
+    )
+    part = models.ForeignKey(
+        SparePartListing,
+        on_delete=models.CASCADE,
+        related_name='favourited_by',
+        help_text="The spare part listing saved as favourite.",
+    )
+
+    class Meta:
+        verbose_name = 'Buyer Favourite Spare Part'
+        verbose_name_plural = 'Buyer Favourite Spare Parts'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'part'],
+                name='unique_buyer_part_favourite',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['part']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} -> {self.part.name} ({self.part_id})"
+
+    @property
+    def buyer(self):
+        return self.user
+
+    @property
+    def listing(self):
+        return self.part
+
+
+class OrderStatusChoices(models.TextChoices):
+    PENDING_CONFIRMATION = 'PENDING_CONFIRMATION', 'Pending Confirmation'
+    CONFIRMED = 'CONFIRMED', 'Confirmed'
+    PROCESSING = 'PROCESSING', 'Processing'
+    COMPLETED = 'COMPLETED', 'Completed'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class Order(BaseUUIDModel):
+    """Customer purchase order recording immutable financial and tax snapshots."""
+
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='buyer_orders',
+    )
+    order_number = models.CharField(max_length=50, unique=True, db_index=True)
+    status = models.CharField(
+        max_length=30,
+        choices=OrderStatusChoices.choices,
+        default=OrderStatusChoices.CONFIRMED,
+        db_index=True,
+    )
+    currency = models.CharField(max_length=10, default='INR')
+    place_of_supply = models.CharField(max_length=50, blank=True, default='')
+    seller_state = models.CharField(max_length=50, blank=True, default='')
+
+    # Financial snapshots
+    subtotal_taxable_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    cgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    sgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    igst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    total_tax_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        verbose_name = 'Order'
+        verbose_name_plural = 'Orders'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.order_number} ({self.buyer.email}) - {self.currency} {self.total_amount}"
+
+
+class OrderItem(BaseUUIDModel):
+    """Line item in an order recording line-level tax snapshot at purchase time."""
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='items',
+    )
+    listing = models.ForeignKey(
+        SparePartListing,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='order_items',
+    )
+    item_type = models.CharField(max_length=20, default='PART')
+    title = models.CharField(max_length=255)
+    brand = models.CharField(max_length=100, blank=True, default='')
+    mpn = models.CharField(max_length=100, blank=True, default='')
+    hsn_code = models.CharField(max_length=20, blank=True, default='')
+    gst_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    is_tax_verified = models.BooleanField(default=True)
+
+    # Line item financial snapshot
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)  # Price before GST
+    quantity = models.PositiveIntegerField(default=1)
+    taxable_amount = models.DecimalField(max_digits=12, decimal_places=2)  # unit_price * quantity
+    cgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    sgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    igst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    tax_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        verbose_name = 'Order Item'
+        verbose_name_plural = 'Order Items'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.title} x {self.quantity} (Order {self.order.order_number})"
+
+
+class VehicleEnquiryStatusChoices(models.TextChoices):
+    NEW = 'NEW', 'New'
+    RESPONDED = 'RESPONDED', 'Responded'
+    CLOSED = 'CLOSED', 'Closed'
+
+
+class VehicleEnquiry(BaseUUIDModel):
+    """
+    Direct buyer enquiry for a specific vehicle listing.
+    Connects authenticated buyers directly with vehicle sellers.
+    Tracks listing reference, buyer, seller, organisation, prefilled/edited message,
+    and enquiry lifecycle status.
+    """
+    listing = models.ForeignKey(
+        VehicleListing,
+        on_delete=models.CASCADE,
+        related_name='enquiries',
+    )
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='sent_vehicle_enquiries',
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='received_vehicle_enquiries',
+    )
+    organisation = models.ForeignKey(
+        Organisation,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='vehicle_enquiries',
+    )
+    message = models.TextField()
+    buyer_phone = models.CharField(max_length=30, blank=True, default='')
+    status = models.CharField(
+        max_length=20,
+        choices=VehicleEnquiryStatusChoices.choices,
+        default=VehicleEnquiryStatusChoices.NEW,
+        db_index=True,
+    )
+    seller_notes = models.TextField(blank=True, default='')
+    seller_reply = models.TextField(blank=True, default='')
+    replied_at = models.DateTimeField(null=True, blank=True)
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Enquiry'
+        verbose_name_plural = 'Vehicle Enquiries'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['seller', 'status']),
+            models.Index(fields=['buyer', '-created_at']),
+            models.Index(fields=['listing', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Enquiry on {self.listing.title} by {self.buyer.email} ({self.status})"
