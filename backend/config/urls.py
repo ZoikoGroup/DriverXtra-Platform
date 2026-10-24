@@ -28,6 +28,9 @@ urlpatterns = [
 
     # Marketplace: Vehicle & Spare Parts Submissions, Approvals & Public Browse
     path('api/v1/marketplace/', include('apps.marketplace.urls')),
+
+    # Notifications: in-app notifications generated from audit events
+    path('api/v1/', include('apps.notifications.urls')),
 ]
 
 # Serve media files in development / test environments

@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     "apps.catalogue",
     "apps.garage",
     "apps.marketplace",
+    "apps.notifications",
 
     # Platform audit
     "platform_core.audit.apps.AuditConfig",
@@ -328,6 +329,19 @@ EMAIL_BACKEND = os.getenv(
 )
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@driverxtra.com")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# SMTP settings (only used when EMAIL_BACKEND is the SMTP backend). Credentials come from the environment only.
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "False").lower() in ("true", "1", "yes")
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in ("true", "1", "yes")
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+
+# Notifications: in-app notifications are always created; emails are opt-in.
+NOTIFICATIONS_EMAIL_ENABLED = os.getenv("NOTIFICATIONS_EMAIL_ENABLED", "False").lower() in ("true", "1", "yes")
+NOTIFICATIONS_EMAIL_MAX_ATTEMPTS = int(os.getenv("NOTIFICATIONS_EMAIL_MAX_ATTEMPTS", "5"))
 
 
 # =========================================================

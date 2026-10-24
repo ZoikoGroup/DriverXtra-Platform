@@ -18,10 +18,7 @@ import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceRe
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
-import {
-  Bell,
-  X
-} from "lucide-react";
+import NotificationDrawer, { useNotificationUnreadCount } from "@/components/platform/NotificationDrawer";
 
 function getDefaultTabForRole(user?: PrototypeUser | null): string {
   if (!user) return "marketplace_browse";
@@ -47,6 +44,7 @@ export default function PlatformDashboardPage() {
   const [collapsed, setCollapsed] = useState(false);
   const [selectedTab, setSelectedTab] = useState<{ role: string; tab: string } | null>(null);
   const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
+  const { unreadCount, refreshUnreadCount } = useNotificationUnreadCount(isAuthenticated);
 
   // Protected route check
   useEffect(() => {
@@ -110,6 +108,7 @@ export default function PlatformDashboardPage() {
         <TopBar
           currentTabLabel={getTabLabel(currentTab)}
           onOpenNotifications={() => setNotificationDrawerOpen(true)}
+          unreadNotificationCount={unreadCount}
         />
 
         <main className="flex-1 overflow-y-auto">
@@ -165,68 +164,13 @@ export default function PlatformDashboardPage() {
         </main>
       </div>
 
-      {/* Notification Drawer (Doc 19) */}
-      {notificationDrawerOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end">
-          <div className="bg-white w-full max-w-sm h-full p-6 shadow-2xl flex flex-col justify-between border-l border-slate-200">
-            <div>
-              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-                <div className="flex items-center gap-2">
-                  <Bell className="w-4 h-4 text-amber-500" />
-                  <h4 className="text-sm font-black text-slate-950">
-                    Notifications & Telemetry (Doc 19)
-                  </h4>
-                </div>
-                <button
-                  onClick={() => setNotificationDrawerOpen(false)}
-                  className="text-slate-400 hover:text-slate-600"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="space-y-3 mt-4 text-xs">
-                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">
-                  <div className="flex items-center justify-between font-bold text-amber-950">
-                    <span>Escrow Hold Confirmed</span>
-                    <span className="text-[10px] text-amber-700">12m ago</span>
-                  </div>
-                  <p className="text-slate-600 mt-1">
-                    Deposit of £500.00 secured in banking custody for Order #DX-ORD-2026-98421.
-                  </p>
-                </div>
-
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <div className="flex items-center justify-between font-bold text-slate-900">
-                    <span>Work Order Sign-Off</span>
-                    <span className="text-[10px] text-slate-400">1h ago</span>
-                  </div>
-                  <p className="text-slate-600 mt-1">
-                    Apex Bavarian workshop logged major service to 2021 BMW 330i passport.
-                  </p>
-                </div>
-
-                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                  <div className="flex items-center justify-between font-bold text-emerald-950">
-                    <span>Guaranteed Fitment Alert</span>
-                    <span className="text-[10px] text-emerald-700">3h ago</span>
-                  </div>
-                  <p className="text-emerald-800 mt-1">
-                    4 new OEM-compatible brake components indexed for your Garage vehicle.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <button
-              onClick={() => setNotificationDrawerOpen(false)}
-              className="w-full h-10 bg-slate-950 text-white text-xs font-bold rounded-xl"
-            >
-              Close Notifications
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Notification Drawer: live data from /api/v1/notifications/ */}
+      <NotificationDrawer
+        open={notificationDrawerOpen}
+        onClose={() => setNotificationDrawerOpen(false)}
+        onUnreadCountChange={refreshUnreadCount}
+        onNavigateTab={(tab) => setSelectedTab({ role: activeRole, tab })}
+      />
     </div>
   );
 }
