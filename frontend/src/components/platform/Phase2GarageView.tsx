@@ -13,10 +13,14 @@ import {
   CheckCircle2,
   RefreshCw,
   X,
-  Fuel
+  Fuel,
 } from "lucide-react";
 
-export default function Phase2GarageView() {
+interface Phase2GarageViewProps {
+  initialVehicleId?: string;
+}
+
+export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewProps = {}) {
   const [vehicles, setVehicles] = useState<GarageVehicle[]>([]);
   const [selectedVehicle, setSelectedVehicle] = useState<GarageVehicle | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -109,6 +113,18 @@ export default function Phase2GarageView() {
       ignore = true;
     };
   }, []);
+
+  // Handle external navigation (from Global Search) to a specific garage vehicle
+  useEffect(() => {
+    if (!initialVehicleId || vehicles.length === 0) return;
+    const match = vehicles.find((v) => v.id === initialVehicleId);
+    if (match) {
+      const timer = setTimeout(() => {
+        setSelectedVehicle(match);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [initialVehicleId, vehicles]);
 
   // Load makes when add modal opens
   useEffect(() => {

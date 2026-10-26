@@ -23,7 +23,15 @@ import {
   Camera,
 } from "lucide-react";
 
-export default function AdminMarketplaceReviewView() {
+interface AdminMarketplaceReviewViewProps {
+  initialVehicleId?: string;
+  initialPartId?: string;
+}
+
+export default function AdminMarketplaceReviewView({
+  initialVehicleId,
+  initialPartId,
+}: AdminMarketplaceReviewViewProps = {}) {
   const [activeQueue, setActiveQueue] = useState<"vehicles" | "parts" | "applications" | "photo_proposals">("vehicles");
   const [statusFilter, setStatusFilter] = useState<string>("PENDING_APPROVAL");
 
@@ -136,6 +144,32 @@ export default function AdminMarketplaceReviewView() {
       ignore = true;
     };
   }, [activeQueue, statusFilter]);
+
+  // Handle external navigation (from Global Search) to a specific admin vehicle review item
+  useEffect(() => {
+    if (!initialVehicleId) return;
+    api.marketplace
+      .listAdminVehicles()
+      .then((list) => {
+        setActiveQueue("vehicles");
+        const match = list.find((v) => v.id === initialVehicleId);
+        if (match) setInspectVehicle(match);
+      })
+      .catch(console.error);
+  }, [initialVehicleId]);
+
+  // Handle external navigation (from Global Search) to a specific admin part review item
+  useEffect(() => {
+    if (!initialPartId) return;
+    api.marketplace
+      .listAdminParts()
+      .then((list) => {
+        setActiveQueue("parts");
+        const match = list.find((p) => p.id === initialPartId);
+        if (match) setInspectPart(match);
+      })
+      .catch(console.error);
+  }, [initialPartId]);
 
   const handleExecuteReview = async () => {
     if (!reviewAction) return;

@@ -32,7 +32,11 @@ import {
   Store,
 } from "lucide-react";
 
-export default function Phase2CatalogueView() {
+interface Phase2CatalogueViewProps {
+  initialPartId?: string;
+}
+
+export default function Phase2CatalogueView({ initialPartId }: Phase2CatalogueViewProps = {}) {
   // Mode switcher: OEM Reference Catalogue vs Approved Marketplace Stock
   const [catalogueMode, setCatalogueMode] = useState<"canonical" | "marketplace">("canonical");
 
@@ -243,6 +247,16 @@ export default function Phase2CatalogueView() {
       setIsLoadingPartDetail(false);
     }
   };
+
+  // Handle external navigation (from Global Search) to a specific canonical part
+  useEffect(() => {
+    if (!initialPartId) return;
+    const timer = setTimeout(() => {
+      setCatalogueMode("canonical");
+      handleSelectPart(initialPartId);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [initialPartId]);
 
   // Run Fitment Check for Selected Canonical Part
   const handleCheckFitment = async (partId: string, variantId: string) => {

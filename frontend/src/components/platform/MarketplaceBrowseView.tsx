@@ -45,7 +45,15 @@ import {
   Send,
 } from "lucide-react";
 
-export default function MarketplaceBrowseView() {
+interface MarketplaceBrowseViewProps {
+  initialVehicleId?: string;
+  initialPartId?: string;
+}
+
+export default function MarketplaceBrowseView({
+  initialVehicleId,
+  initialPartId,
+}: MarketplaceBrowseViewProps = {}) {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<"vehicles" | "parts">("vehicles");
 
@@ -113,6 +121,32 @@ export default function MarketplaceBrowseView() {
     api.catalogue.getMakes().then(setMakes).catch(console.error);
     api.catalogue.getCategories().then(setCategories).catch(console.error);
   }, []);
+
+  // Handle external navigation (from Global Search) to a specific vehicle
+  useEffect(() => {
+    if (!initialVehicleId) return;
+    api.marketplace
+      .getVehicle(initialVehicleId)
+      .then((v) => {
+        setActiveTab("vehicles");
+        setSelectedVehicle(v);
+        setSelectedVehicleImageIdx(0);
+      })
+      .catch(console.error);
+  }, [initialVehicleId]);
+
+  // Handle external navigation (from Global Search) to a specific spare part
+  useEffect(() => {
+    if (!initialPartId) return;
+    api.marketplace
+      .getPart(initialPartId)
+      .then((p) => {
+        setActiveTab("parts");
+        setSelectedPart(p);
+        setSelectedPartImageIdx(0);
+      })
+      .catch(console.error);
+  }, [initialPartId]);
 
   const handleOpenEnquiryModal = (vehicle: MarketplaceVehicleListing) => {
     setEnquiryVehicle(vehicle);

@@ -11,16 +11,25 @@ import {
   RefreshCw
 } from "lucide-react";
 
+import GlobalSearch from "./GlobalSearch";
+
 interface TopBarProps {
   currentTabLabel: string;
   onOpenNotifications: () => void;
   unreadNotificationCount?: number;
+  onNavigate?: (tab: string, itemData?: { type: string; id: string; raw?: unknown }) => void;
 }
 
-export default function TopBar({ currentTabLabel, onOpenNotifications, unreadNotificationCount = 0 }: TopBarProps) {
+export default function TopBar({
+  currentTabLabel,
+  onOpenNotifications,
+  unreadNotificationCount = 0,
+  onNavigate,
+}: TopBarProps) {
   const { user, switchRole, isLoading } = useAuth();
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [switchingRole, setSwitchingRole] = useState<string | null>(null);
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   if (!user) return null;
 
@@ -75,45 +84,56 @@ export default function TopBar({ currentTabLabel, onOpenNotifications, unreadNot
   };
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-20">
-      {/* Left: Breadcrumbs & Current Module */}
-      <div className="flex items-center gap-3 min-w-0">
-        <div className="flex items-center gap-1.5 text-xs text-slate-500 font-semibold truncate">
-          <span>Platform</span>
-          <span>/</span>
-          <span className="text-slate-800 font-bold">{user.organizationName}</span>
-          <span>/</span>
-          <span className="text-amber-600 font-bold">{currentTabLabel}</span>
-        </div>
-      </div>
-
-      {/* Center: Search input */}
-      <div className="hidden md:flex items-center w-full max-w-sm h-9 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs text-slate-900 focus-within:border-amber-500 focus-within:bg-white focus-within:ring-2 focus-within:ring-amber-400/20">
-        <Search className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
-        <input
-          type="text"
-          placeholder="Search records by VIN, Order #, or Part MPN…"
-          className="w-full bg-transparent focus:outline-none placeholder:text-slate-400 font-medium"
-        />
-      </div>
-
-      {/* Right: Environment Indicator & Real Role Switcher */}
-      <div className="flex items-center gap-3">
-        {/* Environment Indicator */}
-        <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 border border-emerald-300 text-emerald-900">
-          <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-          <span>Backend Live (Phase 1–5 RBAC)</span>
+    <>
+      <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-3 sm:gap-4 sticky top-0 z-20">
+        {/* Left: Breadcrumbs & Current Module */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 md:flex-initial">
+          <nav aria-label="Breadcrumb" className="flex items-center gap-1 sm:gap-1.5 text-xs text-slate-500 font-semibold min-w-0">
+            <span className="shrink-0 text-slate-400 hover:text-slate-600 transition-colors">Platform</span>
+            <span className="shrink-0 text-slate-300">/</span>
+            <span
+              className="text-slate-700 font-bold truncate max-w-[80px] sm:max-w-[120px] md:max-w-[150px] lg:max-w-[200px] shrink-0"
+              title={user.organizationName}
+            >
+              {user.organizationName}
+            </span>
+            <span className="shrink-0 text-slate-300">/</span>
+            <span
+              className="text-amber-600 font-bold whitespace-nowrap overflow-visible"
+              title={currentTabLabel}
+            >
+              {currentTabLabel}
+            </span>
+          </nav>
         </div>
 
-        {/* Real Backend Role Switcher */}
-        <div className="relative">
+        {/* Center: Functional Global Search (desktop/tablet) */}
+        <div className="hidden md:block w-64 lg:w-80 xl:w-96 relative shrink-0">
+          <GlobalSearch onNavigate={onNavigate} />
+        </div>
+
+        {/* Right: Controls & Role Switcher (Backend Live badge removed) */}
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          {/* Mobile Search Toggle Button */}
           <button
-            onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
-            disabled={isLoading || Boolean(switchingRole)}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-all shadow-sm disabled:opacity-60"
+            onClick={() => setMobileSearchOpen(!mobileSearchOpen)}
+            className="md:hidden w-9 h-9 rounded-xl border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-colors"
+            title="Search records by VIN, Order #, or Part MPN"
+            aria-label="Toggle search"
           >
-            <span className="text-amber-400 text-[10px] font-black uppercase">Active Role:</span>
-            <span>{activeRole}</span>
+            <Search className="w-4 h-4 text-slate-600" />
+          </button>
+
+          {/* Real Backend Role Switcher */}
+          <div className="relative">
+            <button
+              onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
+              disabled={isLoading || Boolean(switchingRole)}
+              className="flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-all shadow-sm disabled:opacity-60"
+            >
+              <span className="text-amber-400 text-[10px] font-black uppercase hidden sm:inline">Active Role:</span>
+              <span className="text-amber-400 text-[10px] font-black uppercase sm:hidden">Role:</span>
+              <span>{activeRole}</span>
             {switchingRole ? (
               <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />
             ) : (
@@ -190,5 +210,17 @@ export default function TopBar({ currentTabLabel, onOpenNotifications, unreadNot
         </button>
       </div>
     </header>
-  );
+
+    {/* Mobile Search Bar Expandable Drawer */}
+    {mobileSearchOpen && (
+      <div className="md:hidden bg-slate-50 border-b border-slate-200 px-4 py-2.5 sticky top-16 z-20 animate-in fade-in slide-in-from-top-1 duration-150">
+        <GlobalSearch
+          autoFocus
+          onNavigate={onNavigate}
+          onClose={() => setMobileSearchOpen(false)}
+        />
+      </div>
+    )}
+  </>
+);
 }
