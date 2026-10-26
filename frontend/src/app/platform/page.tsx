@@ -18,6 +18,8 @@ import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceRe
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
+import BuyerOrdersView from "@/components/platform/BuyerOrdersView";
+import SellerOrdersView from "@/components/platform/SellerOrdersView";
 import NotificationDrawer, { useNotificationUnreadCount } from "@/components/platform/NotificationDrawer";
 
 function getDefaultTabForRole(user?: PrototypeUser | null): string {
@@ -77,6 +79,8 @@ export default function PlatformDashboardPage() {
   const getTabLabel = (tab: string) => {
     const map: Record<string, string> = {
       marketplace_browse: "Marketplace — Approved Vehicles & Spare Parts",
+      my_orders: "My Orders — Order History & Status",
+      seller_orders: "Customer Orders — Seller Order Fulfillment",
       favourites: "Saved Items — Vehicles & Spare Parts",
       my_enquiries: "My Enquiries — Vehicle Questions & Seller Replies",
       seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
@@ -121,7 +125,16 @@ export default function PlatformDashboardPage() {
         />
 
         <main className="flex-1 overflow-y-auto">
-          {currentTab === "favourites" ? (
+          {currentTab === "my_orders" ? (
+            <BuyerOrdersView
+              onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
+              initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
+            />
+          ) : currentTab === "seller_orders" ? (
+            <SellerOrdersView
+              initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
+            />
+          ) : currentTab === "favourites" ? (
             <BuyerFavouritesView
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
             />

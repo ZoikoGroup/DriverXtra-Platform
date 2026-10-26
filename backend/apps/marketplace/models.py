@@ -515,15 +515,33 @@ class Order(BaseUUIDModel):
         related_name='buyer_orders',
     )
     order_number = models.CharField(max_length=50, unique=True, db_index=True)
+    idempotency_key = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        unique=True,
+        db_index=True,
+        help_text="Unique client-supplied idempotency key preventing duplicate order submissions.",
+    )
     status = models.CharField(
         max_length=30,
         choices=OrderStatusChoices.choices,
-        default=OrderStatusChoices.CONFIRMED,
+        default=OrderStatusChoices.PENDING_CONFIRMATION,
         db_index=True,
     )
     currency = models.CharField(max_length=10, default='INR')
     place_of_supply = models.CharField(max_length=50, blank=True, default='')
     seller_state = models.CharField(max_length=50, blank=True, default='')
+
+    # Shipping & delivery contact details
+    shipping_name = models.CharField(max_length=255, blank=True, default='')
+    shipping_phone = models.CharField(max_length=30, blank=True, default='')
+    shipping_address_line1 = models.CharField(max_length=255, blank=True, default='')
+    shipping_address_line2 = models.CharField(max_length=255, blank=True, default='')
+    shipping_city = models.CharField(max_length=100, blank=True, default='')
+    shipping_state = models.CharField(max_length=100, blank=True, default='')
+    shipping_postal_code = models.CharField(max_length=20, blank=True, default='')
+    shipping_country = models.CharField(max_length=100, blank=True, default='India')
 
     # Financial snapshots
     subtotal_taxable_amount = models.DecimalField(max_digits=12, decimal_places=2)

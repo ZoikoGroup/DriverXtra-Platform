@@ -294,6 +294,13 @@ class TestCheckoutAndOrderIntegrity:
             ],
             "place_of_supply": "KA",
             "currency": "INR",
+            "shipping_name": "Test Buyer",
+            "shipping_phone": "+91 9876543210",
+            "shipping_address_line1": "123 Test Street",
+            "shipping_city": "Bengaluru",
+            "shipping_state": "KA",
+            "shipping_postal_code": "560001",
+            "shipping_country": "India",
             # Tampered fields that MUST BE IGNORED by backend:
             "gst_rate": "5.00",
             "total_amount": "100.00",
@@ -348,6 +355,13 @@ class TestCheckoutAndOrderIntegrity:
         res = buyer_auth_client.post('/api/v1/marketplace/orders/checkout/', {
             "items": [{"listing_id": str(listing.id), "quantity": 1}],
             "currency": "INR",
+            "shipping_name": "Test Buyer",
+            "shipping_phone": "+91 9876543210",
+            "shipping_address_line1": "123 Test Street",
+            "shipping_city": "Mumbai",
+            "shipping_state": "MH",
+            "shipping_postal_code": "400001",
+            "shipping_country": "India",
         }, format='json')
         assert res.status_code == status.HTTP_201_CREATED
         order_id = res.json()["order"]["id"]
@@ -370,3 +384,50 @@ class TestCheckoutAndOrderIntegrity:
         assert order_item.gst_rate == Decimal("28.00")
         assert order_item.tax_amount == Decimal("280.00")
         assert order_item.total_amount == Decimal("1280.00")
+
+    def test_checkout_and_calculate_reject_vehicle_listing_not_in_parts_catalog(
+        self, buyer_auth_client, seller_user
+    ):
+        """Verifies that OrderCheckoutView (/calculate/ and /checkout/) rejects vehicle listings,
+
+        enforcing that motor vehicles are transacted through the VehicleEnquiry workflow.
+        """
+        from apps.catalogue.models import VehicleMake, VehicleModel
+        from apps.marketplace.models import VehicleListing
+
+        make = VehicleMake.objects.create(name="BMW", country_of_origin="Germany")
+        model = VehicleModel.objects.create(make=make, name="M3", year_start=2021)
+        vehicle = VehicleListing.objects.create(
+            seller=seller_user,
+            title="2022 BMW M3 Competition",
+            make=make,
+            model=model,
+            year=2022,
+            price=Decimal("64950.00"),
+            status=ListingStatusChoices.APPROVED,
+            is_active=True,
+        )
+
+        # 1. Test calculation preview
+        calc_res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/calculate/",
+            {
+                "items": [{"listing_id": str(vehicle.id), "quantity": 1}],
+                "currency": "GBP",
+            },
+            format="json",
+        )
+        assert calc_res.status_code == status.HTTP_404_NOT_FOUND
+        assert f"Spare part listing with ID {vehicle.id} not found or inactive." in calc_res.json()["error"]
+
+        # 2. Test direct checkout
+        checkout_res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            {
+                "items": [{"listing_id": str(vehicle.id), "quantity": 1}],
+                "currency": "GBP",
+            },
+            format="json",
+        )
+        assert checkout_res.status_code == status.HTTP_404_NOT_FOUND
+        assert f"Spare part listing with ID {vehicle.id} not found or inactive." in checkout_res.json()["error"]

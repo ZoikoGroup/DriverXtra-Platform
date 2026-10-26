@@ -1733,10 +1733,12 @@ class OrderCheckoutView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        import re
         from apps.marketplace.serializers import CheckoutPayloadSerializer, OrderSerializer
         from apps.marketplace.models import Order, OrderItem, OrderStatusChoices
         from apps.marketplace.tax import calculate_gst_breakdown, quantize_currency
         from decimal import Decimal
+        from django.db import IntegrityError
 
         serializer = CheckoutPayloadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1745,185 +1747,616 @@ class OrderCheckoutView(views.APIView):
         items_data = data['items']
         place_of_supply = data.get('place_of_supply', '').strip()
         currency = data.get('currency', 'INR').strip().upper()
-        preview_only = request.data.get('preview_only', False)
+        preview_only = bool(request.data.get('preview_only', False)) or ('calculate' in request.path)
 
         if not items_data:
             return Response({"error": "At least one item is required for checkout."}, status=status.HTTP_400_BAD_REQUEST)
 
         buyer = request.user
 
-        with transaction.atomic():
-            calculated_items = []
-            subtotal_taxable = Decimal('0.00')
-            cgst_total = Decimal('0.00')
-            sgst_total = Decimal('0.00')
-            igst_total = Decimal('0.00')
-            tax_total = Decimal('0.00')
-            grand_total = Decimal('0.00')
+        # 1. Idempotency Guard (early replay check)
+        idempotency_key = (
+            request.headers.get('Idempotency-Key')
+            or request.headers.get('X-Idempotency-Key')
+            or data.get('idempotency_key', '')
+        ).strip()
 
-            seller_state = ""
+        if not preview_only and idempotency_key:
+            existing_order = Order.objects.filter(buyer=buyer, idempotency_key=idempotency_key).first()
+            if existing_order:
+                return Response(
+                    {
+                        "status": "success",
+                        "message": "Order already processed (idempotent replay).",
+                        "replayed": True,
+                        "order": OrderSerializer(existing_order).data,
+                    },
+                    status=status.HTTP_200_OK,
+                )
 
-            for item in items_data:
-                listing_id = item['listing_id']
-                qty = item['quantity']
+        # Shipping & Contact fields
+        shipping_name = data.get('shipping_name', '').strip()
+        shipping_phone = data.get('shipping_phone', '').strip()
+        shipping_address_line1 = data.get('shipping_address_line1', '').strip()
+        shipping_address_line2 = data.get('shipping_address_line2', '').strip()
+        shipping_city = data.get('shipping_city', '').strip()
+        shipping_state = data.get('shipping_state', '').strip() or place_of_supply
+        shipping_postal_code = data.get('shipping_postal_code', '').strip()
+        shipping_country = data.get('shipping_country', '').strip() or 'India'
+
+        # 2. Consolidate requested quantities across duplicate listing items
+        consolidated_items = {}
+        for item in items_data:
+            lid = item['listing_id']
+            qty = item['quantity']
+            if qty <= 0:
+                return Response(
+                    {"error": f"Quantity must be at least 1."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            consolidated_items[lid] = consolidated_items.get(lid, 0) + qty
+
+        try:
+            with transaction.atomic():
+                calculated_items = []
+                subtotal_taxable = Decimal('0.00')
+                cgst_total = Decimal('0.00')
+                sgst_total = Decimal('0.00')
+                igst_total = Decimal('0.00')
+                tax_total = Decimal('0.00')
+                grand_total = Decimal('0.00')
+
+                seller_state = ""
+
+                for listing_id, qty in consolidated_items.items():
+                    if preview_only:
+                        listing = SparePartListing.objects.filter(id=listing_id, is_active=True).first()
+                    else:
+                        listing = SparePartListing.objects.select_for_update().filter(id=listing_id, is_active=True).first()
+
+                    if not listing:
+                        return Response(
+                            {"error": f"Spare part listing with ID {listing_id} not found or inactive."},
+                            status=status.HTTP_404_NOT_FOUND,
+                        )
+
+                    if listing.status != ListingStatusChoices.APPROVED:
+                        return Response(
+                            {"error": f"Part '{listing.name}' ({listing.mpn}) is not available for purchase (status: {listing.status})."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
+                    if listing.stock_quantity < qty:
+                        return Response(
+                            {
+                                "error": f"Insufficient stock for '{listing.name}'. Available: {listing.stock_quantity}, requested: {qty}."
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
+                    if listing.organisation and listing.organisation.jurisdiction:
+                        seller_state = listing.organisation.jurisdiction
+
+                    unit_price = listing.price
+                    gst_rate = listing.gst_rate or Decimal('0.00')
+                    line_taxable = quantize_currency(unit_price * qty)
+
+                    effective_place_of_supply = place_of_supply or shipping_state
+
+                    breakdown = calculate_gst_breakdown(
+                        price=line_taxable,
+                        gst_rate=gst_rate,
+                        place_of_supply=effective_place_of_supply,
+                        seller_state=seller_state,
+                    )
+
+                    line_gst = breakdown['gst_amount']
+                    line_total = breakdown['total_price']
+                    line_cgst = breakdown['cgst_amount']
+                    line_sgst = breakdown['sgst_amount']
+                    line_igst = breakdown['igst_amount']
+
+                    subtotal_taxable += line_taxable
+                    cgst_total += line_cgst
+                    sgst_total += line_sgst
+                    igst_total += line_igst
+                    tax_total += line_gst
+                    grand_total += line_total
+
+                    calculated_items.append({
+                        "listing": listing,
+                        "item_type": "PART",
+                        "title": listing.name,
+                        "brand": listing.brand,
+                        "mpn": listing.mpn,
+                        "hsn_code": listing.hsn_code,
+                        "gst_rate": gst_rate,
+                        "is_tax_verified": listing.is_tax_verified,
+                        "unit_price": unit_price,
+                        "quantity": qty,
+                        "taxable_amount": line_taxable,
+                        "cgst_amount": line_cgst,
+                        "sgst_amount": line_sgst,
+                        "igst_amount": line_igst,
+                        "tax_amount": line_gst,
+                        "total_amount": line_total,
+                    })
 
                 if preview_only:
-                    listing = SparePartListing.objects.filter(id=listing_id, is_active=True).first()
-                else:
-                    listing = SparePartListing.objects.select_for_update().filter(id=listing_id, is_active=True).first()
+                    return Response({
+                        "status": "success",
+                        "preview": True,
+                        "currency": currency or listing.currency,
+                        "place_of_supply": effective_place_of_supply,
+                        "seller_state": seller_state,
+                        "subtotal_taxable_amount": str(subtotal_taxable),
+                        "cgst_amount": str(cgst_total),
+                        "sgst_amount": str(sgst_total),
+                        "igst_amount": str(igst_total),
+                        "total_tax_amount": str(tax_total),
+                        "total_amount": str(grand_total),
+                        "items": [
+                            {
+                                "listing_id": str(ci["listing"].id),
+                                "title": ci["title"],
+                                "brand": ci["brand"],
+                                "mpn": ci["mpn"],
+                                "hsn_code": ci["hsn_code"],
+                                "gst_rate": str(ci["gst_rate"]),
+                                "unit_price": str(ci["unit_price"]),
+                                "quantity": ci["quantity"],
+                                "taxable_amount": str(ci["taxable_amount"]),
+                                "cgst_amount": str(ci["cgst_amount"]),
+                                "sgst_amount": str(ci["sgst_amount"]),
+                                "igst_amount": str(ci["igst_amount"]),
+                                "tax_amount": str(ci["tax_amount"]),
+                                "total_amount": str(ci["total_amount"]),
+                            }
+                            for ci in calculated_items
+                        ],
+                    }, status=status.HTTP_200_OK)
 
-                if not listing:
-                    return Response(
-                        {"error": f"Spare part listing with ID {listing_id} not found or inactive."},
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
+                # 4. Shipping & Contact Validation (required when placing orders)
+                shipping_errors = {}
+                if not shipping_name:
+                    shipping_errors['shipping_name'] = 'Full name is required for delivery.'
+                if not shipping_phone:
+                    shipping_errors['shipping_phone'] = 'Contact phone number is required.'
+                elif len(re.sub(r'[^0-9+]', '', shipping_phone)) < 7:
+                    shipping_errors['shipping_phone'] = 'A valid phone number is required.'
+                if not shipping_address_line1:
+                    shipping_errors['shipping_address_line1'] = 'Shipping address line 1 is required.'
+                if not shipping_city:
+                    shipping_errors['shipping_city'] = 'City is required.'
+                if not shipping_postal_code:
+                    shipping_errors['shipping_postal_code'] = 'Postal / PIN code is required.'
 
-                if listing.status != ListingStatusChoices.APPROVED:
-                    return Response(
-                        {"error": f"Part '{listing.name}' ({listing.mpn}) is not available for purchase (status: {listing.status})."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-
-                if listing.stock_quantity < qty:
+                if shipping_errors:
                     return Response(
                         {
-                            "error": f"Insufficient stock for '{listing.name}'. Available: {listing.stock_quantity}, requested: {qty}."
+                            "status": "error",
+                            "error": "Missing or invalid required shipping and contact details.",
+                            "field_errors": shipping_errors,
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-                if listing.organisation and listing.organisation.jurisdiction:
-                    seller_state = listing.organisation.jurisdiction
+                # 5. Authoritative Price / Tax Change Guard
+                expected_total = data.get('expected_total_amount')
+                if expected_total is not None:
+                    if quantize_currency(Decimal(str(expected_total))) != quantize_currency(grand_total):
+                        return Response(
+                            {
+                                "status": "price_changed",
+                                "code": "PRICE_CHANGED",
+                                "error": f"The order total has changed from {expected_total} to {grand_total} due to updated listing prices or tax rates. Please review and confirm the updated total before proceeding.",
+                                "reviewed_total_amount": str(expected_total),
+                                "updated_total_amount": str(grand_total),
+                                "subtotal_taxable_amount": str(subtotal_taxable),
+                                "total_tax_amount": str(tax_total),
+                                "currency": currency,
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
 
-                unit_price = listing.price
-                gst_rate = listing.gst_rate or Decimal('0.00')
-                line_taxable = quantize_currency(unit_price * qty)
-
-                breakdown = calculate_gst_breakdown(
-                    price=line_taxable,
-                    gst_rate=gst_rate,
-                    place_of_supply=place_of_supply,
+                # 5. Order Creation with PENDING_CONFIRMATION status
+                order_number = f"DX-ORD-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                order = Order.objects.create(
+                    buyer=buyer,
+                    order_number=order_number,
+                    idempotency_key=idempotency_key or None,
+                    status=OrderStatusChoices.PENDING_CONFIRMATION,
+                    currency=currency,
+                    place_of_supply=effective_place_of_supply,
                     seller_state=seller_state,
+                    shipping_name=shipping_name,
+                    shipping_phone=shipping_phone,
+                    shipping_address_line1=shipping_address_line1,
+                    shipping_address_line2=shipping_address_line2,
+                    shipping_city=shipping_city,
+                    shipping_state=shipping_state,
+                    shipping_postal_code=shipping_postal_code,
+                    shipping_country=shipping_country,
+                    subtotal_taxable_amount=subtotal_taxable,
+                    cgst_amount=cgst_total,
+                    sgst_amount=sgst_total,
+                    igst_amount=igst_total,
+                    total_tax_amount=tax_total,
+                    total_amount=grand_total,
                 )
 
-                line_gst = breakdown['gst_amount']
-                line_total = breakdown['total_price']
-                line_cgst = breakdown['cgst_amount']
-                line_sgst = breakdown['sgst_amount']
-                line_igst = breakdown['igst_amount']
+                for ci in calculated_items:
+                    OrderItem.objects.create(
+                        order=order,
+                        listing=ci["listing"],
+                        item_type=ci["item_type"],
+                        title=ci["title"],
+                        brand=ci["brand"],
+                        mpn=ci["mpn"],
+                        hsn_code=ci["hsn_code"],
+                        gst_rate=ci["gst_rate"],
+                        is_tax_verified=ci["is_tax_verified"],
+                        unit_price=ci["unit_price"],
+                        quantity=ci["quantity"],
+                        taxable_amount=ci["taxable_amount"],
+                        cgst_amount=ci["cgst_amount"],
+                        sgst_amount=ci["sgst_amount"],
+                        igst_amount=ci["igst_amount"],
+                        tax_amount=ci["tax_amount"],
+                        total_amount=ci["total_amount"],
+                    )
+                    adjust_stock(
+                        listing=ci["listing"],
+                        delta=-ci["quantity"],
+                        reason=StockMovementReasonChoices.SALE,
+                        actor=buyer,
+                        note=f"Customer order {order_number}",
+                    )
 
-                subtotal_taxable += line_taxable
-                cgst_total += line_cgst
-                sgst_total += line_sgst
-                igst_total += line_igst
-                tax_total += line_gst
-                grand_total += line_total
-
-                calculated_items.append({
-                    "listing": listing,
-                    "item_type": "PART",
-                    "title": listing.name,
-                    "brand": listing.brand,
-                    "mpn": listing.mpn,
-                    "hsn_code": listing.hsn_code,
-                    "gst_rate": gst_rate,
-                    "is_tax_verified": listing.is_tax_verified,
-                    "unit_price": unit_price,
-                    "quantity": qty,
-                    "taxable_amount": line_taxable,
-                    "cgst_amount": line_cgst,
-                    "sgst_amount": line_sgst,
-                    "igst_amount": line_igst,
-                    "tax_amount": line_gst,
-                    "total_amount": line_total,
-                })
-
-            if preview_only:
-                return Response({
-                    "status": "success",
-                    "preview": True,
-                    "currency": currency or listing.currency,
-                    "place_of_supply": place_of_supply,
-                    "seller_state": seller_state,
-                    "subtotal_taxable_amount": str(subtotal_taxable),
-                    "cgst_amount": str(cgst_total),
-                    "sgst_amount": str(sgst_total),
-                    "igst_amount": str(igst_total),
-                    "total_tax_amount": str(tax_total),
-                    "total_amount": str(grand_total),
-                    "items": [
+                return Response(
+                    {
+                        "status": "success",
+                        "message": "Order created successfully. Awaiting payment/confirmation.",
+                        "order": OrderSerializer(order).data,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+        except IntegrityError:
+            if idempotency_key:
+                existing_order = Order.objects.filter(buyer=buyer, idempotency_key=idempotency_key).first()
+                if existing_order:
+                    return Response(
                         {
-                            "listing_id": str(ci["listing"].id),
-                            "title": ci["title"],
-                            "brand": ci["brand"],
-                            "mpn": ci["mpn"],
-                            "hsn_code": ci["hsn_code"],
-                            "gst_rate": str(ci["gst_rate"]),
-                            "unit_price": str(ci["unit_price"]),
-                            "quantity": ci["quantity"],
-                            "taxable_amount": str(ci["taxable_amount"]),
-                            "cgst_amount": str(ci["cgst_amount"]),
-                            "sgst_amount": str(ci["sgst_amount"]),
-                            "igst_amount": str(ci["igst_amount"]),
-                            "tax_amount": str(ci["tax_amount"]),
-                            "total_amount": str(ci["total_amount"]),
-                        }
-                        for ci in calculated_items
-                    ],
-                }, status=status.HTTP_200_OK)
+                            "status": "success",
+                            "message": "Order already processed (idempotent replay).",
+                            "replayed": True,
+                            "order": OrderSerializer(existing_order).data,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+            raise
 
-            order_number = f"DX-ORD-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-            order = Order.objects.create(
-                buyer=buyer,
-                order_number=order_number,
-                status=OrderStatusChoices.CONFIRMED,
-                currency=currency,
-                place_of_supply=place_of_supply,
-                seller_state=seller_state,
-                subtotal_taxable_amount=subtotal_taxable,
-                cgst_amount=cgst_total,
-                sgst_amount=sgst_total,
-                igst_amount=igst_total,
-                total_tax_amount=tax_total,
-                total_amount=grand_total,
+
+class BuyerOrderListView(generics.ListAPIView):
+    """Lists past orders placed by the authenticated buyer."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_serializer_class(self):
+        from apps.marketplace.serializers import OrderSerializer
+        return OrderSerializer
+
+    def get_queryset(self):
+        from apps.marketplace.models import Order
+        return Order.objects.filter(buyer=self.request.user).prefetch_related('items__listing__seller').order_by('-created_at')
+
+
+class BuyerOrderDetailView(views.APIView):
+    """Retrieves detail of an order by UUID or order_number for the authenticated buyer."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        import uuid
+        from apps.marketplace.models import Order
+        from apps.marketplace.serializers import OrderSerializer
+
+        is_uuid = False
+        try:
+            uuid.UUID(str(identifier))
+            is_uuid = True
+        except (ValueError, AttributeError):
+            is_uuid = False
+
+        if is_uuid:
+            order = Order.objects.filter(id=identifier, buyer=request.user).prefetch_related('items__listing__seller').first()
+        else:
+            order = Order.objects.filter(order_number=identifier, buyer=request.user).prefetch_related('items__listing__seller').first()
+
+        if not order:
+            return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
+
+
+class BuyerOrderCancelView(views.APIView):
+    """Allows an authenticated buyer to cancel an order still in PENDING_CONFIRMATION status."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        import uuid
+        from apps.marketplace.models import Order, OrderStatusChoices, StockMovementReasonChoices
+        from apps.marketplace.serializers import OrderSerializer
+        from apps.marketplace.services import adjust_stock
+        from platform_core.audit.writer import record_audit_entry
+
+        is_uuid = False
+        try:
+            uuid.UUID(str(identifier))
+            is_uuid = True
+        except (ValueError, AttributeError):
+            is_uuid = False
+
+        if is_uuid:
+            order = Order.objects.filter(id=identifier, buyer=request.user).prefetch_related('items__listing').first()
+        else:
+            order = Order.objects.filter(order_number=identifier, buyer=request.user).prefetch_related('items__listing').first()
+
+        if not order:
+            return Response({"error": "Order not found or not owned by you."}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.status != OrderStatusChoices.PENDING_CONFIRMATION:
+            return Response(
+                {
+                    "error": f"Cannot cancel order with status '{order.status}'. Only orders with status 'PENDING_CONFIRMATION' can be cancelled by the buyer."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-            for ci in calculated_items:
-                OrderItem.objects.create(
-                    order=order,
-                    listing=ci["listing"],
-                    item_type=ci["item_type"],
-                    title=ci["title"],
-                    brand=ci["brand"],
-                    mpn=ci["mpn"],
-                    hsn_code=ci["hsn_code"],
-                    gst_rate=ci["gst_rate"],
-                    is_tax_verified=ci["is_tax_verified"],
-                    unit_price=ci["unit_price"],
-                    quantity=ci["quantity"],
-                    taxable_amount=ci["taxable_amount"],
-                    cgst_amount=ci["cgst_amount"],
-                    sgst_amount=ci["sgst_amount"],
-                    igst_amount=ci["igst_amount"],
-                    tax_amount=ci["tax_amount"],
-                    total_amount=ci["total_amount"],
-                )
-                adjust_stock(
-                    listing=ci["listing"],
-                    delta=-ci["quantity"],
-                    reason=StockMovementReasonChoices.SALE,
-                    actor=buyer,
-                    note=f"Customer order {order_number}",
-                )
+        with transaction.atomic():
+            order.status = OrderStatusChoices.CANCELLED
+            order.save(update_fields=['status', 'updated_at'])
 
+            # Restock inventory items
+            for item in order.items.all():
+                if item.listing:
+                    adjust_stock(
+                        listing=item.listing,
+                        delta=item.quantity,
+                        reason=StockMovementReasonChoices.RETURN,
+                        actor=request.user,
+                        note=f"Buyer cancellation for order {order.order_number}",
+                    )
+
+            record_audit_entry(
+                event_type="marketplace.order.buyer_cancelled",
+                action="marketplace:order.cancel",
+                resource_type="Order",
+                resource_id=str(order.id),
+                actor_id=request.user.id,
+                metadata={
+                    "order_number": order.order_number,
+                    "previous_status": OrderStatusChoices.PENDING_CONFIRMATION,
+                    "new_status": OrderStatusChoices.CANCELLED,
+                },
+            )
+
+        return Response(
+            {
+                "status": "success",
+                "message": f"Order {order.order_number} has been cancelled successfully and inventory returned.",
+                "order": OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SellerOrderListView(generics.ListAPIView):
+    """
+    Lists orders containing items owned by the authenticated seller (or seller's organisations).
+    Enforces multi-seller isolation by returning SellerOrderSerializer.
+    GET /api/v1/marketplace/seller/orders/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_serializer_class(self):
+        from apps.marketplace.serializers import SellerOrderSerializer
+        return SellerOrderSerializer
+
+    def get_queryset(self):
+        from apps.marketplace.models import Order
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        from django.db.models import Q
+
+        user = self.request.user
+        if user.is_staff or user.is_superuser:
+            qs = Order.objects.all()
+        else:
+            org_ids = OrganisationMembership.objects.filter(
+                user=user,
+                is_active=True,
+                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+            ).values_list('organisation_id', flat=True)
+
+            qs = Order.objects.filter(
+                Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids)
+            ).distinct()
+
+        status_param = self.request.query_params.get('status')
+        if status_param and status_param.upper() != 'ALL':
+            qs = qs.filter(status=status_param.upper())
+
+        search_param = self.request.query_params.get('search')
+        if search_param:
+            qs = qs.filter(
+                Q(order_number__icontains=search_param)
+                | Q(buyer__email__icontains=search_param)
+                | Q(shipping_name__icontains=search_param)
+            )
+
+        return qs.select_related('buyer').prefetch_related(
+            'items__listing__seller', 'items__listing__organisation'
+        ).order_by('-created_at')
+
+
+class SellerOrderDetailView(views.APIView):
+    """
+    Retrieves isolated order details for the authenticated seller.
+    Only the items and financials belonging to the seller are returned.
+    GET /api/v1/marketplace/seller/orders/<str:identifier>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        import uuid
+        from apps.marketplace.models import Order
+        from apps.marketplace.serializers import SellerOrderSerializer
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        from django.db.models import Q
+
+        is_uuid = False
+        try:
+            uuid.UUID(str(identifier))
+            is_uuid = True
+        except (ValueError, AttributeError):
+            is_uuid = False
+
+        user = request.user
+        query_filter = Q(id=identifier) if is_uuid else Q(order_number=identifier)
+
+        if not (user.is_staff or user.is_superuser):
+            org_ids = OrganisationMembership.objects.filter(
+                user=user,
+                is_active=True,
+                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+            ).values_list('organisation_id', flat=True)
+
+            query_filter &= (Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids))
+
+        order = Order.objects.filter(query_filter).select_related('buyer').prefetch_related(
+            'items__listing__seller', 'items__listing__organisation'
+        ).distinct().first()
+
+        if not order:
+            return Response(
+                {"error": "Order not found or you are not authorized to view this order."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = SellerOrderSerializer(order, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class SellerOrderStatusUpdateView(views.APIView):
+    """
+    Updates the status of an order containing the seller's items.
+    Enforces valid status transitions and role authorization.
+    Restocks inventory on transition to CANCELLED.
+    PATCH /api/v1/marketplace/seller/orders/<str:identifier>/status/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, identifier):
+        return self._update_status(request, identifier)
+
+    def post(self, request, identifier):
+        return self._update_status(request, identifier)
+
+    def _update_status(self, request, identifier):
+        import uuid
+        from apps.marketplace.models import Order, OrderStatusChoices, StockMovementReasonChoices
+        from apps.marketplace.serializers import (
+            SellerOrderSerializer,
+            OrderStatusUpdateSerializer,
+            VALID_ORDER_STATUS_TRANSITIONS,
+        )
+        from apps.marketplace.services import adjust_stock
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        from platform_core.audit.writer import record_audit_entry
+        from django.db.models import Q
+
+        is_uuid = False
+        try:
+            uuid.UUID(str(identifier))
+            is_uuid = True
+        except (ValueError, AttributeError):
+            is_uuid = False
+
+        user = request.user
+        query_filter = Q(id=identifier) if is_uuid else Q(order_number=identifier)
+
+        if not (user.is_staff or user.is_superuser):
+            org_ids = OrganisationMembership.objects.filter(
+                user=user,
+                is_active=True,
+                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+            ).values_list('organisation_id', flat=True)
+
+            query_filter &= (Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids))
+
+        order = Order.objects.filter(query_filter).select_related('buyer').prefetch_related(
+            'items__listing__seller', 'items__listing__organisation'
+        ).distinct().first()
+
+        if not order:
+            return Response(
+                {"error": "Order not found or you are not authorized to update this order."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = OrderStatusUpdateSerializer(data=request.data, context={'order': order})
+        serializer.is_valid(raise_exception=True)
+
+        new_status = serializer.validated_data['status']
+        old_status = order.status
+        notes = serializer.validated_data.get('notes', '')
+
+        if new_status == old_status:
             return Response(
                 {
                     "status": "success",
-                    "message": "Order created successfully with verified GST tax snapshot.",
-                    "order": OrderSerializer(order).data,
+                    "message": f"Order status is already '{new_status}'.",
+                    "order": SellerOrderSerializer(order, context={'request': request}).data,
                 },
-                status=status.HTTP_201_CREATED,
+                status=status.HTTP_200_OK,
             )
+
+        with transaction.atomic():
+            order.status = new_status
+            order.save(update_fields=['status', 'updated_at'])
+
+            # If cancelled, restock inventory items
+            if new_status == OrderStatusChoices.CANCELLED and old_status != OrderStatusChoices.CANCELLED:
+                for item in order.items.all():
+                    if item.listing:
+                        adjust_stock(
+                            listing=item.listing,
+                            delta=item.quantity,
+                            reason=StockMovementReasonChoices.RETURN,
+                            actor=request.user,
+                            note=f"Seller order cancellation for order {order.order_number}" + (f": {notes}" if notes else ""),
+                        )
+
+            record_audit_entry(
+                event_type="marketplace.order.status_updated",
+                action="marketplace:order.update_status",
+                resource_type="Order",
+                resource_id=str(order.id),
+                actor_id=request.user.id,
+                metadata={
+                    "order_number": order.order_number,
+                    "previous_status": old_status,
+                    "new_status": new_status,
+                    "notes": notes,
+                },
+            )
+
+        return Response(
+            {
+                "status": "success",
+                "message": f"Order {order.order_number} status updated to {new_status}.",
+                "order": SellerOrderSerializer(order, context={'request': request}).data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 # =====================================================================

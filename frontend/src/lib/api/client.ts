@@ -1276,10 +1276,25 @@ export const api = {
     },
 
     
-    async checkout(payload: OrderCheckoutPayload): Promise<{ status: string; message: string; order: Record<string, unknown> }> {
-      return apiRequest<{ status: string; message: string; order: Record<string, unknown> }>("/marketplace/orders/checkout/", {
+    async checkout(payload: OrderCheckoutPayload): Promise<{
+      status: string;
+      message: string;
+      replayed?: boolean;
+      order: PlatformOrder;
+    }> {
+      const customHeaders: Record<string, string> = {};
+      if (payload.idempotency_key) {
+        customHeaders["Idempotency-Key"] = payload.idempotency_key;
+      }
+      return apiRequest<{
+        status: string;
+        message: string;
+        replayed?: boolean;
+        order: PlatformOrder;
+      }>("/marketplace/orders/checkout/", {
         method: "POST",
         requiresAuth: true,
+        headers: customHeaders,
         body: JSON.stringify(payload),
       });
     },
@@ -1289,6 +1304,78 @@ export const api = {
         method: "POST",
         requiresAuth: true,
         body: JSON.stringify({ ...payload, preview_only: true }),
+      });
+    },
+
+    async listOrders(): Promise<PlatformOrder[]> {
+      const res = await apiRequest<PlatformOrder[] | { results: PlatformOrder[] }>("/marketplace/orders/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getOrder(identifier: string): Promise<PlatformOrder> {
+      return apiRequest<PlatformOrder>(`/marketplace/orders/${identifier}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async cancelBuyerOrder(identifier: string): Promise<{
+      status: string;
+      message: string;
+      order: PlatformOrder;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        order: PlatformOrder;
+      }>(`/marketplace/orders/${identifier}/cancel/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async listSellerOrders(status?: string, search?: string): Promise<SellerOrder[]> {
+      const query = new URLSearchParams();
+      if (status && status !== "ALL") query.set("status", status);
+      if (search) query.set("search", search);
+      const qs = query.toString();
+      const res = await apiRequest<SellerOrder[] | { results: SellerOrder[] }>(
+        `/marketplace/seller/orders/${qs ? `?${qs}` : ""}`,
+        {
+          method: "GET",
+          requiresAuth: true,
+        }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getSellerOrder(identifier: string): Promise<SellerOrder> {
+      return apiRequest<SellerOrder>(`/marketplace/seller/orders/${identifier}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async updateSellerOrderStatus(
+      identifier: string,
+      status: string,
+      notes?: string
+    ): Promise<{
+      status: string;
+      message: string;
+      order: SellerOrder;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        order: SellerOrder;
+      }>(`/marketplace/seller/orders/${identifier}/status/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify({ status, notes }),
       });
     },
 
@@ -1761,6 +1848,97 @@ export interface OrderCheckoutPayload {
   place_of_supply?: string;
   currency?: string;
   preview_only?: boolean;
+  expected_total_amount?: string | number;
+  idempotency_key?: string;
+  shipping_name?: string;
+  shipping_phone?: string;
+  shipping_address_line1?: string;
+  shipping_address_line2?: string;
+  shipping_city?: string;
+  shipping_state?: string;
+  shipping_postal_code?: string;
+  shipping_country?: string;
+}
+
+export interface PlatformOrderItem {
+  id: string;
+  listing?: string | null;
+  listing_id?: string | null;
+  seller_id?: string | null;
+  seller_name?: string | null;
+  item_type: string;
+  title: string;
+  brand: string;
+  mpn?: string;
+  hsn_code?: string;
+  gst_rate?: string | number;
+  is_tax_verified?: boolean;
+  unit_price: string | number;
+  quantity: number;
+  taxable_amount: string | number;
+  cgst_amount: string | number;
+  sgst_amount: string | number;
+  igst_amount: string | number;
+  tax_amount: string | number;
+  total_amount: string | number;
+}
+
+export interface PlatformOrder {
+  id: string;
+  order_number: string;
+  idempotency_key?: string | null;
+  buyer_email: string;
+  buyer_name: string;
+  status: string;
+  currency: string;
+  place_of_supply: string;
+  seller_state: string;
+  shipping_name: string;
+  shipping_phone: string;
+  shipping_address_line1: string;
+  shipping_address_line2?: string;
+  shipping_city: string;
+  shipping_state: string;
+  shipping_postal_code: string;
+  shipping_country: string;
+  subtotal_taxable_amount: string | number;
+  cgst_amount: string | number;
+  sgst_amount: string | number;
+  igst_amount: string | number;
+  total_tax_amount: string | number;
+  total_amount: string | number;
+  items: PlatformOrderItem[];
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface SellerOrder {
+  id: string;
+  order_number: string;
+  buyer_email: string;
+  buyer_name: string;
+  status: string;
+  currency: string;
+  place_of_supply: string;
+  seller_state: string;
+  shipping_name: string;
+  shipping_phone: string;
+  shipping_address_line1: string;
+  shipping_address_line2?: string;
+  shipping_city: string;
+  shipping_state: string;
+  shipping_postal_code: string;
+  shipping_country: string;
+  seller_subtotal_taxable_amount: string | number;
+  seller_cgst_amount: string | number;
+  seller_sgst_amount: string | number;
+  seller_igst_amount: string | number;
+  seller_total_tax_amount: string | number;
+  seller_total_amount: string | number;
+  seller_item_count: number;
+  items: PlatformOrderItem[];
+  created_at: string;
+  updated_at?: string;
 }
 
 export interface MarketplacePartListing {
