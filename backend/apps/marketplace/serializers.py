@@ -15,8 +15,30 @@ from apps.marketplace.models import (
     Order,
     OrderItem,
     OrderStatusChoices,
+    PaymentMethodChoices,
+    PaymentStatusChoices,
+    CODCollectionStatusChoices,
     VehicleEnquiry,
     VehicleEnquiryStatusChoices,
+    Shipment,
+    ShipmentItem,
+    TrackingEvent,
+    CarrierChoices,
+    ShipmentStatusChoices,
+    ReturnRequest,
+    ReturnRequestTypeChoices,
+    ReturnRequestStatusChoices,
+    ReturnReasonChoices,
+    Refund,
+    RefundStatusChoices,
+    RefundMethodChoices,
+    Dispute,
+    DisputeCategoryChoices,
+    DisputeStatusChoices,
+    DisputeResolutionChoices,
+    DisputePriorityChoices,
+    DisputeEvent,
+    DisputeEventTypeChoices,
 )
 from apps.catalogue.models import Part
 from apps.marketplace.services import change_price, _UNSET, get_seller_public_info
@@ -299,6 +321,7 @@ class SparePartListingSellerSerializer(serializers.ModelSerializer):
             'tax_breakdown',
             'price_flags',
             'currency',
+            'country_prices',
             'stock_quantity',
             'low_stock_threshold',
             'availability',
@@ -805,6 +828,7 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'total_price',
             'tax_breakdown',
             'currency',
+            'country_prices',
             'stock_quantity',
             'low_stock_threshold',
             'availability',
@@ -1154,10 +1178,86 @@ class OrderItemSerializer(serializers.ModelSerializer):
         return None
 
 
+class ShipmentItemSerializer(serializers.ModelSerializer):
+    order_item_id = serializers.UUIDField(source='order_item.id', read_only=True)
+    title = serializers.CharField(source='order_item.title', read_only=True)
+    brand = serializers.CharField(source='order_item.brand', read_only=True)
+    mpn = serializers.CharField(source='order_item.mpn', read_only=True)
+    hsn_code = serializers.CharField(source='order_item.hsn_code', read_only=True)
+
+    class Meta:
+        model = ShipmentItem
+        fields = [
+            'id',
+            'order_item_id',
+            'title',
+            'brand',
+            'mpn',
+            'hsn_code',
+            'quantity',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class TrackingEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TrackingEvent
+        fields = [
+            'id',
+            'status',
+            'location',
+            'description',
+            'event_timestamp',
+            'external_checkpoint_id',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class ShipmentSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    items = ShipmentItemSerializer(many=True, read_only=True)
+    tracking_events = TrackingEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Shipment
+        fields = [
+            'id',
+            'shipment_number',
+            'order_id',
+            'order_number',
+            'seller_id',
+            'seller_name',
+            'carrier',
+            'carrier_name',
+            'tracking_number',
+            'tracking_url',
+            'status',
+            'dispatched_at',
+            'delivered_at',
+            'estimated_delivery_at',
+            'delivery_notes',
+            'shipping_label_url',
+            'items',
+            'tracking_events',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
+    shipments = serializers.SerializerMethodField()
+    return_requests = serializers.SerializerMethodField()
+    refunds = serializers.SerializerMethodField()
+    disputes = serializers.SerializerMethodField()
     buyer_email = serializers.CharField(source='buyer.email', read_only=True)
     buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+    cod_collected_by_name = serializers.CharField(source='cod_collected_by.full_name', read_only=True, allow_null=True)
 
     class Meta:
         model = Order
@@ -1168,6 +1268,15 @@ class OrderSerializer(serializers.ModelSerializer):
             'buyer_email',
             'buyer_name',
             'status',
+            'payment_method',
+            'payment_status',
+            'payment_reference',
+            'paid_at',
+            'cod_collection_status',
+            'cod_collected_at',
+            'cod_collected_by',
+            'cod_collected_by_name',
+            'cod_collection_notes',
             'currency',
             'place_of_supply',
             'seller_state',
@@ -1186,10 +1295,26 @@ class OrderSerializer(serializers.ModelSerializer):
             'total_tax_amount',
             'total_amount',
             'items',
+            'shipments',
+            'return_requests',
+            'refunds',
+            'disputes',
             'created_at',
             'updated_at',
         ]
         read_only_fields = fields
+
+    def get_shipments(self, obj):
+        return ShipmentSerializer(obj.shipments.all(), many=True).data
+
+    def get_return_requests(self, obj):
+        return ReturnRequestSerializer(obj.return_requests.all(), many=True).data
+
+    def get_refunds(self, obj):
+        return RefundSerializer(obj.refunds.all(), many=True).data
+
+    def get_disputes(self, obj):
+        return DisputeSerializer(obj.disputes.all(), many=True).data
 
 
 class SellerOrderSerializer(serializers.ModelSerializer):
@@ -1199,6 +1324,10 @@ class SellerOrderSerializer(serializers.ModelSerializer):
     financial totals (subtotal, taxes, total) for the seller's items only.
     """
     items = serializers.SerializerMethodField()
+    shipments = serializers.SerializerMethodField()
+    return_requests = serializers.SerializerMethodField()
+    refunds = serializers.SerializerMethodField()
+    disputes = serializers.SerializerMethodField()
     buyer_email = serializers.CharField(source='buyer.email', read_only=True)
     buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
     seller_subtotal_taxable_amount = serializers.SerializerMethodField()
@@ -1217,6 +1346,11 @@ class SellerOrderSerializer(serializers.ModelSerializer):
             'buyer_email',
             'buyer_name',
             'status',
+            'payment_method',
+            'payment_status',
+            'payment_reference',
+            'paid_at',
+            'cod_collection_status',
             'currency',
             'place_of_supply',
             'seller_state',
@@ -1236,10 +1370,70 @@ class SellerOrderSerializer(serializers.ModelSerializer):
             'seller_total_amount',
             'seller_item_count',
             'items',
+            'shipments',
+            'return_requests',
+            'refunds',
+            'disputes',
             'created_at',
             'updated_at',
         ]
         read_only_fields = fields
+
+    def get_shipments(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return []
+        user = request.user
+        if user.is_staff or user.is_superuser:
+            return ShipmentSerializer(obj.shipments.all(), many=True).data
+
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        from django.db.models import Q
+        org_ids = set(OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True))
+
+        seller_shipments = obj.shipments.filter(
+            Q(seller=user) | Q(organisation_id__in=org_ids)
+        ).distinct()
+        return ShipmentSerializer(seller_shipments, many=True).data
+
+    def get_return_requests(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return []
+        user = request.user
+        if user.is_staff or user.is_superuser:
+            return ReturnRequestSerializer(obj.return_requests.all(), many=True).data
+
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        from django.db.models import Q
+        org_ids = set(OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True))
+
+        return ReturnRequestSerializer(
+            obj.return_requests.filter(
+                Q(seller=user) | Q(order_item__listing__organisation_id__in=org_ids)
+            ).distinct(),
+            many=True,
+        ).data
+
+    def get_refunds(self, obj):
+        return RefundSerializer(obj.refunds.all(), many=True).data
+
+    def get_disputes(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return []
+        user = request.user
+        if user.is_staff or user.is_superuser:
+            return DisputeSerializer(obj.disputes.all(), many=True).data
+        return DisputeSerializer(obj.disputes.filter(seller=user), many=True).data
 
     def _get_seller_items(self, order):
         if hasattr(order, '_cached_seller_items'):
@@ -1337,7 +1531,12 @@ class CheckoutItemPayloadSerializer(serializers.Serializer):
 class CheckoutPayloadSerializer(serializers.Serializer):
     items = CheckoutItemPayloadSerializer(many=True, required=True)
     place_of_supply = serializers.CharField(required=False, allow_blank=True, default='')
-    currency = serializers.CharField(required=False, default='INR')
+    currency = serializers.CharField(required=False, allow_blank=True, default='')
+    payment_method = serializers.ChoiceField(
+        choices=PaymentMethodChoices.choices,
+        default=PaymentMethodChoices.ONLINE,
+        required=False,
+    )
     shipping_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     shipping_phone = serializers.CharField(max_length=30, required=False, allow_blank=True, default='')
     shipping_address_line1 = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
@@ -1345,7 +1544,7 @@ class CheckoutPayloadSerializer(serializers.Serializer):
     shipping_city = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
     shipping_state = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
     shipping_postal_code = serializers.CharField(max_length=20, required=False, allow_blank=True, default='')
-    shipping_country = serializers.CharField(max_length=100, required=False, allow_blank=True, default='India')
+    shipping_country = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
     expected_total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -1354,6 +1553,50 @@ class CheckoutPayloadSerializer(serializers.Serializer):
         default=None,
     )
     idempotency_key = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+
+
+class PaymentVerifyPayloadSerializer(serializers.Serializer):
+    """Payload for verifying client payment confirmation."""
+    razorpay_order_id = serializers.CharField(required=False, allow_blank=True, default='')
+    razorpay_payment_id = serializers.CharField(required=False, allow_blank=True, default='')
+    razorpay_signature = serializers.CharField(required=False, allow_blank=True, default='')
+    payment_intent_id = serializers.CharField(required=False, allow_blank=True, default='')
+    stripe_payment_intent_id = serializers.CharField(required=False, allow_blank=True, default='')
+    client_secret = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        # Normalize Stripe payment intent ID across naming variants
+        pi = (attrs.get('payment_intent_id') or attrs.get('stripe_payment_intent_id') or '').strip()
+        cs = (attrs.get('client_secret') or '').strip()
+        if not pi and cs and '_secret_' in cs:
+            pi = cs.split('_secret_')[0].strip()
+        attrs['payment_intent_id'] = pi
+        attrs['stripe_payment_intent_id'] = pi
+        return attrs
+
+
+class CODCollectionUpdateSerializer(serializers.Serializer):
+    """Payload for updating COD collection status by authorized operations staff."""
+    cod_collection_status = serializers.ChoiceField(
+        choices=CODCollectionStatusChoices.choices,
+        required=False,
+    )
+    status = serializers.ChoiceField(
+        choices=CODCollectionStatusChoices.choices,
+        required=False,
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        status_val = attrs.get('cod_collection_status') or attrs.get('status')
+        if not status_val:
+            raise serializers.ValidationError({
+                "cod_collection_status": "This field is required."
+            })
+        attrs['cod_collection_status'] = status_val
+        attrs['status'] = status_val
+        return attrs
+
 
 
 class VehicleEnquiryCreateSerializer(serializers.ModelSerializer):
@@ -1477,3 +1720,340 @@ class VehicleEnquiryStatusUpdateSerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
     )
+
+
+# =============================================================================
+# Phase 5 Task 2: Logistics & Shipment Payload Serializers
+# =============================================================================
+
+class ShipmentItemAllocationSerializer(serializers.Serializer):
+    order_item_id = serializers.UUIDField(required=True)
+    quantity = serializers.IntegerField(min_value=1, default=1)
+
+
+class ShipmentCreatePayloadSerializer(serializers.Serializer):
+    carrier = serializers.ChoiceField(
+        choices=CarrierChoices.choices,
+        default=CarrierChoices.OTHER,
+        required=False,
+    )
+    carrier_name = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    tracking_number = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    tracking_url = serializers.URLField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    estimated_delivery_at = serializers.DateTimeField(
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+    delivery_notes = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    dispatch_immediately = serializers.BooleanField(
+        default=False,
+        required=False,
+    )
+    items = ShipmentItemAllocationSerializer(
+        many=True,
+        required=True,
+    )
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("At least one item must be included in the shipment.")
+        return value
+
+
+class ShipmentStatusUpdatePayloadSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=ShipmentStatusChoices.choices,
+        required=True,
+    )
+    location = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    description = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    carrier_reference = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+
+
+class TrackingEventCreatePayloadSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=ShipmentStatusChoices.choices,
+        required=False,
+        default=None,
+    )
+    location = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    description = serializers.CharField(
+        required=True,
+    )
+    event_timestamp = serializers.DateTimeField(
+        required=False,
+        default=None,
+        allow_null=True,
+    )
+    external_checkpoint_id = serializers.CharField(
+        max_length=150,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+
+
+# =============================================================================
+# Phase 5 Task 3: Returns, Refunds & Dispute Management Serializers
+# =============================================================================
+
+class ReturnRequestSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    order_item_id = serializers.UUIDField(source='order_item.id', read_only=True, allow_null=True)
+    item_title = serializers.CharField(source='order_item.title', read_only=True, default='')
+    item_brand = serializers.CharField(source='order_item.brand', read_only=True, default='')
+    buyer_email = serializers.CharField(source='buyer.email', read_only=True)
+    seller_email = serializers.CharField(source='seller.email', read_only=True)
+    reviewed_by_email = serializers.CharField(source='reviewed_by.email', read_only=True, allow_null=True)
+
+    class Meta:
+        model = ReturnRequest
+        fields = [
+            'id',
+            'request_number',
+            'order_id',
+            'order_number',
+            'order_item_id',
+            'item_title',
+            'item_brand',
+            'buyer_id',
+            'buyer_email',
+            'seller_id',
+            'seller_email',
+            'request_type',
+            'status',
+            'reason',
+            'description',
+            'evidence_urls',
+            'requested_quantity',
+            'refund_amount',
+            'seller_notes',
+            'rejection_reason',
+            'reviewed_by_email',
+            'reviewed_at',
+            'completed_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class ReturnRequestCreatePayloadSerializer(serializers.Serializer):
+    order_item_id = serializers.UUIDField(required=False, allow_null=True, default=None)
+    request_type = serializers.ChoiceField(
+        choices=ReturnRequestTypeChoices.choices,
+        default=ReturnRequestTypeChoices.RETURN,
+    )
+    reason = serializers.ChoiceField(
+        choices=ReturnReasonChoices.choices,
+        default=ReturnReasonChoices.OTHER,
+    )
+    description = serializers.CharField(required=True, min_length=5)
+    evidence_urls = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        default=list,
+    )
+    requested_quantity = serializers.IntegerField(min_value=1, default=1)
+
+
+class ReturnRequestReviewPayloadSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['APPROVE', 'REJECT'])
+    seller_notes = serializers.CharField(required=False, allow_blank=True, default='')
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class RefundSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    return_request_id = serializers.UUIDField(source='return_request.id', read_only=True, allow_null=True)
+    return_request_number = serializers.CharField(source='return_request.request_number', read_only=True, default='')
+    dispute_id = serializers.UUIDField(source='dispute.id', read_only=True, allow_null=True)
+    dispute_number = serializers.CharField(source='dispute.dispute_number', read_only=True, default='')
+    created_by_email = serializers.CharField(source='created_by.email', read_only=True, allow_null=True)
+    approved_by_email = serializers.CharField(source='approved_by.email', read_only=True, allow_null=True)
+
+    class Meta:
+        model = Refund
+        fields = [
+            'id',
+            'refund_number',
+            'order_id',
+            'order_number',
+            'return_request_id',
+            'return_request_number',
+            'dispute_id',
+            'dispute_number',
+            'amount',
+            'currency',
+            'status',
+            'refund_method',
+            'gateway_provider',
+            'gateway_refund_id',
+            'reason',
+            'failure_reason',
+            'notes',
+            'processed_at',
+            'created_by_email',
+            'approved_by_email',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class RefundCreatePayloadSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    reason = serializers.CharField(required=True, min_length=3)
+    refund_method = serializers.ChoiceField(
+        choices=RefundMethodChoices.choices,
+        required=False,
+        default=None,
+        allow_null=True,
+    )
+    return_request_id = serializers.UUIDField(required=False, allow_null=True, default=None)
+    dispute_id = serializers.UUIDField(required=False, allow_null=True, default=None)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+    auto_process = serializers.BooleanField(required=False, default=False)
+
+
+class DisputeEventSerializer(serializers.ModelSerializer):
+    actor_id = serializers.UUIDField(source='actor.id', read_only=True, allow_null=True)
+    actor_email = serializers.CharField(source='actor.email', read_only=True, default='System')
+    actor_role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DisputeEvent
+        fields = [
+            'id',
+            'actor_id',
+            'actor_email',
+            'actor_role',
+            'event_type',
+            'message',
+            'attachments',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_actor_role(self, obj):
+        if not obj.actor:
+            return 'SYSTEM'
+        if obj.actor.is_staff or obj.actor.is_superuser:
+            return 'STAFF'
+        if obj.actor_id == obj.dispute.buyer_id:
+            return 'BUYER'
+        if obj.actor_id == obj.dispute.seller_id:
+            return 'SELLER'
+        return 'USER'
+
+
+class DisputeSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    buyer_email = serializers.CharField(source='buyer.email', read_only=True)
+    seller_email = serializers.CharField(source='seller.email', read_only=True)
+    resolved_by_email = serializers.CharField(source='resolved_by.email', read_only=True, allow_null=True)
+    events = DisputeEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Dispute
+        fields = [
+            'id',
+            'dispute_number',
+            'order_id',
+            'order_number',
+            'buyer_id',
+            'buyer_email',
+            'seller_id',
+            'seller_email',
+            'category',
+            'status',
+            'priority',
+            'description',
+            'evidence_urls',
+            'resolution',
+            'resolution_notes',
+            'resolved_by_email',
+            'resolved_at',
+            'events',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class DisputeCreatePayloadSerializer(serializers.Serializer):
+    category = serializers.ChoiceField(choices=DisputeCategoryChoices.choices)
+    priority = serializers.ChoiceField(
+        choices=DisputePriorityChoices.choices,
+        required=False,
+        default=DisputePriorityChoices.MEDIUM,
+    )
+    description = serializers.CharField(required=True, min_length=10)
+    evidence_urls = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        default=list,
+    )
+
+
+class DisputeStatusUpdatePayloadSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=DisputeStatusChoices.choices)
+    resolution = serializers.ChoiceField(
+        choices=DisputeResolutionChoices.choices,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    resolution_notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class DisputeMessagePayloadSerializer(serializers.Serializer):
+    message = serializers.CharField(required=True, min_length=1)
+    attachments = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        default=list,
+    )
+
+

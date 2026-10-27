@@ -53,6 +53,12 @@ export interface CartValidationResult {
   } | null;
 }
 
+export interface ValidateInventoryOptions {
+  country?: string;
+  currency?: string;
+  place_of_supply?: string;
+}
+
 interface CartContextType {
   items: CartItem[];
   totalUnits: number;
@@ -76,7 +82,7 @@ interface CartContextType {
   clearCart: () => void;
   isItemInCart: (listingId: string) => boolean;
   getItemQuantity: (listingId: string) => number;
-  validateInventory: () => Promise<CartValidationResult>;
+  validateInventory: (options?: ValidateInventoryOptions) => Promise<CartValidationResult>;
   isValidating: boolean;
   lastValidationResult: CartValidationResult | null;
 }
@@ -404,112 +410,127 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   }, [items]);
 
   // Live Inventory & Price Validation against Backend
-  const validateInventory = useCallback(async (): Promise<CartValidationResult> => {
-    if (items.length === 0) {
-      const emptyResult = { isValid: true, issues: [], calculatedSummary: null };
-      setLastValidationResult(emptyResult);
-      return emptyResult;
-    }
+  const validateInventory = useCallback(
+    async (options?: ValidateInventoryOptions): Promise<CartValidationResult> => {
+      if (items.length === 0) {
+        const emptyResult = { isValid: true, issues: [], calculatedSummary: null };
+        setLastValidationResult(emptyResult);
+        return emptyResult;
+      }
 
-    setIsValidating(true);
-    const issues: string[] = [];
+      setIsValidating(true);
+      const issues: string[] = [];
 
-    // Separate spare parts and vehicle items
-    const partItems = items.filter((i) => i.listing_type !== "vehicle");
-    const vehicleItems = items.filter((i) => i.listing_type === "vehicle");
+      // Separate spare parts and vehicle items
+      const partItems = items.filter((i) => i.listing_type !== "vehicle");
+      const vehicleItems = items.filter((i) => i.listing_type === "vehicle");
 
-    if (vehicleItems.length > 0) {
-      issues.push(
-        "Vehicles represent individual physical assets and require title transfer, inspection, and direct seller consultation. Please use the Contact Seller enquiry flow; automated checkout is reserved for spare parts."
-      );
-    }
-
-    // First pass: local stock validation check
-    for (const item of items) {
-      if (item.quantity > item.stock_quantity) {
+      if (vehicleItems.length > 0) {
         issues.push(
-          `"${item.title}" quantity (${item.quantity}) exceeds available stock (${item.stock_quantity}).`
+          "Vehicles represent individual physical assets and require title transfer, inspection, and direct seller consultation. Please use the Contact Seller enquiry flow; automated checkout is reserved for spare parts."
         );
       }
-    }
 
-    // If there are no spare parts to calculate, return result with vehicle enquiry advisory
-    if (partItems.length === 0) {
-      setIsValidating(false);
-      const vehicleOnlyResult: CartValidationResult = {
-        isValid: false,
-        issues,
-        calculatedSummary: null,
-      };
-      setLastValidationResult(vehicleOnlyResult);
-      return vehicleOnlyResult;
-    }
-
-    try {
-      // Call official backend calculation endpoint: POST /api/v1/marketplace/orders/calculate/
-      const payload = {
-        items: partItems.map((i) => ({
-          listing_id: i.listing_id,
-          quantity: i.quantity,
-        })),
-        currency: currency,
-      };
-
-      const res = await api.marketplace.calculateCheckout(payload);
-
-      const summary = {
-        subtotal_taxable_amount: String(res.subtotal_taxable_amount || "0.00"),
-        cgst_amount: String(res.cgst_amount || "0.00"),
-        sgst_amount: String(res.sgst_amount || "0.00"),
-        igst_amount: String(res.igst_amount || "0.00"),
-        total_tax_amount: String(res.total_tax_amount || "0.00"),
-        total_amount: String(res.total_amount || "0.00"),
-        currency: String(res.currency || currency),
-      };
-
-      const result: CartValidationResult = {
-        isValid: issues.length === 0,
-        issues,
-        calculatedSummary: summary,
-      };
-
-      setLastValidationResult(result);
-      return result;
-    } catch (err: unknown) {
-      let errorMessage = "Unable to validate cart with backend.";
-      if (err instanceof ApiError) {
-        errorMessage = err.message;
-      } else if (err instanceof Error) {
-        errorMessage = err.message;
+      // First pass: local stock validation check
+      for (const item of items) {
+        if (item.quantity > item.stock_quantity) {
+          issues.push(
+            `"${item.title}" quantity (${item.quantity}) exceeds available stock (${item.stock_quantity}).`
+          );
+        }
       }
 
-      // If user is unauthenticated, calculation endpoint returns 401
-      if (err instanceof ApiError && err.code === 401) {
-        // Fall back to local validation for guest buyers
+      // If there are no spare parts to calculate, return result with vehicle enquiry advisory
+      if (partItems.length === 0) {
+        setIsValidating(false);
+        const vehicleOnlyResult: CartValidationResult = {
+          isValid: false,
+          issues,
+          calculatedSummary: null,
+        };
+        setLastValidationResult(vehicleOnlyResult);
+        return vehicleOnlyResult;
+      }
+
+      try {
+        const targetCountry = options?.country || "India";
+        const isUK =
+          targetCountry.toLowerCase().includes("kingdom") ||
+          targetCountry.toLowerCase() === "uk" ||
+          targetCountry.toLowerCase() === "gb";
+        const targetCurrency =
+          options?.currency || (isUK ? "GBP" : "INR");
+        const targetSupply =
+          options?.place_of_supply || (isUK ? "London" : "MH");
+
+        // Call official backend calculation endpoint: POST /api/v1/marketplace/orders/calculate/
+        const payload = {
+          items: partItems.map((i) => ({
+            listing_id: i.listing_id,
+            quantity: i.quantity,
+          })),
+          currency: targetCurrency,
+          shipping_country: targetCountry,
+          place_of_supply: targetSupply,
+        };
+
+        const res = await api.marketplace.calculateCheckout(payload);
+
+        const summary = {
+          subtotal_taxable_amount: String(res.subtotal_taxable_amount || "0.00"),
+          cgst_amount: String(res.cgst_amount || "0.00"),
+          sgst_amount: String(res.sgst_amount || "0.00"),
+          igst_amount: String(res.igst_amount || "0.00"),
+          total_tax_amount: String(res.total_tax_amount || "0.00"),
+          total_amount: String(res.total_amount || "0.00"),
+          currency: String(res.currency || targetCurrency),
+        };
+
         const result: CartValidationResult = {
           isValid: issues.length === 0,
-          issues: [
-            ...issues,
-            "Please sign in to compute verified statutory taxes and place your order.",
-          ],
+          issues,
+          calculatedSummary: summary,
+        };
+
+        setLastValidationResult(result);
+        return result;
+      } catch (err: unknown) {
+        let errorMessage = "Unable to validate cart with backend.";
+        if (err instanceof ApiError) {
+          errorMessage = err.message;
+        } else if (err instanceof Error) {
+          errorMessage = err.message;
+        }
+
+        // If user is unauthenticated, calculation endpoint returns 401
+        if (err instanceof ApiError && err.code === 401) {
+          // Fall back to local validation for guest buyers
+          const result: CartValidationResult = {
+            isValid: issues.length === 0,
+            issues: [
+              ...issues,
+              "Please sign in to compute verified statutory taxes and place your order.",
+            ],
+            calculatedSummary: null,
+          };
+          setLastValidationResult(result);
+          return result;
+        }
+
+        issues.push(errorMessage);
+        const result: CartValidationResult = {
+          isValid: false,
+          issues,
           calculatedSummary: null,
         };
         setLastValidationResult(result);
         return result;
+      } finally {
+        setIsValidating(false);
       }
-
-      issues.push(errorMessage);
-      const result: CartValidationResult = {
-        isValid: false,
-        issues,
-        calculatedSummary: null,
-      };
-      setLastValidationResult(result);
-      return result;
-    } finally {
-      setIsValidating(false);
-    }
-  }, [items, currency]);
+    },
+    [items]
+  );
 
   return (
     <CartContext.Provider

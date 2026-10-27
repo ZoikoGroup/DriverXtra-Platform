@@ -18,6 +18,7 @@ import {
   MessageSquare,
   Package,
   Boxes,
+  Scale,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -53,6 +54,7 @@ export default function Sidebar({
   if (isAdmin) {
     roleNavItems = [
       { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
+      { id: "admin_disputes_refunds", label: "Disputes & Refunds", icon: Scale, badge: "Cases" },
       { id: "admin_staff_management", label: "Staff Invitations & Roles", icon: UserPlus, badge: "Admin" },
       { id: "seller_orders", label: "Customer Orders", icon: Boxes, badge: "Orders" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },

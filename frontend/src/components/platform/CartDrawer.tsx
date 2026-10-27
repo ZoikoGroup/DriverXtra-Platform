@@ -28,9 +28,18 @@ import {
   Truck,
   Building,
   Package,
+  CreditCard,
+  Banknote,
 } from "lucide-react";
 import { useCart, CartItem } from "@/context/CartContext";
-import { api, ApiError, resolveMediaUrl, PlatformOrder } from "@/lib/api/client";
+import {
+  api,
+  ApiError,
+  resolveMediaUrl,
+  PlatformOrder,
+  PaymentMethodOption,
+  PaymentVerifyPayload,
+} from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 
 interface CartDrawerProps {
@@ -106,6 +115,19 @@ const INDIAN_STATES = [
   { code: "JH", name: "Jharkhand (JH)" },
 ];
 
+const UK_REGIONS = [
+  { code: "London", name: "Greater London" },
+  { code: "South East", name: "South East England" },
+  { code: "North West", name: "North West England" },
+  { code: "West Midlands", name: "West Midlands" },
+  { code: "Yorkshire", name: "Yorkshire and the Humber" },
+  { code: "Scotland", name: "Scotland" },
+  { code: "Wales", name: "Wales" },
+  { code: "Northern Ireland", name: "Northern Ireland" },
+  { code: "East Midlands", name: "East Midlands" },
+  { code: "South West", name: "South West England" },
+];
+
 export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerProps) {
   const { user } = useAuth();
   const {
@@ -155,6 +177,75 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
     shipping_country: "India",
   });
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  // Payment Method & Status
+  const [paymentMethod, setPaymentMethod] = useState<"ONLINE" | "COD">("ONLINE");
+  const [availableMethods, setAvailableMethods] = useState<PaymentMethodOption[]>([]);
+  const [isVerifyingPayment, setIsVerifyingPayment] = useState(false);
+  const [paymentVerifiedSuccess, setPaymentVerifiedSuccess] = useState<string | null>(null);
+
+  const getCurrencyForCountry = (country: string): "GBP" | "INR" => {
+    const norm = (country || "").trim().toLowerCase();
+    if (norm.includes("kingdom") || norm === "gb" || norm === "uk") {
+      return "GBP";
+    }
+    return "INR";
+  };
+
+  const getValidRegionForCountry = (country: string, currentRegion?: string): string => {
+    const isUK = getCurrencyForCountry(country) === "GBP";
+    if (isUK) {
+      const exists = UK_REGIONS.some((r) => r.code === currentRegion);
+      return exists ? (currentRegion as string) : "London";
+    } else {
+      const exists = INDIAN_STATES.some((s) => s.code === currentRegion);
+      return exists ? (currentRegion as string) : "MH";
+    }
+  };
+
+  const handleCountryChange = (newCountry: string) => {
+    const validRegion = getValidRegionForCountry(newCountry, shippingForm.shipping_state);
+    const newCurrency = getCurrencyForCountry(newCountry);
+    setShippingForm((prev) => ({
+      ...prev,
+      shipping_country: newCountry,
+      shipping_state: validRegion,
+      shipping_postal_code: "",
+    }));
+    setFieldErrors({});
+    setCalculation(null);
+    setAvailableMethods([]);
+    setCheckoutError(null);
+    setPriceChangeAlert(null);
+    if (step === "review") {
+      setStep("shipping");
+    }
+    // Refresh authoritative prices and stock for the new destination country
+    validateInventory({
+      country: newCountry,
+      currency: newCurrency,
+      place_of_supply: validRegion,
+    });
+  };
+
+  const handleSimulatePayment = async () => {
+    if (!confirmedOrder || isVerifyingPayment) return;
+    setIsVerifyingPayment(true);
+    setCheckoutError(null);
+    try {
+      const res = await api.marketplace.simulateTestPayment(confirmedOrder.id);
+      if (res.status === "success" && res.order) {
+        setConfirmedOrder(res.order);
+        setPaymentVerifiedSuccess("Online payment verified and confirmed via provider sandbox!");
+      } else {
+        setCheckoutError(res.error || "Payment verification failed.");
+      }
+    } catch (err: unknown) {
+      setCheckoutError(err instanceof Error ? err.message : "Payment verification failed.");
+    } finally {
+      setIsVerifyingPayment(false);
+    }
+  };
 
   const drawerRef = useRef<HTMLDivElement>(null);
 
@@ -251,8 +342,13 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       return;
     }
 
-    // Verify stock
-    const valResult = await validateInventory();
+    // Verify stock and fetch authoritative totals for selected destination
+    const destCurrency = getCurrencyForCountry(shippingForm.shipping_country);
+    const valResult = await validateInventory({
+      country: shippingForm.shipping_country,
+      currency: destCurrency,
+      place_of_supply: shippingForm.shipping_state,
+    });
     if (!valResult.isValid) {
       return;
     }
@@ -295,6 +391,8 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       return;
     }
 
+    const destCurrency = getCurrencyForCountry(shippingForm.shipping_country);
+
     setIsCalculating(true);
     try {
       const payload = {
@@ -311,7 +409,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         shipping_state: shippingForm.shipping_state.trim(),
         shipping_postal_code: shippingForm.shipping_postal_code.trim(),
         shipping_country: shippingForm.shipping_country.trim() || "India",
-        currency: currency,
+        currency: destCurrency,
       };
 
       const res = await api.marketplace.calculateCheckout(payload);
@@ -327,13 +425,22 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         igst_amount: String(res.igst_amount || "0.00"),
         total_tax_amount: String(res.total_tax_amount || "0.00"),
         total_amount: String(res.total_amount || "0.00"),
-        currency: String(res.currency || currency),
+        currency: String(res.currency || destCurrency),
         place_of_supply: String(res.place_of_supply || shippingForm.shipping_state),
         seller_state: String(res.seller_state || ""),
         items: itemsList,
       };
 
       setCalculation(calcData);
+      if (Array.isArray(res.available_payment_methods)) {
+        const methods = res.available_payment_methods as PaymentMethodOption[];
+        setAvailableMethods(methods);
+        const cod = methods.find((m) => m.code === "COD");
+        if (cod && !cod.is_available && paymentMethod === "COD") {
+          setPaymentMethod("ONLINE");
+        }
+      }
+
       // Ensure idempotency key is initialized for this checkout attempt
       if (!idempotencyKey) {
         setIdempotencyKey(generateNewIdempotencyKey());
@@ -355,6 +462,14 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
   // Step 3 -> Step 4: Final Submit Order
   const handleSubmitOrder = async () => {
     if (!calculation || isSubmitting) return;
+
+    const destCurrency = getCurrencyForCountry(shippingForm.shipping_country);
+    if (calculation.currency !== destCurrency) {
+      setCheckoutError(
+        `Calculation currency (${calculation.currency}) does not match destination country currency (${destCurrency}). Please review taxes again.`
+      );
+      return;
+    }
 
     setIsSubmitting(true);
     setCheckoutError(null);
@@ -379,7 +494,8 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         shipping_state: shippingForm.shipping_state.trim(),
         shipping_postal_code: shippingForm.shipping_postal_code.trim(),
         shipping_country: shippingForm.shipping_country.trim() || "India",
-        currency: calculation.currency,
+        currency: destCurrency,
+        payment_method: paymentMethod,
         expected_total_amount: calculation.total_amount,
         idempotency_key: activeIdempotencyKey,
       };
@@ -651,6 +767,47 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
           </div>
         )}
 
+        {/* Destination Country Quick-Switch Banner */}
+        {step !== "confirmed" && (
+          <div className="bg-slate-100/90 border-b border-slate-200 px-4 py-2.5 flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <MapPin className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              <span className="text-slate-600 font-medium">Deliver to:</span>
+              <span className="font-black text-slate-900 truncate">
+                {shippingForm.shipping_country === "United Kingdom"
+                  ? "United Kingdom (GBP £)"
+                  : "India (INR ₹)"}
+              </span>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                type="button"
+                id="cart-country-india-btn"
+                onClick={() => handleCountryChange("India")}
+                className={`px-2 py-1 text-[11px] font-bold rounded-lg border transition-all ${
+                  shippingForm.shipping_country === "India"
+                    ? "bg-amber-500 text-slate-950 border-amber-600 shadow-xs"
+                    : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                }`}
+              >
+                🇮🇳 India
+              </button>
+              <button
+                type="button"
+                id="cart-country-uk-btn"
+                onClick={() => handleCountryChange("United Kingdom")}
+                className={`px-2 py-1 text-[11px] font-bold rounded-lg border transition-all ${
+                  shippingForm.shipping_country === "United Kingdom"
+                    ? "bg-amber-500 text-slate-950 border-amber-600 shadow-xs"
+                    : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                }`}
+              >
+                🇬🇧 UK
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ========================================================= */}
         {/* BODY CONTENT: STEP BY STEP                                */}
         {/* ========================================================= */}
@@ -887,37 +1044,68 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                     )}
                   </div>
 
-                  {/* State / Place of Supply */}
+                  {/* Country Selection */}
                   <div className="space-y-1">
                     <label className="font-bold text-slate-700 flex items-center justify-between">
-                      <span>State (Place of Supply) *</span>
-                      <span className="text-[10px] text-amber-600 font-semibold">Statutory GST</span>
+                      <span>Destination Country *</span>
+                      <span className="text-[10px] text-amber-600 font-semibold">
+                        {shippingForm.shipping_country === "United Kingdom" ? "UK (GBP £)" : "India (INR ₹)"}
+                      </span>
                     </label>
                     <select
-                      id="shipping-state-select"
-                      value={shippingForm.shipping_state}
-                      onChange={(e) =>
-                        setShippingForm((p) => ({ ...p, shipping_state: e.target.value }))
-                      }
+                      id="shipping-country-select"
+                      value={shippingForm.shipping_country}
+                      onChange={(e) => handleCountryChange(e.target.value)}
                       className="w-full px-3 py-2 bg-slate-50 rounded-xl border border-slate-200 focus:outline-hidden focus:border-amber-500 text-slate-900 font-medium"
                     >
-                      {INDIAN_STATES.map((st) => (
-                        <option key={st.code} value={st.code}>
-                          {st.name}
-                        </option>
-                      ))}
+                      <option value="India">🇮🇳 India (INR - ₹)</option>
+                      <option value="United Kingdom">🇬🇧 United Kingdom (GBP - £)</option>
                     </select>
                   </div>
 
-                  {/* Country */}
+                  {/* State / Place of Supply / Region */}
                   <div className="space-y-1">
-                    <label className="font-bold text-slate-700">Country</label>
-                    <input
-                      type="text"
-                      disabled
-                      value={shippingForm.shipping_country}
-                      className="w-full px-3 py-2 bg-slate-100 rounded-xl border border-slate-200 text-slate-600 font-medium cursor-not-allowed"
-                    />
+                    <label className="font-bold text-slate-700 flex items-center justify-between">
+                      <span>
+                        {shippingForm.shipping_country === "United Kingdom"
+                          ? "County / Region *"
+                          : "State (Place of Supply) *"}
+                      </span>
+                      <span className="text-[10px] text-amber-600 font-semibold">
+                        {shippingForm.shipping_country === "United Kingdom" ? "UK Delivery" : "Statutory GST"}
+                      </span>
+                    </label>
+                    {shippingForm.shipping_country === "United Kingdom" ? (
+                      <select
+                        id="shipping-state-select"
+                        value={shippingForm.shipping_state}
+                        onChange={(e) =>
+                          setShippingForm((p) => ({ ...p, shipping_state: e.target.value }))
+                        }
+                        className="w-full px-3 py-2 bg-slate-50 rounded-xl border border-slate-200 focus:outline-hidden focus:border-amber-500 text-slate-900 font-medium"
+                      >
+                        {UK_REGIONS.map((reg) => (
+                          <option key={reg.code} value={reg.code}>
+                            {reg.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <select
+                        id="shipping-state-select"
+                        value={shippingForm.shipping_state}
+                        onChange={(e) =>
+                          setShippingForm((p) => ({ ...p, shipping_state: e.target.value }))
+                        }
+                        className="w-full px-3 py-2 bg-slate-50 rounded-xl border border-slate-200 focus:outline-hidden focus:border-amber-500 text-slate-900 font-medium"
+                      >
+                        {INDIAN_STATES.map((st) => (
+                          <option key={st.code} value={st.code}>
+                            {st.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1064,11 +1252,116 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                 <div className="flex justify-between items-baseline pt-2 border-t border-slate-800">
                   <div>
                     <span className="text-sm font-black text-white block">Final Order Total</span>
-                    <span className="text-[10px] text-slate-400">Inclusive of all statutory taxes</span>
+                    <span className="text-[10px] text-slate-400">
+                      {calculation.currency === "GBP" ? "Inclusive of applicable UK VAT" : "Inclusive of all statutory GST"}
+                    </span>
                   </div>
                   <span className="text-xl font-black text-amber-400 font-mono">
                     {calculation.currency} {Number(calculation.total_amount).toFixed(2)}
                   </span>
+                </div>
+              </div>
+
+              {/* Payment Method Selection Card */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-xs text-left">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <span className="text-xs font-black text-slate-900 flex items-center gap-1.5">
+                    <CreditCard className="w-4 h-4 text-amber-600" />
+                    <span>Select Payment Method</span>
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-semibold">
+                    {shippingForm.shipping_country} ({calculation.currency})
+                  </span>
+                </div>
+
+                <div className="space-y-2">
+                  {/* Online Payment */}
+                  <label
+                    className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                      paymentMethod === "ONLINE"
+                        ? "border-amber-500 bg-amber-50/50 shadow-xs ring-1 ring-amber-500"
+                        : "border-slate-200 hover:border-slate-300 bg-white"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="checkoutPaymentMethod"
+                      value="ONLINE"
+                      checked={paymentMethod === "ONLINE"}
+                      onChange={() => setPaymentMethod("ONLINE")}
+                      className="mt-0.5 text-amber-600 focus:ring-amber-500"
+                    />
+                    <div className="flex-1 space-y-0.5 text-left">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                          <CreditCard className="w-3.5 h-3.5 text-slate-600" />
+                          {calculation.currency === "GBP"
+                            ? "Online Card Payment (Stripe)"
+                            : "Online Payment (Razorpay / UPI / NetBanking)"}
+                        </span>
+                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          Instant
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        {calculation.currency === "GBP"
+                          ? "Secure card checkout via Stripe supporting UK debit/credit cards, Apple Pay, and Google Pay."
+                          : "Instant checkout via Razorpay supporting UPI, RuPay, Indian cards, and NetBanking."}
+                      </p>
+                    </div>
+                  </label>
+
+                  {/* Cash on Delivery (COD) */}
+                  {(() => {
+                    const codOption = availableMethods.find((m) => m.code === "COD");
+                    const isAvailable = codOption ? codOption.is_available : true;
+                    const reason = codOption?.reason;
+
+                    return (
+                      <label
+                        className={`flex items-start gap-3 p-3 rounded-xl border transition-all ${
+                          !isAvailable
+                            ? "opacity-60 bg-slate-50 border-slate-200 cursor-not-allowed"
+                            : paymentMethod === "COD"
+                            ? "border-amber-500 bg-amber-50/50 shadow-xs ring-1 ring-amber-500 cursor-pointer"
+                            : "border-slate-200 hover:border-slate-300 bg-white cursor-pointer"
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="checkoutPaymentMethod"
+                          value="COD"
+                          disabled={!isAvailable}
+                          checked={paymentMethod === "COD"}
+                          onChange={() => isAvailable && setPaymentMethod("COD")}
+                          className="mt-0.5 text-amber-600 focus:ring-amber-500 disabled:cursor-not-allowed"
+                        />
+                        <div className="flex-1 space-y-0.5 text-left">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                              <Banknote className="w-3.5 h-3.5 text-slate-600" />
+                              Cash on Delivery (COD)
+                            </span>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                isAvailable
+                                  ? "text-blue-700 bg-blue-100"
+                                  : "text-rose-700 bg-rose-100"
+                              }`}
+                            >
+                              {isAvailable ? "Eligible" : "Unavailable"}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500">
+                            Pay upon physical delivery to the courier agent. Audited by operations staff.
+                          </p>
+                          {!isAvailable && reason && (
+                            <p className="text-[10px] text-rose-600 font-semibold pt-0.5">{reason}</p>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -1083,10 +1376,10 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                 </div>
                 <div className="space-y-1 max-w-sm">
                   <h4 className="text-xl font-black text-slate-900 tracking-tight">
-                    Order Received Successfully!
+                    Order Placed Successfully!
                   </h4>
                   <p className="text-xs text-slate-500">
-                    Your order has been recorded with the DriverXtra backend. An immutable audit record has been generated.
+                    Your order has been recorded with DriverXtra. Authoritative inventory and transaction records have been generated.
                   </p>
                 </div>
               </div>
@@ -1138,17 +1431,97 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
 
                 {/* Totals Breakdown */}
                 <div className="pt-2 border-t border-slate-100 flex justify-between items-baseline">
-                  <span className="text-xs font-bold text-slate-500">Total Charged:</span>
+                  <span className="text-xs font-bold text-slate-500">Total Order Amount:</span>
                   <span className="text-base font-black text-slate-950 font-mono">
                     {confirmedOrder.currency} {Number(confirmedOrder.total_amount).toFixed(2)}
                   </span>
                 </div>
               </div>
 
-              {/* Status Note */}
-              <div className="p-3 bg-slate-100 rounded-xl text-[11px] text-slate-600 text-left border border-slate-200">
-                <span className="font-bold text-slate-800 block">Payment & Fulfillment Status</span>
-                Order is registered with initial status <strong className="font-mono text-slate-900">PENDING_CONFIRMATION</strong>. As payment gateway integration is slated for Phase 5, payment has not been marked as paid.
+              {/* Payment & Collection Card */}
+              <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 text-left space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-700">Payment Method:</span>
+                  <span className="text-xs font-black text-slate-900 flex items-center gap-1">
+                    {confirmedOrder.payment_method === "COD" ? (
+                      <>
+                        <Banknote className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Cash on Delivery (COD)</span>
+                      </>
+                    ) : (
+                      <>
+                        <CreditCard className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>
+                          {confirmedOrder.currency === "GBP" ? "Online Card (Stripe)" : "Online (Razorpay)"}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-700">Payment Status:</span>
+                  <span
+                    className={`text-[11px] font-black px-2.5 py-0.5 rounded-full border ${
+                      confirmedOrder.payment_status === "PAID"
+                        ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+                        : confirmedOrder.payment_method === "COD"
+                        ? "bg-blue-100 text-blue-800 border-blue-300"
+                        : "bg-amber-100 text-amber-800 border-amber-300"
+                    }`}
+                  >
+                    {confirmedOrder.payment_status === "PAID"
+                      ? "PAID"
+                      : confirmedOrder.payment_method === "COD"
+                      ? "Awaiting Delivery Collection"
+                      : "Payment Pending"}
+                  </span>
+                </div>
+
+                {confirmedOrder.payment_reference && (
+                  <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-200">
+                    <span className="text-slate-500">Provider Reference:</span>
+                    <span className="font-mono text-slate-800 font-semibold">{confirmedOrder.payment_reference}</span>
+                  </div>
+                )}
+
+                {confirmedOrder.payment_method === "COD" && (
+                  <p className="text-[11px] text-slate-600 bg-white p-2.5 rounded-xl border border-slate-200">
+                    📦 <strong>Cash on Delivery:</strong> Please pay{" "}
+                    <strong>
+                      {confirmedOrder.currency} {Number(confirmedOrder.total_amount).toFixed(2)}
+                    </strong>{" "}
+                    to the delivery partner upon arrival. Only authorized operations personnel can mark collection status.
+                  </p>
+                )}
+
+                {confirmedOrder.payment_method === "ONLINE" && confirmedOrder.payment_status !== "PAID" && (
+                  <div className="pt-2 border-t border-slate-200 space-y-2">
+                    <button
+                      type="button"
+                      onClick={handleSimulatePayment}
+                      disabled={isVerifyingPayment}
+                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
+                    >
+                      {isVerifyingPayment ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Verifying Payment with Provider...</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Complete Online Payment (Test Mode)</span>
+                        </>
+                      )}
+                    </button>
+                    {paymentVerifiedSuccess && (
+                      <p className="text-[11px] text-emerald-700 font-bold text-center">
+                        ✓ {paymentVerifiedSuccess}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Actions */}
@@ -1201,17 +1574,31 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                 <div className="flex items-baseline justify-between">
                   <div>
                     <span className="text-xs text-slate-500 font-medium block">Cart Subtotal</span>
-                    <span className="text-[10px] text-slate-400">Exclusive of statutory GST (calculated at next step)</span>
+                    <span className="text-[10px] text-slate-400">
+                      {getCurrencyForCountry(shippingForm.shipping_country) === "GBP"
+                        ? "Exclusive of applicable UK VAT (calculated at next step)"
+                        : "Exclusive of statutory GST (calculated at next step)"}
+                    </span>
                   </div>
                   <span className="text-xl font-black text-slate-950 font-mono">
-                    {currency} {displayedSubtotal.toFixed(2)}
+                    {lastValidationResult?.calculatedSummary?.currency === getCurrencyForCountry(shippingForm.shipping_country)
+                      ? `${lastValidationResult.calculatedSummary.currency} ${Number(lastValidationResult.calculatedSummary.subtotal_taxable_amount || lastValidationResult.calculatedSummary.total_amount).toFixed(2)}`
+                      : calculation && calculation.currency === getCurrencyForCountry(shippingForm.shipping_country)
+                      ? `${calculation.currency} ${Number(calculation.subtotal_taxable_amount).toFixed(2)}`
+                      : `${getCurrencyForCountry(shippingForm.shipping_country)} ${displayedSubtotal.toFixed(2)}`}
                   </span>
                 </div>
 
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={validateInventory}
+                    onClick={() =>
+                      validateInventory({
+                        country: shippingForm.shipping_country,
+                        currency: getCurrencyForCountry(shippingForm.shipping_country),
+                        place_of_supply: shippingForm.shipping_state,
+                      })
+                    }
                     disabled={isValidating}
                     className="px-3.5 py-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
                     title="Verify stock availability and statutory tax with backend"

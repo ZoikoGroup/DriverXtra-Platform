@@ -202,6 +202,11 @@ class SparePartListing(BaseUUIDModel):
         blank=True,
     )
     currency = models.CharField(max_length=10, default='GBP')
+    country_prices = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional country/currency-specific pricing overrides, e.g. {'INR': '4000.00', 'GBP': '38.00'}.",
+    )
     stock_quantity = models.PositiveIntegerField(default=1)
     low_stock_threshold = models.PositiveIntegerField(
         default=3,
@@ -506,6 +511,30 @@ class OrderStatusChoices(models.TextChoices):
     CANCELLED = 'CANCELLED', 'Cancelled'
 
 
+class PaymentMethodChoices(models.TextChoices):
+    ONLINE = 'ONLINE', 'Online Payment'
+    COD = 'COD', 'Cash on Delivery'
+
+
+class PaymentStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    AUTHORIZED = 'AUTHORIZED', 'Authorized'
+    PAID = 'PAID', 'Paid'
+    FAILED = 'FAILED', 'Failed'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+    EXPIRED = 'EXPIRED', 'Expired'
+    REFUNDED = 'REFUNDED', 'Refunded'
+
+
+class CODCollectionStatusChoices(models.TextChoices):
+    NOT_APPLICABLE = 'NOT_APPLICABLE', 'Not Applicable'
+    PENDING = 'PENDING', 'Pending Collection'
+    AWAITING_COLLECTION = 'AWAITING_COLLECTION', 'Awaiting Collection'
+    COLLECTED = 'COLLECTED', 'Collected'
+    FAILED_COLLECTION = 'FAILED_COLLECTION', 'Failed Collection'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
 class Order(BaseUUIDModel):
     """Customer purchase order recording immutable financial and tax snapshots."""
 
@@ -529,6 +558,44 @@ class Order(BaseUUIDModel):
         default=OrderStatusChoices.PENDING_CONFIRMATION,
         db_index=True,
     )
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PaymentMethodChoices.choices,
+        default=PaymentMethodChoices.ONLINE,
+        db_index=True,
+    )
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PaymentStatusChoices.choices,
+        default=PaymentStatusChoices.PENDING,
+        db_index=True,
+    )
+    payment_reference = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Primary external payment identifier from provider (e.g. pay_xxx, pi_xxx).",
+    )
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    # Cash on Delivery collection tracking
+    cod_collection_status = models.CharField(
+        max_length=30,
+        choices=CODCollectionStatusChoices.choices,
+        default=CODCollectionStatusChoices.NOT_APPLICABLE,
+        db_index=True,
+    )
+    cod_collected_at = models.DateTimeField(null=True, blank=True)
+    cod_collected_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='collected_cod_orders',
+        help_text="Authorized staff member or courier agent who recorded the COD collection.",
+    )
+    cod_collection_notes = models.TextField(blank=True, default='')
+
     currency = models.CharField(max_length=10, default='INR')
     place_of_supply = models.CharField(max_length=50, blank=True, default='')
     seller_state = models.CharField(max_length=50, blank=True, default='')
@@ -662,3 +729,668 @@ class VehicleEnquiry(BaseUUIDModel):
 
     def __str__(self):
         return f"Enquiry on {self.listing.title} by {self.buyer.email} ({self.status})"
+
+
+class PaymentTransaction(BaseUUIDModel):
+    """
+    Immutable ledger record of payment attempts, authorizations, captures, and COD collections.
+    """
+    class TransactionTypeChoices(models.TextChoices):
+        PAYMENT = 'PAYMENT', 'Payment'
+        REFUND = 'REFUND', 'Refund'
+        COD_COLLECTION = 'COD_COLLECTION', 'COD Collection'
+
+    class StatusChoices(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        SUCCESS = 'SUCCESS', 'Success'
+        FAILED = 'FAILED', 'Failed'
+        CANCELLED = 'CANCELLED', 'Cancelled'
+        EXPIRED = 'EXPIRED', 'Expired'
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='payment_transactions',
+    )
+    transaction_type = models.CharField(
+        max_length=20,
+        choices=TransactionTypeChoices.choices,
+        default=TransactionTypeChoices.PAYMENT,
+    )
+    provider = models.CharField(
+        max_length=30,
+        help_text="Payment provider (e.g. RAZORPAY, STRIPE, COD)",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10)
+    status = models.CharField(
+        max_length=20,
+        choices=StatusChoices.choices,
+        default=StatusChoices.PENDING,
+        db_index=True,
+    )
+    provider_transaction_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Provider's payment transaction ID (e.g. pay_xxx, pi_xxx)",
+    )
+    provider_order_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Provider's session or order ID (e.g. order_xxx, cs_xxx)",
+    )
+    provider_signature = models.CharField(max_length=255, blank=True, default='')
+    idempotency_key = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    error_code = models.CharField(max_length=100, blank=True, default='')
+    error_message = models.TextField(blank=True, default='')
+    raw_response = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Payment Transaction'
+        verbose_name_plural = 'Payment Transactions'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', '-created_at']),
+            models.Index(fields=['provider', 'status']),
+            models.Index(fields=['provider_transaction_id']),
+            models.Index(fields=['provider_order_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.provider} {self.transaction_type} ({self.currency} {self.amount}) - {self.status} (Order {self.order.order_number})"
+
+
+class PaymentWebhookEvent(BaseUUIDModel):
+    """
+    Audit log of verified provider webhook events ensuring idempotent processing and replay defense.
+    """
+    provider = models.CharField(max_length=50, db_index=True)
+    event_id = models.CharField(max_length=255, unique=True, db_index=True)
+    event_type = models.CharField(max_length=100, db_index=True)
+    processed = models.BooleanField(default=False, db_index=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    order = models.ForeignKey(
+        Order,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='webhook_events',
+    )
+    payload = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Payment Webhook Event'
+        verbose_name_plural = 'Payment Webhook Events'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.provider}:{self.event_type} ({self.event_id}) - Processed={self.processed}"
+
+
+# =============================================================================
+# Phase 5 Task 2: Shipping, Logistics and Order Tracking Models
+# =============================================================================
+
+class CarrierChoices(models.TextChoices):
+    # India Domestic Carriers
+    BLUE_DART = 'BLUE_DART', 'Blue Dart'
+    DELHIVERY = 'DELHIVERY', 'Delhivery'
+    DTDC = 'DTDC', 'DTDC Express'
+    ECOM_EXPRESS = 'ECOM_EXPRESS', 'Ecom Express'
+    INDIA_POST = 'INDIA_POST', 'India Post'
+    # UK Domestic Carriers
+    ROYAL_MAIL = 'ROYAL_MAIL', 'Royal Mail'
+    DPD_UK = 'DPD_UK', 'DPD UK'
+    EVRI = 'EVRI', 'Evri'
+    YODEL = 'YODEL', 'Yodel'
+    PARCELFORCE = 'PARCELFORCE', 'Parcelforce Worldwide'
+    # Global / Cross-Border Carriers
+    DHL = 'DHL', 'DHL Express'
+    FEDEX = 'FEDEX', 'FedEx'
+    UPS = 'UPS', 'UPS'
+    # Custom / Local Couriers
+    OTHER = 'OTHER', 'Other / Local Courier'
+
+
+class ShipmentStatusChoices(models.TextChoices):
+    CREATED = 'CREATED', 'Created'
+    DISPATCHED = 'DISPATCHED', 'Dispatched'
+    IN_TRANSIT = 'IN_TRANSIT', 'In Transit'
+    OUT_FOR_DELIVERY = 'OUT_FOR_DELIVERY', 'Out for Delivery'
+    DELIVERED = 'DELIVERED', 'Delivered'
+    FAILED_DELIVERY = 'FAILED_DELIVERY', 'Failed Delivery'
+    RETURNED = 'RETURNED', 'Returned'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class Shipment(BaseUUIDModel):
+    """
+    Logistics fulfillment package for items in an order by a specific seller.
+    Preserves multi-seller isolation, partial fulfillment, and carrier dispatch history.
+    """
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='shipments',
+        help_text="Parent order being fulfilled.",
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='seller_shipments',
+        help_text="Seller fulfilling this shipment package.",
+    )
+    organisation = models.ForeignKey(
+        Organisation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='organisation_shipments',
+        help_text="Seller dealership organisation if applicable.",
+    )
+    shipment_number = models.CharField(
+        max_length=60,
+        unique=True,
+        db_index=True,
+        help_text="System-generated unique shipment package reference.",
+    )
+    carrier = models.CharField(
+        max_length=50,
+        choices=CarrierChoices.choices,
+        default=CarrierChoices.OTHER,
+        db_index=True,
+    )
+    carrier_name = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        help_text="Carrier display name or custom courier name if carrier is OTHER.",
+    )
+    tracking_number = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Carrier tracking reference / AWB / consignment number.",
+    )
+    tracking_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Direct public tracking URL provided by carrier or generated by system.",
+    )
+    status = models.CharField(
+        max_length=30,
+        choices=ShipmentStatusChoices.choices,
+        default=ShipmentStatusChoices.CREATED,
+        db_index=True,
+    )
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    estimated_delivery_at = models.DateTimeField(null=True, blank=True)
+    delivery_notes = models.TextField(
+        blank=True,
+        default='',
+        help_text="Handling instructions or seller dispatch notes.",
+    )
+    shipping_label_url = models.CharField(max_length=500, blank=True, default='')
+
+    class Meta:
+        verbose_name = 'Shipment'
+        verbose_name_plural = 'Shipments'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'seller']),
+            models.Index(fields=['tracking_number']),
+            models.Index(fields=['status', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.shipment_number} ({self.carrier}: {self.tracking_number or 'No Tracking'}) - {self.status}"
+
+
+class ShipmentItem(BaseUUIDModel):
+    """
+    Associates specific order items and quantities to a shipment package.
+    """
+    shipment = models.ForeignKey(
+        Shipment,
+        on_delete=models.CASCADE,
+        related_name='items',
+    )
+    order_item = models.ForeignKey(
+        OrderItem,
+        on_delete=models.CASCADE,
+        related_name='shipment_items',
+    )
+    quantity = models.PositiveIntegerField(
+        default=1,
+        help_text="Number of units of the order item allocated to this package.",
+    )
+
+    class Meta:
+        verbose_name = 'Shipment Item'
+        verbose_name_plural = 'Shipment Items'
+        ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['shipment', 'order_item'],
+                name='unique_shipment_order_item',
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.order_item.title} x {self.quantity} (Shipment {self.shipment.shipment_number})"
+
+
+class TrackingEvent(BaseUUIDModel):
+    """
+    Chronological tracking history event for a shipment.
+    Records status checkpoints, locations, and timestamps.
+    """
+    shipment = models.ForeignKey(
+        Shipment,
+        on_delete=models.CASCADE,
+        related_name='tracking_events',
+    )
+    status = models.CharField(
+        max_length=30,
+        choices=ShipmentStatusChoices.choices,
+        db_index=True,
+    )
+    location = models.CharField(max_length=255, blank=True, default='')
+    description = models.TextField()
+    event_timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+    external_checkpoint_id = models.CharField(
+        max_length=150,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Unique checkpoint identifier from carrier webhook/polling to prevent duplicates.",
+    )
+
+    class Meta:
+        verbose_name = 'Tracking Event'
+        verbose_name_plural = 'Tracking Events'
+        ordering = ['event_timestamp', 'created_at']
+        indexes = [
+            models.Index(fields=['shipment', '-event_timestamp']),
+            models.Index(fields=['shipment', 'external_checkpoint_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.shipment.shipment_number} @ {self.event_timestamp}: {self.status} - {self.description[:40]}"
+
+
+# =============================================================================
+# Phase 5 Task 3: Returns, Refunds and Dispute Management Models
+# =============================================================================
+
+class ReturnRequestTypeChoices(models.TextChoices):
+    CANCELLATION = 'CANCELLATION', 'Order Cancellation'
+    RETURN = 'RETURN', 'Item Return'
+
+
+class ReturnRequestStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Review'
+    APPROVED = 'APPROVED', 'Approved'
+    REJECTED = 'REJECTED', 'Rejected'
+    COMPLETED = 'COMPLETED', 'Completed'
+    CANCELLED = 'CANCELLED', 'Cancelled by Buyer'
+
+
+class ReturnReasonChoices(models.TextChoices):
+    DEFECTIVE_ITEM = 'DEFECTIVE_ITEM', 'Defective or Damaged Item'
+    INCORRECT_ITEM = 'INCORRECT_ITEM', 'Incorrect Item Delivered'
+    NOT_AS_DESCRIBED = 'NOT_AS_DESCRIBED', 'Item Not as Described'
+    ORDERED_BY_MISTAKE = 'ORDERED_BY_MISTAKE', 'Ordered by Mistake'
+    DELIVERY_DELAY = 'DELIVERY_DELAY', 'Severe Delivery Delay'
+    BUYER_CANCEL = 'BUYER_CANCEL', 'Buyer Changed Mind'
+    OTHER = 'OTHER', 'Other Reason'
+
+
+class ReturnRequest(BaseUUIDModel):
+    """
+    Formal buyer request for order cancellation or physical item return.
+    Connects buyer, seller, order, optional order item, reason, evidence, and review workflow.
+    """
+    request_number = models.CharField(
+        max_length=60,
+        unique=True,
+        db_index=True,
+        help_text="System-generated unique reference (e.g. RET-YYYYMMDD-XXXXXXXX).",
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='return_requests',
+        help_text="Parent order for this cancellation or return request.",
+    )
+    order_item = models.ForeignKey(
+        OrderItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='return_requests',
+        help_text="Specific line item being returned. Null if whole order cancellation.",
+    )
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='buyer_return_requests',
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='seller_return_requests',
+        help_text="Seller responsible for fulfilling this order or item.",
+    )
+    request_type = models.CharField(
+        max_length=20,
+        choices=ReturnRequestTypeChoices.choices,
+        default=ReturnRequestTypeChoices.RETURN,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ReturnRequestStatusChoices.choices,
+        default=ReturnRequestStatusChoices.PENDING,
+        db_index=True,
+    )
+    reason = models.CharField(
+        max_length=40,
+        choices=ReturnReasonChoices.choices,
+        default=ReturnReasonChoices.OTHER,
+        db_index=True,
+    )
+    description = models.TextField(blank=True, default='')
+    evidence_urls = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of supporting photo/document URLs uploaded via upload-image.",
+    )
+    requested_quantity = models.PositiveIntegerField(
+        default=1,
+        help_text="Number of units requested for return/cancellation.",
+    )
+    refund_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Calculated or requested refund value.",
+    )
+    seller_notes = models.TextField(blank=True, default='')
+    rejection_reason = models.TextField(blank=True, default='')
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_return_requests',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Return Request'
+        verbose_name_plural = 'Return Requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['buyer', '-created_at']),
+            models.Index(fields=['seller', 'status']),
+            models.Index(fields=['request_type', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.request_number} ({self.request_type}) - {self.status} (Order {self.order.order_number})"
+
+
+class RefundStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Approval'
+    PROCESSING = 'PROCESSING', 'Processing Gateway / Payout'
+    SUCCEEDED = 'SUCCEEDED', 'Succeeded'
+    FAILED = 'FAILED', 'Failed'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class RefundMethodChoices(models.TextChoices):
+    ORIGINAL_PAYMENT = 'ORIGINAL_PAYMENT', 'Original Payment Gateway'
+    BANK_TRANSFER = 'BANK_TRANSFER', 'Direct Bank Transfer / NEFT'
+    MANUAL_PAYOUT = 'MANUAL_PAYOUT', 'Manual Ops Payout / Cash Voucher'
+
+
+class Refund(BaseUUIDModel):
+    """
+    Authoritative record of a customer refund.
+    Tied to an order, an optional return request or dispute, and the underlying payment transaction.
+    """
+    refund_number = models.CharField(
+        max_length=60,
+        unique=True,
+        db_index=True,
+        help_text="System-generated unique refund reference (e.g. REF-YYYYMMDD-XXXXXXXX).",
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='refunds',
+    )
+    return_request = models.ForeignKey(
+        ReturnRequest,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='refunds',
+    )
+    dispute = models.ForeignKey(
+        'Dispute',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='refunds',
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default='INR')
+    status = models.CharField(
+        max_length=20,
+        choices=RefundStatusChoices.choices,
+        default=RefundStatusChoices.PENDING,
+        db_index=True,
+    )
+    refund_method = models.CharField(
+        max_length=30,
+        choices=RefundMethodChoices.choices,
+        default=RefundMethodChoices.ORIGINAL_PAYMENT,
+    )
+    gateway_provider = models.CharField(max_length=30, blank=True, default='')
+    gateway_refund_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    reason = models.CharField(max_length=255, blank=True, default='')
+    failure_reason = models.TextField(blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_refunds',
+    )
+    approved_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approved_refunds',
+    )
+
+    class Meta:
+        verbose_name = 'Refund'
+        verbose_name_plural = 'Refunds'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['gateway_refund_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.refund_number}: {self.currency} {self.amount} ({self.status}) - Order {self.order.order_number}"
+
+
+class DisputeCategoryChoices(models.TextChoices):
+    ITEM_NOT_RECEIVED = 'ITEM_NOT_RECEIVED', 'Item Not Received'
+    SIGNIFICANTLY_NOT_AS_DESCRIBED = 'SIGNIFICANTLY_NOT_AS_DESCRIBED', 'Significantly Not as Described'
+    DAMAGED_OR_DEFECTIVE = 'DAMAGED_OR_DEFECTIVE', 'Damaged or Defective Item'
+    UNAUTHORIZED_TRANSACTION = 'UNAUTHORIZED_TRANSACTION', 'Unauthorized Transaction / Fraud'
+    REFUND_NOT_PROCESSED = 'REFUND_NOT_PROCESSED', 'Refund Not Processed'
+    OTHER = 'OTHER', 'Other Commercial Dispute'
+
+
+class DisputeStatusChoices(models.TextChoices):
+    OPEN = 'OPEN', 'Open'
+    UNDER_REVIEW = 'UNDER_REVIEW', 'Under Review'
+    RESOLVED = 'RESOLVED', 'Resolved'
+    REJECTED = 'REJECTED', 'Rejected'
+    ESCALATED = 'ESCALATED', 'Escalated to Senior Ops'
+
+
+class DisputeResolutionChoices(models.TextChoices):
+    REFUND_ISSUED = 'REFUND_ISSUED', 'Full / Partial Refund Issued'
+    REPLACEMENT_ISSUED = 'REPLACEMENT_ISSUED', 'Replacement Part Issued'
+    BUYER_REJECTED = 'BUYER_REJECTED', 'Claim Rejected in Favor of Seller'
+    MUTUAL_AGREEMENT = 'MUTUAL_AGREEMENT', 'Settled via Mutual Agreement'
+    DISMISSED = 'DISMISSED', 'Dismissed / Inactive'
+
+
+class DisputePriorityChoices(models.TextChoices):
+    LOW = 'LOW', 'Low'
+    MEDIUM = 'MEDIUM', 'Medium'
+    HIGH = 'HIGH', 'High'
+    CRITICAL = 'CRITICAL', 'Critical'
+
+
+class Dispute(BaseUUIDModel):
+    """
+    Marketplace dispute mediation record connecting buyer, seller, and platform operations staff.
+    """
+    dispute_number = models.CharField(
+        max_length=60,
+        unique=True,
+        db_index=True,
+        help_text="System-generated unique dispute reference (e.g. DISP-YYYYMMDD-XXXXXXXX).",
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='disputes',
+    )
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='buyer_disputes',
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='seller_disputes',
+    )
+    category = models.CharField(
+        max_length=40,
+        choices=DisputeCategoryChoices.choices,
+        default=DisputeCategoryChoices.OTHER,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=DisputeStatusChoices.choices,
+        default=DisputeStatusChoices.OPEN,
+        db_index=True,
+    )
+    priority = models.CharField(
+        max_length=20,
+        choices=DisputePriorityChoices.choices,
+        default=DisputePriorityChoices.MEDIUM,
+    )
+    description = models.TextField()
+    evidence_urls = models.JSONField(default=list, blank=True)
+    resolution = models.CharField(
+        max_length=30,
+        choices=DisputeResolutionChoices.choices,
+        blank=True,
+        default='',
+    )
+    resolution_notes = models.TextField(blank=True, default='')
+    resolved_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resolved_disputes',
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Dispute'
+        verbose_name_plural = 'Disputes'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['buyer', 'status']),
+            models.Index(fields=['seller', 'status']),
+            models.Index(fields=['status', 'priority']),
+        ]
+
+    def __str__(self):
+        return f"{self.dispute_number}: {self.category} ({self.status}) - Order {self.order.order_number}"
+
+
+class DisputeEventTypeChoices(models.TextChoices):
+    STATUS_CHANGE = 'STATUS_CHANGE', 'Status Changed'
+    COMMENT = 'COMMENT', 'User Comment'
+    EVIDENCE_ADDED = 'EVIDENCE_ADDED', 'Evidence Added'
+    DECISION_RECORDED = 'DECISION_RECORDED', 'Decision Recorded'
+
+
+class DisputeEvent(BaseUUIDModel):
+    """
+    Chronological activity log and mediation messages for a dispute.
+    """
+    dispute = models.ForeignKey(
+        Dispute,
+        on_delete=models.CASCADE,
+        related_name='events',
+    )
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='dispute_events',
+    )
+    event_type = models.CharField(
+        max_length=30,
+        choices=DisputeEventTypeChoices.choices,
+        default=DisputeEventTypeChoices.COMMENT,
+    )
+    message = models.TextField()
+    attachments = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        verbose_name = 'Dispute Event'
+        verbose_name_plural = 'Dispute Events'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['dispute', 'created_at']),
+        ]
+
+    def __str__(self):
+        actor_name = self.actor.email if self.actor else 'System'
+        return f"{self.dispute.dispute_number} @ {self.created_at}: {actor_name} - {self.event_type}"
+
+
+

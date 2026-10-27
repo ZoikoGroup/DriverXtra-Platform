@@ -35,6 +35,7 @@ if not SECRET_KEY:
     )
 
 DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
+IS_TESTING = "pytest" in sys.modules or "test" in sys.argv or os.getenv("IS_TESTING", "False").lower() in ("true", "1", "yes")
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -358,3 +359,47 @@ NOTIFICATIONS_EMAIL_MAX_ATTEMPTS = int(os.getenv("NOTIFICATIONS_EMAIL_MAX_ATTEMP
 
 MAX_LISTING_PRICE = Decimal(os.getenv("MAX_LISTING_PRICE", "100000"))
 PRICE_OUTLIER_THRESHOLD = Decimal(os.getenv("PRICE_OUTLIER_THRESHOLD", "0.5"))
+
+
+# =========================================================
+# PAYMENT GATEWAY & CASH ON DELIVERY (COD) CONFIGURATION
+# =========================================================
+
+PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "True").lower() in ("true", "1", "yes")
+
+# Razorpay (India / INR)
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "rzp_test_placeholder_key")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "rzp_test_placeholder_secret")
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "rzp_test_webhook_secret")
+
+# Stripe (UK / GBP & International Cards)
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "pk_test_placeholder_key")
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "sk_test_placeholder_secret")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_test_placeholder_secret")
+
+# Cash on Delivery (COD) Rules
+COD_ENABLED = os.getenv("COD_ENABLED", "True").lower() in ("true", "1", "yes")
+COD_ALLOWED_COUNTRIES = [
+    c.strip().upper()
+    for c in os.getenv("COD_ALLOWED_COUNTRIES", "IN,GB").split(",")
+    if c.strip()
+]
+COD_MAX_AMOUNT_INR = Decimal(os.getenv("COD_MAX_AMOUNT_INR", "50000.00"))
+COD_MAX_AMOUNT_GBP = Decimal(os.getenv("COD_MAX_AMOUNT_GBP", "500.00"))
+
+
+# =========================================================
+# MULTI-CURRENCY & EXCHANGE RATE CONFIGURATION
+# =========================================================
+
+# Explicit server-side exchange rates for cross-currency checkout
+# Pairs are (FROM_CURRENCY, TO_CURRENCY): Decimal rate
+CURRENCY_EXCHANGE_RATES = {
+    ("GBP", "INR"): Decimal(os.getenv("EXCHANGE_RATE_GBP_INR", "105.00")),
+    ("INR", "GBP"): Decimal(os.getenv("EXCHANGE_RATE_INR_GBP", "0.0095")),
+}
+
+# UK VAT rate (isolated from Indian GST rules)
+UK_VAT_RATE = Decimal(os.getenv("UK_VAT_RATE", "0.00"))
+
+

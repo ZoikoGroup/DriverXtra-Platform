@@ -38,6 +38,40 @@ from apps.marketplace.views import (
     SellerVehicleEnquiryListView,
     SellerVehicleEnquiryDetailView,
     BuyerVehicleEnquiryListView,
+    AvailablePaymentMethodsView,
+    OrderPaymentSessionCreateView,
+    OrderPaymentVerifyView,
+    PaymentWebhookView,
+    OrderCODCollectionUpdateView,
+    OrderPaymentDetailView,
+    OrderPaymentSimulateTestView,
+    SellerOrderShipmentListCreateView,
+    SellerShipmentDetailView,
+    SellerShipmentStatusUpdateView,
+    SellerShipmentTrackingEventCreateView,
+    BuyerOrderShipmentListView,
+    ShipmentTrackingLookupView,
+    AvailableCarriersView,
+    BuyerOrderReturnEligibilityView,
+    BuyerOrderReturnRequestCreateView,
+    BuyerReturnRequestListView,
+    BuyerReturnRequestDetailView,
+    BuyerReturnRequestCancelView,
+    SellerReturnRequestListView,
+    SellerReturnRequestDetailView,
+    SellerReturnRequestReviewView,
+    SellerReturnRequestCompleteView,
+    BuyerOrderDisputeCreateView,
+    BuyerDisputeListView,
+    SellerDisputeListView,
+    DisputeDetailView,
+    DisputeMessageCreateView,
+    OrderRefundSummaryView,
+    AdminOrderRefundCreateView,
+    AdminRefundListView,
+    AdminRefundProcessView,
+    AdminDisputeListView,
+    AdminDisputeStatusUpdateView,
 )
 
 urlpatterns = [
@@ -89,11 +123,20 @@ urlpatterns = [
 
     # 6. Tax Options, Order Checkout & Order Management
     path('tax/gst-options/', GSTOptionsView.as_view(), name='marketplace-tax-gst-options'),
+    path('orders/payment-methods/', AvailablePaymentMethodsView.as_view(), name='marketplace-payment-methods'),
     path('orders/checkout/', OrderCheckoutView.as_view(), name='marketplace-orders-checkout'),
     path('orders/calculate/', OrderCheckoutView.as_view(), name='marketplace-orders-calculate'),
     path('orders/', BuyerOrderListView.as_view(), name='marketplace-orders-list'),
     path('orders/<str:identifier>/cancel/', BuyerOrderCancelView.as_view(), name='marketplace-order-cancel'),
+    path('orders/<str:identifier>/payment/create/', OrderPaymentSessionCreateView.as_view(), name='marketplace-order-payment-create'),
+    path('orders/<str:identifier>/payment/verify/', OrderPaymentVerifyView.as_view(), name='marketplace-order-payment-verify'),
+    path('orders/<str:identifier>/payment/simulate/', OrderPaymentSimulateTestView.as_view(), name='marketplace-order-payment-simulate'),
+    path('orders/<str:identifier>/payment/', OrderPaymentDetailView.as_view(), name='marketplace-order-payment-detail'),
+    path('orders/<str:identifier>/cod-collection/', OrderCODCollectionUpdateView.as_view(), name='marketplace-order-cod-collection'),
     path('orders/<str:identifier>/', BuyerOrderDetailView.as_view(), name='marketplace-order-detail'),
+
+    # Phase 5: Payment Gateway Webhooks
+    path('payments/webhook/<str:provider>/', PaymentWebhookView.as_view(), name='marketplace-payment-webhook'),
 
     # 6b. Seller Order Management (Multi-Seller Isolated Views & Workflow)
     path('seller/orders/', SellerOrderListView.as_view(), name='marketplace-seller-orders-list'),
@@ -105,4 +148,41 @@ urlpatterns = [
     path('seller/enquiries/', SellerVehicleEnquiryListView.as_view(), name='marketplace-seller-enquiries-list'),
     path('seller/enquiries/<uuid:id>/', SellerVehicleEnquiryDetailView.as_view(), name='marketplace-seller-enquiry-detail'),
     path('buyer/enquiries/', BuyerVehicleEnquiryListView.as_view(), name='marketplace-buyer-enquiries-list'),
+
+    # 8. Logistics, Shipping & Order Tracking
+    path('seller/orders/<str:identifier>/shipments/', SellerOrderShipmentListCreateView.as_view(), name='marketplace-seller-order-shipments'),
+    path('seller/shipments/<str:identifier>/status/', SellerShipmentStatusUpdateView.as_view(), name='marketplace-seller-shipment-status'),
+    path('seller/shipments/<str:identifier>/events/', SellerShipmentTrackingEventCreateView.as_view(), name='marketplace-seller-shipment-events'),
+    path('seller/shipments/<str:identifier>/', SellerShipmentDetailView.as_view(), name='marketplace-seller-shipment-detail'),
+    path('buyer/orders/<str:identifier>/shipments/', BuyerOrderShipmentListView.as_view(), name='marketplace-buyer-order-shipments'),
+    path('shipments/track/<str:tracking_number>/', ShipmentTrackingLookupView.as_view(), name='marketplace-shipment-track'),
+    path('logistics/carriers/', AvailableCarriersView.as_view(), name='marketplace-logistics-carriers'),
+
+    # 9. Returns & Cancellations
+    path('buyer/orders/<str:identifier>/return-eligibility/', BuyerOrderReturnEligibilityView.as_view(), name='marketplace-buyer-order-return-eligibility'),
+    path('buyer/orders/<str:identifier>/returns/', BuyerOrderReturnRequestCreateView.as_view(), name='marketplace-buyer-order-return-create'),
+    path('buyer/returns/<str:identifier>/cancel/', BuyerReturnRequestCancelView.as_view(), name='marketplace-buyer-return-cancel'),
+    path('buyer/returns/<str:identifier>/', BuyerReturnRequestDetailView.as_view(), name='marketplace-buyer-return-detail'),
+    path('buyer/returns/', BuyerReturnRequestListView.as_view(), name='marketplace-buyer-returns-list'),
+
+    path('seller/returns/<str:identifier>/review/', SellerReturnRequestReviewView.as_view(), name='marketplace-seller-return-review'),
+    path('seller/returns/<str:identifier>/complete/', SellerReturnRequestCompleteView.as_view(), name='marketplace-seller-return-complete'),
+    path('seller/returns/<str:identifier>/', SellerReturnRequestDetailView.as_view(), name='marketplace-seller-return-detail'),
+    path('seller/returns/', SellerReturnRequestListView.as_view(), name='marketplace-seller-returns-list'),
+
+    # 10. Commercial Disputes
+    path('buyer/orders/<str:identifier>/disputes/', BuyerOrderDisputeCreateView.as_view(), name='marketplace-buyer-order-dispute-create'),
+    path('buyer/disputes/', BuyerDisputeListView.as_view(), name='marketplace-buyer-disputes-list'),
+    path('seller/disputes/', SellerDisputeListView.as_view(), name='marketplace-seller-disputes-list'),
+    path('disputes/<str:identifier>/messages/', DisputeMessageCreateView.as_view(), name='marketplace-dispute-messages'),
+    path('disputes/<str:identifier>/', DisputeDetailView.as_view(), name='marketplace-dispute-detail'),
+    path('admin/disputes/<str:identifier>/status/', AdminDisputeStatusUpdateView.as_view(), name='marketplace-admin-dispute-status'),
+    path('admin/disputes/', AdminDisputeListView.as_view(), name='marketplace-admin-disputes-list'),
+
+    # 11. Platform Refunds & Summaries
+    path('orders/<str:identifier>/refund-summary/', OrderRefundSummaryView.as_view(), name='marketplace-order-refund-summary'),
+    path('admin/orders/<str:identifier>/refund/', AdminOrderRefundCreateView.as_view(), name='marketplace-admin-order-refund'),
+    path('admin/refunds/<str:identifier>/process/', AdminRefundProcessView.as_view(), name='marketplace-admin-refund-process'),
+    path('admin/refunds/', AdminRefundListView.as_view(), name='marketplace-admin-refunds-list'),
 ]
+

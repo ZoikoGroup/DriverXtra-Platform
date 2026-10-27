@@ -1275,12 +1275,31 @@ export const api = {
       });
     },
 
-    
+    async getPaymentMethods(params?: {
+      country?: string;
+      currency?: string;
+      amount?: number | string;
+    }): Promise<AvailablePaymentMethodsResponse> {
+      const query = new URLSearchParams();
+      if (params?.country) query.set("country", params.country);
+      if (params?.currency) query.set("currency", params.currency);
+      if (params?.amount !== undefined) query.set("amount", String(params.amount));
+      const qs = query.toString();
+      return apiRequest<AvailablePaymentMethodsResponse>(
+        `/marketplace/orders/payment-methods/${qs ? `?${qs}` : ""}`,
+        {
+          method: "GET",
+          requiresAuth: false,
+        }
+      );
+    },
+
     async checkout(payload: OrderCheckoutPayload): Promise<{
       status: string;
       message: string;
       replayed?: boolean;
       order: PlatformOrder;
+      payment_session?: PaymentSessionResponse;
     }> {
       const customHeaders: Record<string, string> = {};
       if (payload.idempotency_key) {
@@ -1291,6 +1310,7 @@ export const api = {
         message: string;
         replayed?: boolean;
         order: PlatformOrder;
+        payment_session?: PaymentSessionResponse;
       }>("/marketplace/orders/checkout/", {
         method: "POST",
         requiresAuth: true,
@@ -1305,6 +1325,91 @@ export const api = {
         requiresAuth: true,
         body: JSON.stringify({ ...payload, preview_only: true }),
       });
+    },
+
+    async createPaymentSession(identifier: string): Promise<{
+      status: string;
+      order_number: string;
+      payment_session: PaymentSessionResponse;
+    }> {
+      return apiRequest<{
+        status: string;
+        order_number: string;
+        payment_session: PaymentSessionResponse;
+      }>(`/marketplace/orders/${identifier}/payment/create/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async verifyPayment(
+      identifier: string,
+      payload: PaymentVerifyPayload
+    ): Promise<PaymentVerifyResponse> {
+      return apiRequest<PaymentVerifyResponse>(
+        `/marketplace/orders/${identifier}/payment/verify/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+
+    async simulateTestPayment(identifier: string): Promise<{
+      status: string;
+      message?: string;
+      error?: string;
+      already_paid?: boolean;
+      payment_reference?: string;
+      payment_status?: string;
+      order?: PlatformOrder;
+      extra?: Record<string, unknown>;
+    }> {
+      return apiRequest<{
+        status: string;
+        message?: string;
+        error?: string;
+        already_paid?: boolean;
+        payment_reference?: string;
+        payment_status?: string;
+        order?: PlatformOrder;
+        extra?: Record<string, unknown>;
+      }>(`/marketplace/orders/${identifier}/payment/simulate/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async updateCODCollection(
+      identifier: string,
+      payload: CODCollectionUpdatePayload
+    ): Promise<{
+      status: string;
+      message: string;
+      order: PlatformOrder;
+      details: Record<string, unknown>;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        order: PlatformOrder;
+        details: Record<string, unknown>;
+      }>(`/marketplace/orders/${identifier}/cod-collection/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getOrderPaymentDetail(identifier: string): Promise<OrderPaymentDetailResponse> {
+      return apiRequest<OrderPaymentDetailResponse>(
+        `/marketplace/orders/${identifier}/payment/`,
+        {
+          method: "GET",
+          requiresAuth: true,
+        }
+      );
     },
 
     async listOrders(): Promise<PlatformOrder[]> {
@@ -1379,6 +1484,405 @@ export const api = {
       });
     },
 
+    // Logistics, Shipping & Order Tracking
+    async getAvailableCarriers(country?: string): Promise<AvailableCarriersResponse> {
+      const q = country ? `?country=${encodeURIComponent(country)}` : "";
+      return apiRequest<AvailableCarriersResponse>(`/marketplace/logistics/carriers/${q}`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+
+    async listSellerOrderShipments(orderIdentifier: string): Promise<PlatformShipment[]> {
+      const res = await apiRequest<PlatformShipment[] | { results: PlatformShipment[] }>(
+        `/marketplace/seller/orders/${orderIdentifier}/shipments/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async createShipment(
+      orderIdentifier: string,
+      payload: CreateShipmentPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      shipment: PlatformShipment;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        shipment: PlatformShipment;
+      }>(`/marketplace/seller/orders/${orderIdentifier}/shipments/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getSellerShipment(shipmentIdentifier: string): Promise<PlatformShipment> {
+      return apiRequest<PlatformShipment>(
+        `/marketplace/seller/shipments/${shipmentIdentifier}/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async updateShipmentStatus(
+      shipmentIdentifier: string,
+      payload: UpdateShipmentStatusPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      shipment: PlatformShipment;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        shipment: PlatformShipment;
+      }>(`/marketplace/seller/shipments/${shipmentIdentifier}/status/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async addTrackingEvent(
+      shipmentIdentifier: string,
+      payload: CreateTrackingEventPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      event: PlatformTrackingEvent;
+      shipment: PlatformShipment;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        event: PlatformTrackingEvent;
+        shipment: PlatformShipment;
+      }>(`/marketplace/seller/shipments/${shipmentIdentifier}/events/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listBuyerOrderShipments(orderIdentifier: string): Promise<PlatformShipment[]> {
+      const res = await apiRequest<PlatformShipment[] | { results: PlatformShipment[] }>(
+        `/marketplace/buyer/orders/${orderIdentifier}/shipments/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async trackShipment(trackingNumber: string): Promise<PlatformShipment> {
+      return apiRequest<PlatformShipment>(
+        `/marketplace/shipments/track/${encodeURIComponent(trackingNumber)}/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    // Returns, Refunds & Dispute Management
+    async getReturnEligibility(orderIdentifier: string): Promise<OrderReturnEligibilityResponse> {
+      return apiRequest<OrderReturnEligibilityResponse>(
+        `/marketplace/buyer/orders/${orderIdentifier}/return-eligibility/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async createReturnRequest(
+      orderIdentifier: string,
+      payload: CreateReturnRequestPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      return_request: PlatformReturnRequest;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        return_request: PlatformReturnRequest;
+      }>(`/marketplace/buyer/orders/${orderIdentifier}/returns/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listBuyerReturns(type?: string, status?: string): Promise<PlatformReturnRequest[]> {
+      const q = new URLSearchParams();
+      if (type && type !== "ALL") q.set("type", type);
+      if (status && status !== "ALL") q.set("status", status);
+      const qs = q.toString();
+      const res = await apiRequest<PlatformReturnRequest[] | { results: PlatformReturnRequest[] }>(
+        `/marketplace/buyer/returns/${qs ? `?${qs}` : ""}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getBuyerReturn(identifier: string): Promise<PlatformReturnRequest> {
+      return apiRequest<PlatformReturnRequest>(
+        `/marketplace/buyer/returns/${identifier}/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async cancelBuyerReturn(identifier: string): Promise<{
+      status: string;
+      message: string;
+      return_request: PlatformReturnRequest;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        return_request: PlatformReturnRequest;
+      }>(`/marketplace/buyer/returns/${identifier}/cancel/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async listSellerReturns(status?: string, type?: string): Promise<PlatformReturnRequest[]> {
+      const q = new URLSearchParams();
+      if (status && status !== "ALL") q.set("status", status);
+      if (type && type !== "ALL") q.set("type", type);
+      const qs = q.toString();
+      const res = await apiRequest<PlatformReturnRequest[] | { results: PlatformReturnRequest[] }>(
+        `/marketplace/seller/returns/${qs ? `?${qs}` : ""}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getSellerReturn(identifier: string): Promise<PlatformReturnRequest> {
+      return apiRequest<PlatformReturnRequest>(
+        `/marketplace/seller/returns/${identifier}/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async reviewSellerReturn(
+      identifier: string,
+      payload: ReviewReturnRequestPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      return_request: PlatformReturnRequest;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        return_request: PlatformReturnRequest;
+      }>(`/marketplace/seller/returns/${identifier}/review/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async completeSellerReturn(
+      identifier: string,
+      notes?: string
+    ): Promise<{
+      status: string;
+      message: string;
+      return_request: PlatformReturnRequest;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        return_request: PlatformReturnRequest;
+      }>(`/marketplace/seller/returns/${identifier}/complete/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ notes }),
+      });
+    },
+
+    async createDispute(
+      orderIdentifier: string,
+      payload: CreateDisputePayload
+    ): Promise<{
+      status: string;
+      message: string;
+      dispute: PlatformDispute;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        dispute: PlatformDispute;
+      }>(`/marketplace/buyer/orders/${orderIdentifier}/disputes/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listBuyerDisputes(): Promise<PlatformDispute[]> {
+      const res = await apiRequest<PlatformDispute[] | { results: PlatformDispute[] }>(
+        "/marketplace/buyer/disputes/",
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async listSellerDisputes(): Promise<PlatformDispute[]> {
+      const res = await apiRequest<PlatformDispute[] | { results: PlatformDispute[] }>(
+        "/marketplace/seller/disputes/",
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getDispute(identifier: string): Promise<PlatformDispute> {
+      return apiRequest<PlatformDispute>(
+        `/marketplace/disputes/${identifier}/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async addDisputeMessage(
+      identifier: string,
+      payload: CreateDisputeMessagePayload
+    ): Promise<{
+      status: string;
+      message: string;
+      event: PlatformDisputeEvent;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        event: PlatformDisputeEvent;
+      }>(`/marketplace/disputes/${identifier}/messages/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getOrderRefundSummary(orderIdentifier: string): Promise<OrderRefundSummary> {
+      return apiRequest<OrderRefundSummary>(
+        `/marketplace/orders/${orderIdentifier}/refund-summary/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async createAdminRefund(
+      orderIdentifier: string,
+      payload: CreateAdminRefundPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/admin/orders/${orderIdentifier}/refund/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listAdminRefunds(status?: string): Promise<PlatformRefund[]> {
+      const q = status && status !== "ALL" ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<PlatformRefund[] | { results: PlatformRefund[] }>(
+        `/marketplace/admin/refunds/${q}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async processAdminRefund(
+      identifier: string,
+      gatewayReference?: string,
+      notes?: string
+    ): Promise<{
+      status: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/admin/refunds/${identifier}/process/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ gateway_reference: gatewayReference, notes }),
+      });
+    },
+
+    async listAdminDisputes(status?: string, category?: string): Promise<PlatformDispute[]> {
+      const q = new URLSearchParams();
+      if (status && status !== "ALL") q.set("status", status);
+      if (category && category !== "ALL") q.set("category", category);
+      const qs = q.toString();
+      const res = await apiRequest<PlatformDispute[] | { results: PlatformDispute[] }>(
+        `/marketplace/admin/disputes/${qs ? `?${qs}` : ""}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async updateAdminDisputeStatus(
+      identifier: string,
+      payload: UpdateDisputeStatusPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      dispute: PlatformDispute;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        dispute: PlatformDispute;
+      }>(`/marketplace/admin/disputes/${identifier}/status/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    // Aliases for compatibility across components
+    async listSellerReturnRequests(params?: { status?: string; type?: string }): Promise<{ status: string; return_requests: PlatformReturnRequest[] }> {
+      const list = await this.listSellerReturns(params?.status, params?.type);
+      return { status: "success", return_requests: list };
+    },
+
+    async reviewSellerReturnRequest(
+      identifier: string,
+      payload: ReviewReturnRequestPayload
+    ): Promise<{ status: string; message: string; return_request: PlatformReturnRequest }> {
+      return this.reviewSellerReturn(identifier, payload);
+    },
+
+    async completeSellerReturnRequest(
+      identifier: string,
+      payload?: { return_tracking_number?: string; notes?: string }
+    ): Promise<{ status: string; message: string; return_request: PlatformReturnRequest }> {
+      return this.completeSellerReturn(identifier, payload?.return_tracking_number || payload?.notes);
+    },
+
+    async getDisputeDetail(
+      identifier: string
+    ): Promise<{ status: string; dispute: PlatformDispute; events: PlatformDisputeEvent[] }> {
+      const dispute = await this.getDispute(identifier);
+      return { status: "success", dispute, events: dispute.events || [] };
+    },
+
+    async postDisputeMessage(
+      identifier: string,
+      payload: { message: string; attachments?: string[]; evidence_urls?: string[] }
+    ): Promise<{ status: string; message: string; event: PlatformDisputeEvent }> {
+      return this.addDisputeMessage(identifier, {
+        message: payload.message,
+        attachments: payload.attachments || payload.evidence_urls,
+      });
+    },
   },
 
   notifications: {
@@ -1847,6 +2351,7 @@ export interface OrderCheckoutPayload {
   items: OrderCheckoutItemPayload[];
   place_of_supply?: string;
   currency?: string;
+  payment_method?: "ONLINE" | "COD";
   preview_only?: boolean;
   expected_total_amount?: string | number;
   idempotency_key?: string;
@@ -1883,6 +2388,93 @@ export interface PlatformOrderItem {
   total_amount: string | number;
 }
 
+export interface PlatformTrackingEvent {
+  id: string;
+  status: string;
+  status_display?: string;
+  location?: string;
+  description: string;
+  event_timestamp: string;
+  external_checkpoint_id?: string;
+  created_at: string;
+}
+
+export interface PlatformShipmentItem {
+  id: string;
+  order_item: string;
+  order_item_id: string;
+  listing_title: string;
+  listing_brand: string;
+  listing_mpn: string;
+  quantity: number;
+  created_at: string;
+}
+
+export interface PlatformShipment {
+  id: string;
+  shipment_number: string;
+  order: string;
+  order_number: string;
+  seller_id: string;
+  seller_name: string;
+  organisation_name?: string | null;
+  carrier: string;
+  carrier_display?: string;
+  carrier_name?: string;
+  tracking_number: string;
+  tracking_url?: string;
+  status: "CREATED" | "DISPATCHED" | "IN_TRANSIT" | "OUT_FOR_DELIVERY" | "DELIVERED" | "FAILED_DELIVERY" | "RETURNED" | "CANCELLED";
+  status_display?: string;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  estimated_delivery_at?: string | null;
+  delivery_notes?: string;
+  items: PlatformShipmentItem[];
+  tracking_events: PlatformTrackingEvent[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CarrierOption {
+  code: string;
+  name: string;
+}
+
+export interface AvailableCarriersResponse {
+  country: string;
+  count: number;
+  carriers: CarrierOption[];
+}
+
+export interface CreateShipmentPayload {
+  carrier: string;
+  carrier_name?: string;
+  tracking_number?: string;
+  tracking_url?: string;
+  estimated_delivery_at?: string | null;
+  delivery_notes?: string;
+  dispatch_immediately?: boolean;
+  items: Array<{
+    order_item_id: string;
+    quantity: number;
+  }>;
+}
+
+export interface UpdateShipmentStatusPayload {
+  status: string;
+  location?: string;
+  description?: string;
+  carrier_reference?: string;
+}
+
+export interface CreateTrackingEventPayload {
+  status?: string;
+  description: string;
+  location?: string;
+  event_timestamp?: string;
+  external_checkpoint_id?: string;
+}
+
 export interface PlatformOrder {
   id: string;
   order_number: string;
@@ -1890,6 +2482,14 @@ export interface PlatformOrder {
   buyer_email: string;
   buyer_name: string;
   status: string;
+  payment_method: "ONLINE" | "COD";
+  payment_status: "PENDING" | "AUTHORIZED" | "PAID" | "FAILED" | "CANCELLED" | "EXPIRED" | "REFUNDED";
+  payment_reference?: string | null;
+  paid_at?: string | null;
+  cod_collection_status: "NOT_APPLICABLE" | "PENDING" | "AWAITING_COLLECTION" | "COLLECTED" | "FAILED_COLLECTION" | "CANCELLED";
+  cod_collected_at?: string | null;
+  cod_collected_by?: string | null;
+  cod_collection_notes?: string;
   currency: string;
   place_of_supply: string;
   seller_state: string;
@@ -1908,6 +2508,10 @@ export interface PlatformOrder {
   total_tax_amount: string | number;
   total_amount: string | number;
   items: PlatformOrderItem[];
+  shipments?: PlatformShipment[];
+  return_requests?: PlatformReturnRequest[];
+  refunds?: PlatformRefund[];
+  disputes?: PlatformDispute[];
   created_at: string;
   updated_at?: string;
 }
@@ -1918,6 +2522,11 @@ export interface SellerOrder {
   buyer_email: string;
   buyer_name: string;
   status: string;
+  payment_method: "ONLINE" | "COD";
+  payment_status: "PENDING" | "AUTHORIZED" | "PAID" | "FAILED" | "CANCELLED" | "EXPIRED" | "REFUNDED";
+  payment_reference?: string | null;
+  paid_at?: string | null;
+  cod_collection_status: "NOT_APPLICABLE" | "PENDING" | "AWAITING_COLLECTION" | "COLLECTED" | "FAILED_COLLECTION" | "CANCELLED";
   currency: string;
   place_of_supply: string;
   seller_state: string;
@@ -1937,8 +2546,94 @@ export interface SellerOrder {
   seller_total_amount: string | number;
   seller_item_count: number;
   items: PlatformOrderItem[];
+  shipments?: PlatformShipment[];
+  return_requests?: PlatformReturnRequest[];
+  refunds?: PlatformRefund[];
+  disputes?: PlatformDispute[];
   created_at: string;
   updated_at?: string;
+}
+
+export interface PaymentMethodOption {
+  code: "ONLINE" | "COD";
+  provider: "RAZORPAY" | "STRIPE" | "COD";
+  name: string;
+  currency: string;
+  is_available: boolean;
+  reason?: string | null;
+  description: string;
+}
+
+export interface AvailablePaymentMethodsResponse {
+  status: string;
+  country: string;
+  currency: string;
+  amount: string;
+  payment_methods: PaymentMethodOption[];
+}
+
+export interface PaymentSessionResponse {
+  provider: "RAZORPAY" | "STRIPE" | "COD";
+  payment_method: "ONLINE" | "COD";
+  amount: string;
+  currency: string;
+  provider_order_id?: string;
+  key_id?: string;
+  publishable_key?: string;
+  client_secret?: string;
+  payment_status?: string;
+  cod_collection_status?: string;
+  message?: string;
+}
+
+export interface PaymentVerifyPayload {
+  razorpay_payment_id?: string;
+  razorpay_order_id?: string;
+  razorpay_signature?: string;
+  payment_intent_id?: string;
+  stripe_payment_intent_id?: string;
+  client_secret?: string;
+}
+
+export interface PaymentVerifyResponse {
+  status: "success" | "failed";
+  message?: string;
+  error?: string;
+  payment_reference?: string;
+  payment_status: string;
+  order?: PlatformOrder;
+  extra?: Record<string, unknown>;
+}
+
+export interface CODCollectionUpdatePayload {
+  cod_collection_status: "AWAITING_COLLECTION" | "COLLECTED" | "FAILED_COLLECTION" | "CANCELLED";
+  notes?: string;
+}
+
+export interface OrderPaymentDetailResponse {
+  order_number: string;
+  currency: string;
+  total_amount: string;
+  payment_method: "ONLINE" | "COD";
+  payment_status: string;
+  payment_reference?: string | null;
+  paid_at?: string | null;
+  cod_collection_status: string;
+  cod_collected_at?: string | null;
+  cod_collected_by?: string | null;
+  cod_collection_notes?: string;
+  transactions: Array<{
+    id: string;
+    transaction_type: string;
+    provider: string;
+    amount: string;
+    currency: string;
+    status: string;
+    provider_transaction_id?: string;
+    provider_order_id?: string;
+    error_message?: string;
+    created_at: string;
+  }>;
 }
 
 export interface MarketplacePartListing {
@@ -2249,4 +2944,245 @@ export interface PaginatedNotificationsResponse {
   next: string | null;
   previous: string | null;
   results: PlatformNotification[];
+}
+
+// ==========================================
+// Phase 5 Task 3: Returns, Refunds & Disputes
+// ==========================================
+
+export type ReturnRequestType = "CANCELLATION" | "RETURN";
+export type ReturnRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "COMPLETED" | "CANCELLED";
+export type ReturnReason =
+  | "DEFECTIVE_ITEM"
+  | "INCORRECT_ITEM"
+  | "NOT_AS_DESCRIBED"
+  | "ORDERED_BY_MISTAKE"
+  | "DELIVERY_DELAY"
+  | "BUYER_CANCEL"
+  | "OTHER";
+
+export interface PlatformReturnRequest {
+  id: string;
+  request_number: string;
+  order?: string;
+  order_id?: string;
+  order_number: string;
+  order_item?: string | null;
+  order_item_id?: string | null;
+  item_title?: string | null;
+  item_brand?: string | null;
+  buyer_id: string;
+  buyer_name?: string | null;
+  buyer_email?: string | null;
+  seller_id: string;
+  seller_name?: string | null;
+  seller_email?: string | null;
+  request_type: ReturnRequestType;
+  request_type_display?: string;
+  status: ReturnRequestStatus;
+  status_display?: string;
+  reason: ReturnReason;
+  reason_display?: string;
+  reason_category?: string;
+  reason_category_display?: string;
+  buyer_reason?: string;
+  requested_quantity: number;
+  refund_amount?: string | number;
+  return_tracking_number?: string;
+  order_currency?: string;
+  items?: Array<{
+    id?: string;
+    title: string;
+    brand: string;
+    mpn?: string;
+    quantity: number;
+    unit_price: string | number;
+    total_amount: string | number;
+  }>;
+  description: string;
+  evidence_urls: string[];
+  seller_notes?: string;
+  rejection_reason?: string;
+  reviewed_by_email?: string | null;
+  reviewed_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type RefundStatus = "PENDING" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type RefundMethod = "ORIGINAL_PAYMENT" | "BANK_TRANSFER" | "MANUAL_PAYOUT";
+
+export interface PlatformRefund {
+  id: string;
+  refund_number: string;
+  order?: string;
+  order_id?: string;
+  order_number: string;
+  return_request?: string | null;
+  return_request_id?: string | null;
+  return_request_number?: string | null;
+  dispute?: string | null;
+  dispute_id?: string | null;
+  dispute_number?: string | null;
+  amount: string | number;
+  currency: string;
+  refund_method?: RefundMethod;
+  refund_method_display?: string;
+  status: RefundStatus;
+  status_display?: string;
+  reason: string;
+  reason_category?: string;
+  gateway_provider?: string;
+  gateway_refund_id?: string;
+  gateway_reference?: string;
+  gateway_response?: Record<string, unknown>;
+  failure_reason?: string;
+  notes?: string;
+  created_by_email?: string | null;
+  approved_by_email?: string | null;
+  approved_at?: string | null;
+  processed_at?: string | null;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface OrderRefundSummary {
+  order_number: string;
+  currency: string;
+  total_amount: string | number;
+  payment_method: "ONLINE" | "COD";
+  payment_status: string;
+  cod_collection_status: string;
+  is_cod: boolean;
+  is_cod_collected: boolean;
+  paid_amount: string | number;
+  active_refunded_amount: string | number;
+  available_refundable_balance: string | number;
+  can_refund: boolean;
+  reason_ineligible?: string | null;
+  refunds: PlatformRefund[];
+}
+
+export type DisputeCategory =
+  | "ITEM_NOT_RECEIVED"
+  | "SIGNIFICANTLY_NOT_AS_DESCRIBED"
+  | "DAMAGED_OR_DEFECTIVE"
+  | "UNAUTHORIZED_TRANSACTION"
+  | "REFUND_NOT_PROCESSED"
+  | "CANCELLATION_ISSUE"
+  | "OTHER";
+
+export type DisputeStatus = "OPEN" | "UNDER_REVIEW" | "RESOLVED" | "REJECTED" | "ESCALATED";
+export type DisputePriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+export type DisputeResolution = "BUYER_REFUND" | "REPLACEMENT" | "SELLER_UPHELD" | "MUTUAL_AGREEMENT" | "DISMISSED";
+
+export interface PlatformDisputeEvent {
+  id: string;
+  actor_id?: string | null;
+  actor_name?: string | null;
+  actor_email?: string | null;
+  actor_role?: string | null;
+  event_type: "OPENED" | "STATUS_CHANGED" | "MESSAGE" | "EVIDENCE_UPLOADED" | "RESOLVED" | "ESCALATED";
+  message: string;
+  attachments: string[];
+  created_at: string;
+}
+
+export interface PlatformDispute {
+  id: string;
+  dispute_number: string;
+  order?: string;
+  order_id?: string;
+  order_number: string;
+  buyer_id: string;
+  buyer_name?: string | null;
+  buyer_email?: string | null;
+  seller_id: string;
+  seller_name?: string | null;
+  seller_email?: string | null;
+  category: DisputeCategory;
+  category_display?: string;
+  status: DisputeStatus;
+  status_display?: string;
+  priority: DisputePriority;
+  description: string;
+  evidence_urls: string[];
+  resolution?: DisputeResolution | null;
+  resolution_summary?: string;
+  resolution_notes?: string;
+  resolved_at?: string | null;
+  resolved_by_email?: string | null;
+  events: PlatformDisputeEvent[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ItemEligibilityInfo {
+  eligible: boolean;
+  reason?: string;
+  estimated_refund: string;
+}
+
+export interface OrderItemReturnEligibility {
+  order_item_id: string;
+  title: string;
+  quantity: number;
+  total_amount: string;
+  cancellation: ItemEligibilityInfo;
+  return: ItemEligibilityInfo;
+}
+
+export interface OrderReturnEligibilityResponse {
+  order_number: string;
+  currency: string;
+  order_total: string;
+  order_status: string;
+  payment_status: string;
+  order_cancellation: ItemEligibilityInfo;
+  order_return: ItemEligibilityInfo;
+  items: OrderItemReturnEligibility[];
+}
+
+export interface CreateReturnRequestPayload {
+  order_item_id?: string;
+  request_type: ReturnRequestType;
+  reason: ReturnReason;
+  requested_quantity?: number;
+  description: string;
+  evidence_urls?: string[];
+}
+
+export interface ReviewReturnRequestPayload {
+  action: "APPROVE" | "REJECT";
+  seller_notes?: string;
+  rejection_reason?: string;
+}
+
+export interface CreateDisputePayload {
+  category: DisputeCategory;
+  description: string;
+  evidence_urls?: string[];
+  priority?: DisputePriority;
+}
+
+export interface CreateDisputeMessagePayload {
+  message: string;
+  attachments?: string[];
+}
+
+export interface CreateAdminRefundPayload {
+  amount: string | number;
+  reason: string;
+  return_request_id?: string;
+  dispute_id?: string;
+  refund_method?: RefundMethod;
+  notes?: string;
+  auto_process?: boolean;
+}
+
+export interface UpdateDisputeStatusPayload {
+  status: DisputeStatus;
+  resolution?: DisputeResolution;
+  resolution_notes?: string;
 }
