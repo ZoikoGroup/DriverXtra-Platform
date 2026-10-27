@@ -308,6 +308,8 @@ SIMPLE_JWT = {
 # CORS CONFIGURATION
 # =========================================================
 
+from corsheaders.defaults import default_headers
+
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -318,6 +320,12 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    "idempotency-key",
+    "x-idempotency-key",
+)
 
 
 # =========================================================

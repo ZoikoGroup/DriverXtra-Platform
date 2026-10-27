@@ -43,10 +43,22 @@ import {
   Phone,
   MessageCircle,
   Send,
+  ShoppingCart,
 } from "lucide-react";
+import { useCart } from "@/context/CartContext";
 
-export default function MarketplaceBrowseView() {
+interface MarketplaceBrowseViewProps {
+  initialVehicleId?: string;
+  initialPartId?: string;
+}
+
+export default function MarketplaceBrowseView({
+  initialVehicleId,
+  initialPartId,
+}: MarketplaceBrowseViewProps = {}) {
   const { user } = useAuth();
+  const { addItem, getItemQuantity, isItemInCart, openCart } = useCart();
+  const [cartFeedback, setCartFeedback] = useState<{ id: string; message: string } | null>(null);
   const [activeTab, setActiveTab] = useState<"vehicles" | "parts">("vehicles");
 
   // Garage Vehicles State (Phase 3 Part C)
@@ -114,6 +126,32 @@ export default function MarketplaceBrowseView() {
     api.catalogue.getCategories().then(setCategories).catch(console.error);
   }, []);
 
+  // Handle external navigation (from Global Search) to a specific vehicle
+  useEffect(() => {
+    if (!initialVehicleId) return;
+    api.marketplace
+      .getVehicle(initialVehicleId)
+      .then((v) => {
+        setActiveTab("vehicles");
+        setSelectedVehicle(v);
+        setSelectedVehicleImageIdx(0);
+      })
+      .catch(console.error);
+  }, [initialVehicleId]);
+
+  // Handle external navigation (from Global Search) to a specific spare part
+  useEffect(() => {
+    if (!initialPartId) return;
+    api.marketplace
+      .getPart(initialPartId)
+      .then((p) => {
+        setActiveTab("parts");
+        setSelectedPart(p);
+        setSelectedPartImageIdx(0);
+      })
+      .catch(console.error);
+  }, [initialPartId]);
+
   const handleOpenEnquiryModal = (vehicle: MarketplaceVehicleListing) => {
     setEnquiryVehicle(vehicle);
     setEnquiryMessage(
@@ -165,6 +203,70 @@ export default function MarketplaceBrowseView() {
     } finally {
       setEnquirySubmitting(false);
     }
+  };
+
+  const handleAddToCart = (partListing: MarketplacePartListing, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (partListing.stock_quantity <= 0 || partListing.availability === "OUT_OF_STOCK") {
+      return;
+    }
+    const result = addItem(
+      {
+        listing_id: partListing.id,
+        listing_type: "part",
+        title: partListing.name,
+        brand: partListing.brand,
+        mpn: partListing.mpn,
+        image_url: partListing.primary_image_url || null,
+        condition: partListing.condition,
+        price: Number(partListing.price),
+        currency: partListing.currency || "INR",
+        gst_rate:
+          partListing.gst_rate !== undefined && partListing.gst_rate !== null
+            ? Number(partListing.gst_rate)
+            : undefined,
+        stock_quantity: partListing.stock_quantity,
+        seller_id: partListing.seller || "seller",
+        seller_name: partListing.seller_name || "Verified Seller",
+        organisation_name: partListing.organisation_name || null,
+      },
+      1
+    );
+
+    setCartFeedback({ id: partListing.id, message: result.message });
+    setTimeout(() => setCartFeedback(null), 3000);
+  };
+
+  const handleAddOfferToCart = (offer: CataloguePartOffer, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (offer.stock_quantity <= 0 || offer.availability === "OUT_OF_STOCK") {
+      return;
+    }
+    const result = addItem(
+      {
+        listing_id: offer.id,
+        listing_type: "part",
+        title: selectedPart?.name || "Spare Part",
+        brand: selectedPart?.brand || "Verified Brand",
+        mpn: selectedPart?.mpn || "",
+        image_url: offer.primary_image_url || selectedPart?.primary_image_url || null,
+        condition: offer.condition,
+        price: Number(offer.price),
+        currency: offer.currency || "INR",
+        gst_rate:
+          offer.gst_rate !== undefined && offer.gst_rate !== null
+            ? Number(offer.gst_rate)
+            : undefined,
+        stock_quantity: offer.stock_quantity,
+        seller_id: offer.seller_name || "seller",
+        seller_name: offer.seller_name || "Verified Seller",
+        organisation_name: offer.organisation_name || null,
+      },
+      1
+    );
+
+    setCartFeedback({ id: offer.id, message: result.message });
+    setTimeout(() => setCartFeedback(null), 3000);
   };
 
   // Update models when make changes
@@ -1510,15 +1612,26 @@ export default function MarketplaceBrowseView() {
                             <span>View Specifications & Fitment</span>
                           </button>
                           <button
+                            onClick={(e) => handleAddToCart(p, e)}
                             disabled={p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK"}
-                            className={`w-full py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK"
+                            className={`w-full py-2.5 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                              p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK"
                                 ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
+                                : cartFeedback?.id === p.id
+                                ? "bg-emerald-600 text-white shadow-sm"
+                                : isItemInCart(p.id)
+                                ? "bg-amber-400 hover:bg-amber-300 text-slate-950 font-black border border-amber-500 shadow-sm"
                                 : "bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm"
-                              }`}
+                            }`}
                           >
+                            <ShoppingCart className="w-3.5 h-3.5" />
                             <span>
                               {p.stock_quantity === 0 || p.availability === "OUT_OF_STOCK"
                                 ? "Out of Stock · Unavailable to Purchase"
+                                : cartFeedback?.id === p.id
+                                ? "✓ Added to Basket"
+                                : isItemInCart(p.id)
+                                ? `In Basket (${getItemQuantity(p.id)}) · Add Another`
                                 : "Add to Basket"}
                             </span>
                           </button>
@@ -2260,9 +2373,20 @@ export default function MarketplaceBrowseView() {
                                 Unavailable
                               </span>
                             ) : (
-                              <span className="text-[10px] text-emerald-700 font-bold mt-0.5">
-                                Available to Order
-                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => handleAddOfferToCart(offer, e)}
+                                className="mt-1 px-3 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] rounded-lg transition-colors flex items-center gap-1 shadow-2xs"
+                              >
+                                <ShoppingCart className="w-3 h-3" />
+                                <span>
+                                  {cartFeedback?.id === offer.id
+                                    ? "✓ Added"
+                                    : isItemInCart(offer.id)
+                                    ? `In Basket (${getItemQuantity(offer.id)})`
+                                    : "Add Offer"}
+                                </span>
+                              </button>
                             )}
                           </div>
                         </div>
@@ -2310,15 +2434,29 @@ export default function MarketplaceBrowseView() {
 
             <div className="pt-2 flex items-center justify-end gap-2">
               <button
+                type="button"
+                onClick={() => handleAddToCart(selectedPart)}
                 disabled={selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"}
-                className={`px-5 py-2.5 text-xs font-bold rounded-xl transition-all ${selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
+                className={`px-5 py-2.5 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 ${
+                  selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
                     ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
+                    : cartFeedback?.id === selectedPart.id
+                    ? "bg-emerald-600 text-white shadow-sm"
+                    : isItemInCart(selectedPart.id)
+                    ? "bg-amber-400 hover:bg-amber-300 text-slate-950 font-black border border-amber-500 shadow-sm"
                     : "bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm"
-                  }`}
+                }`}
               >
-                {selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
-                  ? "Out of Stock · Unavailable"
-                  : "Add to Basket"}
+                <ShoppingCart className="w-3.5 h-3.5" />
+                <span>
+                  {selectedPart.stock_quantity === 0 || selectedPart.availability === "OUT_OF_STOCK"
+                    ? "Out of Stock · Unavailable"
+                    : cartFeedback?.id === selectedPart.id
+                    ? "✓ Added to Basket"
+                    : isItemInCart(selectedPart.id)
+                    ? `In Basket (${getItemQuantity(selectedPart.id)}) · Add Another`
+                    : "Add to Basket"}
+                </span>
               </button>
               <button
                 onClick={() => setSelectedPart(null)}

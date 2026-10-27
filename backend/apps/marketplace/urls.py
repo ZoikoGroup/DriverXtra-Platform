@@ -28,6 +28,12 @@ from apps.marketplace.views import (
     MarketplaceImageUploadView,
     GSTOptionsView,
     OrderCheckoutView,
+    BuyerOrderListView,
+    BuyerOrderDetailView,
+    BuyerOrderCancelView,
+    SellerOrderListView,
+    SellerOrderDetailView,
+    SellerOrderStatusUpdateView,
     VehicleEnquiryCreateView,
     SellerVehicleEnquiryListView,
     SellerVehicleEnquiryDetailView,
@@ -81,10 +87,18 @@ urlpatterns = [
     path('favorites/parts/', BuyerFavouritePartListCreateView.as_view(), name='marketplace-buyer-favorite-parts'),
     path('favorites/parts/<uuid:id>/', BuyerFavouritePartDetailView.as_view(), name='marketplace-buyer-favorite-part-detail'),
 
-    # 6. Tax Options & Order Checkout
+    # 6. Tax Options, Order Checkout & Order Management
     path('tax/gst-options/', GSTOptionsView.as_view(), name='marketplace-tax-gst-options'),
     path('orders/checkout/', OrderCheckoutView.as_view(), name='marketplace-orders-checkout'),
     path('orders/calculate/', OrderCheckoutView.as_view(), name='marketplace-orders-calculate'),
+    path('orders/', BuyerOrderListView.as_view(), name='marketplace-orders-list'),
+    path('orders/<str:identifier>/cancel/', BuyerOrderCancelView.as_view(), name='marketplace-order-cancel'),
+    path('orders/<str:identifier>/', BuyerOrderDetailView.as_view(), name='marketplace-order-detail'),
+
+    # 6b. Seller Order Management (Multi-Seller Isolated Views & Workflow)
+    path('seller/orders/', SellerOrderListView.as_view(), name='marketplace-seller-orders-list'),
+    path('seller/orders/<str:identifier>/status/', SellerOrderStatusUpdateView.as_view(), name='marketplace-seller-order-status'),
+    path('seller/orders/<str:identifier>/', SellerOrderDetailView.as_view(), name='marketplace-seller-order-detail'),
 
     # 7. Direct Buyer–Seller Connection (Vehicle Enquiries)
     path('vehicles/<uuid:id>/enquire/', VehicleEnquiryCreateView.as_view(), name='marketplace-vehicle-enquire'),

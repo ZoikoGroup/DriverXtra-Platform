@@ -18,6 +18,8 @@ import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceRe
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
+import BuyerOrdersView from "@/components/platform/BuyerOrdersView";
+import SellerOrdersView from "@/components/platform/SellerOrdersView";
 import NotificationDrawer, { useNotificationUnreadCount } from "@/components/platform/NotificationDrawer";
 
 function getDefaultTabForRole(user?: PrototypeUser | null): string {
@@ -42,7 +44,11 @@ export default function PlatformDashboardPage() {
   const { user, isAuthenticated, isInitialized } = useAuth();
 
   const [collapsed, setCollapsed] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<{ role: string; tab: string } | null>(null);
+  const [selectedTab, setSelectedTab] = useState<{
+    role: string;
+    tab: string;
+    itemData?: { type: string; id: string; raw?: unknown };
+  } | null>(null);
   const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
   const { unreadCount, refreshUnreadCount } = useNotificationUnreadCount(isAuthenticated);
 
@@ -73,6 +79,8 @@ export default function PlatformDashboardPage() {
   const getTabLabel = (tab: string) => {
     const map: Record<string, string> = {
       marketplace_browse: "Marketplace — Approved Vehicles & Spare Parts",
+      my_orders: "My Orders — Order History & Status",
+      seller_orders: "Customer Orders — Seller Order Fulfillment",
       favourites: "Saved Items — Vehicles & Spare Parts",
       my_enquiries: "My Enquiries — Vehicle Questions & Seller Replies",
       seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
@@ -93,6 +101,8 @@ export default function PlatformDashboardPage() {
   const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
   const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP" || isAdmin;
 
+  const activeItemData = selectedTab?.role === activeRole && selectedTab.tab === currentTab ? selectedTab.itemData : undefined;
+
   return (
     <div className="min-h-screen bg-slate-100 flex flex-row">
       {/* Role-Governed Sidebar */}
@@ -109,10 +119,22 @@ export default function PlatformDashboardPage() {
           currentTabLabel={getTabLabel(currentTab)}
           onOpenNotifications={() => setNotificationDrawerOpen(true)}
           unreadNotificationCount={unreadCount}
+          onNavigate={(targetTab, itemData) => {
+            setSelectedTab({ role: activeRole, tab: targetTab, itemData });
+          }}
         />
 
         <main className="flex-1 overflow-y-auto">
-          {currentTab === "favourites" ? (
+          {currentTab === "my_orders" ? (
+            <BuyerOrdersView
+              onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
+              initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
+            />
+          ) : currentTab === "seller_orders" ? (
+            <SellerOrdersView
+              initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
+            />
+          ) : currentTab === "favourites" ? (
             <BuyerFavouritesView
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
             />
@@ -121,7 +143,10 @@ export default function PlatformDashboardPage() {
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
             />
           ) : currentTab === "marketplace_browse" ? (
-            <MarketplaceBrowseView />
+            <MarketplaceBrowseView
+              initialVehicleId={activeItemData?.type === "marketplace_vehicle" ? activeItemData.id : undefined}
+              initialPartId={activeItemData?.type === "marketplace_part" ? activeItemData.id : undefined}
+            />
           ) : currentTab === "workshop_landing" ? (
             <WorkshopLandingView />
           ) : currentTab === "seller_inventory" ? (
@@ -132,7 +157,10 @@ export default function PlatformDashboardPage() {
             )
           ) : currentTab === "admin_marketplace_review" ? (
             isAdmin ? (
-              <AdminMarketplaceReviewView />
+              <AdminMarketplaceReviewView
+                initialVehicleId={activeItemData?.type === "admin_vehicle" ? activeItemData.id : undefined}
+                initialPartId={activeItemData?.type === "admin_part" ? activeItemData.id : undefined}
+              />
             ) : (
               <MarketplaceBrowseView />
             )
@@ -147,9 +175,13 @@ export default function PlatformDashboardPage() {
           ) : currentTab === "organisations" ? (
             <Phase1OrganisationsView />
           ) : currentTab === "garage" ? (
-            <Phase2GarageView />
+            <Phase2GarageView
+              initialVehicleId={activeItemData?.type === "garage_vehicle" ? activeItemData.id : undefined}
+            />
           ) : currentTab === "catalogue" || currentTab === "parts_fitment" ? (
-            <Phase2CatalogueView />
+            <Phase2CatalogueView
+              initialPartId={activeItemData?.type === "catalogue_part" ? activeItemData.id : undefined}
+            />
           ) : currentTab === "seller_onboarding" ? (
             <Phase2SellerOnboardingView initialTab="my_application" />
           ) : currentTab === "seller_reviews" ? (

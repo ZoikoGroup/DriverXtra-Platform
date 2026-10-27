@@ -30,9 +30,18 @@ import {
   PackageCheck,
   ShieldCheck,
   Store,
+  ShoppingCart,
 } from "lucide-react";
+import { useCart } from "@/context/CartContext";
 
-export default function Phase2CatalogueView() {
+interface Phase2CatalogueViewProps {
+  initialPartId?: string;
+}
+
+export default function Phase2CatalogueView({ initialPartId }: Phase2CatalogueViewProps = {}) {
+  const { addItem, getItemQuantity, isItemInCart, openCart } = useCart();
+  const [cartFeedback, setCartFeedback] = useState<{ id: string; message: string } | null>(null);
+
   // Mode switcher: OEM Reference Catalogue vs Approved Marketplace Stock
   const [catalogueMode, setCatalogueMode] = useState<"canonical" | "marketplace">("canonical");
 
@@ -243,6 +252,47 @@ export default function Phase2CatalogueView() {
       setIsLoadingPartDetail(false);
     }
   };
+
+  const handleAddToCart = (listing: MarketplacePartListing, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (listing.stock_quantity <= 0 || listing.availability === "OUT_OF_STOCK") return;
+
+    const result = addItem(
+      {
+        listing_id: listing.id,
+        listing_type: "part",
+        title: listing.name,
+        brand: listing.brand,
+        mpn: listing.mpn,
+        image_url: listing.primary_image_url || null,
+        condition: listing.condition,
+        price: Number(listing.price),
+        currency: listing.currency || "INR",
+        gst_rate:
+          listing.gst_rate !== undefined && listing.gst_rate !== null
+            ? Number(listing.gst_rate)
+            : undefined,
+        stock_quantity: listing.stock_quantity,
+        seller_id: listing.seller || "seller",
+        seller_name: listing.seller_name || "Verified Seller",
+        organisation_name: listing.organisation_name || null,
+      },
+      1
+    );
+
+    setCartFeedback({ id: listing.id, message: result.message });
+    setTimeout(() => setCartFeedback(null), 3000);
+  };
+
+  // Handle external navigation (from Global Search) to a specific canonical part
+  useEffect(() => {
+    if (!initialPartId) return;
+    const timer = setTimeout(() => {
+      setCatalogueMode("canonical");
+      handleSelectPart(initialPartId);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [initialPartId]);
 
   // Run Fitment Check for Selected Canonical Part
   const handleCheckFitment = async (partId: string, variantId: string) => {
@@ -875,6 +925,23 @@ export default function Phase2CatalogueView() {
                               Seller note: {listing.compatibility_notes}
                             </p>
                           )}
+
+                          {listing.stock_quantity > 0 && (
+                            <button
+                              type="button"
+                              onClick={(e) => handleAddToCart(listing, e)}
+                              className="w-full py-1.5 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg transition-colors flex items-center justify-center gap-1.5 shadow-2xs mt-2"
+                            >
+                              <ShoppingCart className="w-3.5 h-3.5" />
+                              <span>
+                                {cartFeedback?.id === listing.id
+                                  ? "✓ Added to Basket"
+                                  : isItemInCart(listing.id)
+                                  ? `In Basket (${getItemQuantity(listing.id)}) · Add Another`
+                                  : "Add to Basket"}
+                              </span>
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1104,6 +1171,35 @@ export default function Phase2CatalogueView() {
                     </p>
                   </div>
                 )}
+
+                {/* Add to Basket Action */}
+                <div className="pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={(e) => handleAddToCart(selectedSellerPart, e)}
+                    disabled={selectedSellerPart.stock_quantity <= 0 || selectedSellerPart.availability === "OUT_OF_STOCK"}
+                    className={`w-full py-2.5 px-4 text-xs font-black rounded-xl transition-all flex items-center justify-center gap-2 shadow-sm ${
+                      selectedSellerPart.stock_quantity <= 0 || selectedSellerPart.availability === "OUT_OF_STOCK"
+                        ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
+                        : cartFeedback?.id === selectedSellerPart.id
+                        ? "bg-emerald-600 text-white"
+                        : isItemInCart(selectedSellerPart.id)
+                        ? "bg-amber-400 hover:bg-amber-300 text-slate-950 border border-amber-500"
+                        : "bg-amber-500 hover:bg-amber-400 text-slate-950"
+                    }`}
+                  >
+                    <ShoppingCart className="w-4 h-4" />
+                    <span>
+                      {selectedSellerPart.stock_quantity <= 0 || selectedSellerPart.availability === "OUT_OF_STOCK"
+                        ? "Out of Stock · Unavailable"
+                        : cartFeedback?.id === selectedSellerPart.id
+                        ? "✓ Added to Basket"
+                        : isItemInCart(selectedSellerPart.id)
+                        ? `In Basket (${getItemQuantity(selectedSellerPart.id)}) · Add Another`
+                        : "Add to Basket"}
+                    </span>
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="p-8 bg-white rounded-2xl border border-slate-200 text-center text-xs text-slate-500">

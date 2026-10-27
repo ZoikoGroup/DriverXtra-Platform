@@ -1095,11 +1095,36 @@ class BuyerFavouritePartSerializer(serializers.ModelSerializer):
         return favourite
 
 
+VALID_ORDER_STATUS_TRANSITIONS = {
+    OrderStatusChoices.PENDING_CONFIRMATION: [
+        OrderStatusChoices.CONFIRMED,
+        OrderStatusChoices.CANCELLED,
+    ],
+    OrderStatusChoices.CONFIRMED: [
+        OrderStatusChoices.PROCESSING,
+        OrderStatusChoices.CANCELLED,
+    ],
+    OrderStatusChoices.PROCESSING: [
+        OrderStatusChoices.COMPLETED,
+        OrderStatusChoices.CANCELLED,
+    ],
+    OrderStatusChoices.COMPLETED: [],
+    OrderStatusChoices.CANCELLED: [],
+}
+
+
 class OrderItemSerializer(serializers.ModelSerializer):
+    seller_name = serializers.SerializerMethodField()
+    seller_id = serializers.SerializerMethodField()
+    listing_id = serializers.UUIDField(source='listing.id', read_only=True, allow_null=True)
+
     class Meta:
         model = OrderItem
         fields = [
             'id',
+            'listing_id',
+            'seller_id',
+            'seller_name',
             'item_type',
             'title',
             'brand',
@@ -1118,11 +1143,71 @@ class OrderItemSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    def get_seller_name(self, obj):
+        if obj.listing and obj.listing.seller:
+            return obj.listing.seller.full_name or obj.listing.seller.email
+        return ""
+
+    def get_seller_id(self, obj):
+        if obj.listing and obj.listing.seller_id:
+            return str(obj.listing.seller_id)
+        return None
+
 
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     buyer_email = serializers.CharField(source='buyer.email', read_only=True)
     buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            'id',
+            'order_number',
+            'idempotency_key',
+            'buyer_email',
+            'buyer_name',
+            'status',
+            'currency',
+            'place_of_supply',
+            'seller_state',
+            'shipping_name',
+            'shipping_phone',
+            'shipping_address_line1',
+            'shipping_address_line2',
+            'shipping_city',
+            'shipping_state',
+            'shipping_postal_code',
+            'shipping_country',
+            'subtotal_taxable_amount',
+            'cgst_amount',
+            'sgst_amount',
+            'igst_amount',
+            'total_tax_amount',
+            'total_amount',
+            'items',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class SellerOrderSerializer(serializers.ModelSerializer):
+    """
+    Seller order serializer ensuring strict multi-seller order isolation.
+    Displays only items belonging to the requesting seller, and computes
+    financial totals (subtotal, taxes, total) for the seller's items only.
+    """
+    items = serializers.SerializerMethodField()
+    buyer_email = serializers.CharField(source='buyer.email', read_only=True)
+    buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+    seller_subtotal_taxable_amount = serializers.SerializerMethodField()
+    seller_cgst_amount = serializers.SerializerMethodField()
+    seller_sgst_amount = serializers.SerializerMethodField()
+    seller_igst_amount = serializers.SerializerMethodField()
+    seller_total_tax_amount = serializers.SerializerMethodField()
+    seller_total_amount = serializers.SerializerMethodField()
+    seller_item_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -1135,16 +1220,113 @@ class OrderSerializer(serializers.ModelSerializer):
             'currency',
             'place_of_supply',
             'seller_state',
-            'subtotal_taxable_amount',
-            'cgst_amount',
-            'sgst_amount',
-            'igst_amount',
-            'total_tax_amount',
-            'total_amount',
+            'shipping_name',
+            'shipping_phone',
+            'shipping_address_line1',
+            'shipping_address_line2',
+            'shipping_city',
+            'shipping_state',
+            'shipping_postal_code',
+            'shipping_country',
+            'seller_subtotal_taxable_amount',
+            'seller_cgst_amount',
+            'seller_sgst_amount',
+            'seller_igst_amount',
+            'seller_total_tax_amount',
+            'seller_total_amount',
+            'seller_item_count',
             'items',
             'created_at',
+            'updated_at',
         ]
         read_only_fields = fields
+
+    def _get_seller_items(self, order):
+        if hasattr(order, '_cached_seller_items'):
+            return order._cached_seller_items
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            order._cached_seller_items = []
+            return order._cached_seller_items
+        user = request.user
+        if user.is_staff or user.is_superuser:
+            order._cached_seller_items = list(order.items.all())
+            return order._cached_seller_items
+
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        org_ids = set(OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True))
+
+        items = []
+        for item in order.items.all():
+            if item.listing and (item.listing.seller_id == user.id or item.listing.organisation_id in org_ids):
+                items.append(item)
+        order._cached_seller_items = items
+        return items
+
+    def get_items(self, obj):
+        seller_items = self._get_seller_items(obj)
+        return OrderItemSerializer(seller_items, many=True).data
+
+    def get_seller_subtotal_taxable_amount(self, obj):
+        seller_items = self._get_seller_items(obj)
+        total = sum((item.taxable_amount for item in seller_items), Decimal('0.00'))
+        return str(total)
+
+    def get_seller_cgst_amount(self, obj):
+        seller_items = self._get_seller_items(obj)
+        total = sum((item.cgst_amount for item in seller_items), Decimal('0.00'))
+        return str(total)
+
+    def get_seller_sgst_amount(self, obj):
+        seller_items = self._get_seller_items(obj)
+        total = sum((item.sgst_amount for item in seller_items), Decimal('0.00'))
+        return str(total)
+
+    def get_seller_igst_amount(self, obj):
+        seller_items = self._get_seller_items(obj)
+        total = sum((item.igst_amount for item in seller_items), Decimal('0.00'))
+        return str(total)
+
+    def get_seller_total_tax_amount(self, obj):
+        seller_items = self._get_seller_items(obj)
+        total = sum((item.tax_amount for item in seller_items), Decimal('0.00'))
+        return str(total)
+
+    def get_seller_total_amount(self, obj):
+        seller_items = self._get_seller_items(obj)
+        total = sum((item.total_amount for item in seller_items), Decimal('0.00'))
+        return str(total)
+
+    def get_seller_item_count(self, obj):
+        seller_items = self._get_seller_items(obj)
+        return sum(item.quantity for item in seller_items)
+
+
+class OrderStatusUpdateSerializer(serializers.Serializer):
+    """Validates permitted status updates with transition rules."""
+    status = serializers.ChoiceField(choices=OrderStatusChoices.choices, required=True)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_status(self, value):
+        order = self.context.get('order')
+        if not order:
+            return value
+
+        current_status = order.status
+        if current_status == value:
+            return value
+
+        valid_targets = VALID_ORDER_STATUS_TRANSITIONS.get(current_status, [])
+        if value not in valid_targets:
+            raise serializers.ValidationError(
+                f"Cannot transition order from '{current_status}' to '{value}'. "
+                f"Permitted transitions from '{current_status}': {valid_targets or 'None (Terminal state)'}."
+            )
+        return value
 
 
 class CheckoutItemPayloadSerializer(serializers.Serializer):
@@ -1156,6 +1338,22 @@ class CheckoutPayloadSerializer(serializers.Serializer):
     items = CheckoutItemPayloadSerializer(many=True, required=True)
     place_of_supply = serializers.CharField(required=False, allow_blank=True, default='')
     currency = serializers.CharField(required=False, default='INR')
+    shipping_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    shipping_phone = serializers.CharField(max_length=30, required=False, allow_blank=True, default='')
+    shipping_address_line1 = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    shipping_address_line2 = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    shipping_city = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    shipping_state = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    shipping_postal_code = serializers.CharField(max_length=20, required=False, allow_blank=True, default='')
+    shipping_country = serializers.CharField(max_length=100, required=False, allow_blank=True, default='India')
+    expected_total_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+    idempotency_key = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
 
 
 class VehicleEnquiryCreateSerializer(serializers.ModelSerializer):
