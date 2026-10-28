@@ -15,6 +15,7 @@ import MarketplaceBrowseView from "@/components/platform/MarketplaceBrowseView";
 import SellerInventoryView from "@/components/platform/SellerInventoryView";
 import WorkshopLandingView from "@/components/platform/WorkshopLandingView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
+import AdminDisputesRefundsView from "@/components/platform/AdminDisputesRefundsView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
@@ -85,6 +86,7 @@ export default function PlatformDashboardPage() {
       my_enquiries: "My Enquiries — Vehicle Questions & Seller Replies",
       seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
       admin_marketplace_review: "Admin Moderation — Listing Review Queue",
+      admin_disputes_refunds: "Disputes & Refunds — Adjudication & Order Refunds",
       admin_staff_management: "Staff Administration & Access Control",
       profile: "User Profile (Phase 1 Identity & RBAC)",
       organisations: "Organisations & Teams (Phase 1 RBAC)",
@@ -161,6 +163,12 @@ export default function PlatformDashboardPage() {
                 initialVehicleId={activeItemData?.type === "admin_vehicle" ? activeItemData.id : undefined}
                 initialPartId={activeItemData?.type === "admin_part" ? activeItemData.id : undefined}
               />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_disputes_refunds" ? (
+            isAdmin ? (
+              <AdminDisputesRefundsView />
             ) : (
               <MarketplaceBrowseView />
             )

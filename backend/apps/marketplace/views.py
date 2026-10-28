@@ -12,7 +12,7 @@ from rest_framework.exceptions import (
     NotFound,
 )
 from django.http import Http404
-from django.db import transaction
+from django.db import models, transaction
 from django.db.models import (
     Q, F, Count, Case, When, Value, IntegerField, TextField, Exists, OuterRef,
 )
@@ -39,6 +39,19 @@ from apps.marketplace.models import (
     BuyerFavouritePart,
     VehicleEnquiry,
     VehicleEnquiryStatusChoices,
+    Order,
+    OrderItem,
+    OrderStatusChoices,
+    PaymentMethodChoices,
+    PaymentStatusChoices,
+    CODCollectionStatusChoices,
+    PaymentTransaction,
+    PaymentWebhookEvent,
+    Shipment,
+    ShipmentItem,
+    TrackingEvent,
+    CarrierChoices,
+    ShipmentStatusChoices,
 )
 from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
 from apps.marketplace.serializers import (
@@ -58,8 +71,21 @@ from apps.marketplace.serializers import (
     VehicleEnquirySellerSerializer,
     VehicleEnquiryBuyerSerializer,
     VehicleEnquiryStatusUpdateSerializer,
+    OrderSerializer,
+    SellerOrderSerializer,
+    CheckoutPayloadSerializer,
+    PaymentVerifyPayloadSerializer,
+    CODCollectionUpdateSerializer,
+    ShipmentSerializer,
+    ShipmentCreatePayloadSerializer,
+    ShipmentStatusUpdatePayloadSerializer,
+    TrackingEventCreatePayloadSerializer,
+    TrackingEventSerializer,
 )
 from apps.marketplace.services import adjust_stock, change_price
+from apps.marketplace.payments import PaymentService
+from apps.marketplace.logistics import ShipmentService, get_available_carriers_for_country
+
 
 
 class IsSellerOrStaff(permissions.BasePermission):
@@ -1764,25 +1790,19 @@ class OrderCheckoutView(views.APIView):
         if not preview_only and idempotency_key:
             existing_order = Order.objects.filter(buyer=buyer, idempotency_key=idempotency_key).first()
             if existing_order:
+                payment_session = None
+                if existing_order.payment_method == PaymentMethodChoices.ONLINE and existing_order.payment_status != PaymentStatusChoices.PAID:
+                    payment_session = PaymentService.create_payment_session(existing_order)
                 return Response(
                     {
                         "status": "success",
                         "message": "Order already processed (idempotent replay).",
                         "replayed": True,
                         "order": OrderSerializer(existing_order).data,
+                        "payment_session": payment_session,
                     },
                     status=status.HTTP_200_OK,
                 )
-
-        # Shipping & Contact fields
-        shipping_name = data.get('shipping_name', '').strip()
-        shipping_phone = data.get('shipping_phone', '').strip()
-        shipping_address_line1 = data.get('shipping_address_line1', '').strip()
-        shipping_address_line2 = data.get('shipping_address_line2', '').strip()
-        shipping_city = data.get('shipping_city', '').strip()
-        shipping_state = data.get('shipping_state', '').strip() or place_of_supply
-        shipping_postal_code = data.get('shipping_postal_code', '').strip()
-        shipping_country = data.get('shipping_country', '').strip() or 'India'
 
         # 2. Consolidate requested quantities across duplicate listing items
         consolidated_items = {}
@@ -1796,6 +1816,62 @@ class OrderCheckoutView(views.APIView):
                 )
             consolidated_items[lid] = consolidated_items.get(lid, 0) + qty
 
+        # Early check: ensure all requested items exist as SparePartListing (returns 404 if missing or vehicle)
+        for listing_id in consolidated_items.keys():
+            if not SparePartListing.objects.filter(id=listing_id, is_active=True).exists():
+                return Response(
+                    {"error": f"Spare part listing with ID {listing_id} not found or inactive."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        from apps.marketplace.pricing import (
+            PriceCalculationError,
+            normalize_destination_country,
+            get_required_currency_for_country,
+            resolve_authoritative_unit_price,
+            calculate_item_tax_breakdown,
+        )
+
+        # Shipping & Contact fields
+        shipping_name = data.get('shipping_name', '').strip()
+        shipping_phone = data.get('shipping_phone', '').strip()
+        shipping_address_line1 = data.get('shipping_address_line1', '').strip()
+        shipping_address_line2 = data.get('shipping_address_line2', '').strip()
+        shipping_city = data.get('shipping_city', '').strip()
+        shipping_state = data.get('shipping_state', '').strip() or place_of_supply
+        shipping_postal_code = data.get('shipping_postal_code', '').strip()
+        shipping_country_input = data.get('shipping_country', '').strip() or request.data.get('shipping_country', '').strip()
+        payment_method = data.get('payment_method', PaymentMethodChoices.ONLINE)
+
+        # Destination Country & Required Currency Resolution
+        explicit_currency = (data.get('currency', '') or request.data.get('currency', '')).strip().upper()
+        if not shipping_country_input:
+            shipping_country_raw = 'United Kingdom' if explicit_currency == 'GBP' else 'India'
+        else:
+            shipping_country_raw = shipping_country_input
+
+        try:
+            country_code, canonical_country = normalize_destination_country(shipping_country_raw)
+        except PriceCalculationError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        shipping_country = canonical_country
+        required_currency = get_required_currency_for_country(country_code)
+
+        if explicit_currency and explicit_currency != required_currency:
+            if country_code == 'GB':
+                return Response(
+                    {"error": f"{explicit_currency} currency cannot be used for delivery to the United Kingdom. UK orders must use GBP."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            else:
+                return Response(
+                    {"error": f"{explicit_currency} currency cannot be used for delivery to India. India orders must use INR."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        currency = required_currency
+
         try:
             with transaction.atomic():
                 calculated_items = []
@@ -1807,6 +1883,7 @@ class OrderCheckoutView(views.APIView):
                 grand_total = Decimal('0.00')
 
                 seller_state = ""
+                effective_place_of_supply = shipping_state or place_of_supply or ('UK' if country_code == 'GB' else 'MH')
 
                 for listing_id, qty in consolidated_items.items():
                     if preview_only:
@@ -1834,27 +1911,38 @@ class OrderCheckoutView(views.APIView):
                             status=status.HTTP_400_BAD_REQUEST,
                         )
 
+                    # Authoritative server-side pricing and cross-currency conversion
+                    try:
+                        unit_price, orig_currency, is_converted = resolve_authoritative_unit_price(
+                            listing=listing,
+                            destination_currency=currency,
+                            destination_country=shipping_country,
+                        )
+                    except PriceCalculationError as e:
+                        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
                     if listing.organisation and listing.organisation.jurisdiction:
                         seller_state = listing.organisation.jurisdiction
 
-                    unit_price = listing.price
-                    gst_rate = listing.gst_rate or Decimal('0.00')
-                    line_taxable = quantize_currency(unit_price * qty)
-
-                    effective_place_of_supply = place_of_supply or shipping_state
-
-                    breakdown = calculate_gst_breakdown(
-                        price=line_taxable,
-                        gst_rate=gst_rate,
-                        place_of_supply=effective_place_of_supply,
+                    tax_calc = calculate_item_tax_breakdown(
+                        unit_price=unit_price,
+                        quantity=qty,
+                        listing=listing,
+                        country_code=country_code,
+                        place_of_supply=place_of_supply,
                         seller_state=seller_state,
+                        shipping_state=shipping_state,
+                        shipping_city=shipping_city,
                     )
 
-                    line_gst = breakdown['gst_amount']
-                    line_total = breakdown['total_price']
-                    line_cgst = breakdown['cgst_amount']
-                    line_sgst = breakdown['sgst_amount']
-                    line_igst = breakdown['igst_amount']
+                    line_taxable = tax_calc["taxable_amount"]
+                    line_gst = tax_calc["tax_amount"]
+                    line_cgst = tax_calc["cgst_amount"]
+                    line_sgst = tax_calc["sgst_amount"]
+                    line_igst = tax_calc["igst_amount"]
+                    line_total = tax_calc["total_amount"]
+                    effective_place_of_supply = tax_calc["effective_place_of_supply"]
+                    gst_rate = tax_calc["gst_rate"]
 
                     subtotal_taxable += line_taxable
                     cgst_total += line_cgst
@@ -1882,11 +1970,18 @@ class OrderCheckoutView(views.APIView):
                         "total_amount": line_total,
                     })
 
+                available_payment_methods = PaymentService.get_available_payment_methods(
+                    country=shipping_country,
+                    currency=currency,
+                    amount=grand_total,
+                )
+
                 if preview_only:
                     return Response({
                         "status": "success",
                         "preview": True,
-                        "currency": currency or listing.currency,
+                        "currency": currency,
+                        "country": country_code,
                         "place_of_supply": effective_place_of_supply,
                         "seller_state": seller_state,
                         "subtotal_taxable_amount": str(subtotal_taxable),
@@ -1895,6 +1990,7 @@ class OrderCheckoutView(views.APIView):
                         "igst_amount": str(igst_total),
                         "total_tax_amount": str(tax_total),
                         "total_amount": str(grand_total),
+                        "available_payment_methods": available_payment_methods,
                         "items": [
                             {
                                 "listing_id": str(ci["listing"].id),
@@ -1941,6 +2037,19 @@ class OrderCheckoutView(views.APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
+                # COD Eligibility Check
+                if payment_method == PaymentMethodChoices.COD:
+                    is_eligible, reason = PaymentService.check_cod_eligibility(
+                        country=shipping_country,
+                        currency=currency,
+                        amount=grand_total,
+                    )
+                    if not is_eligible:
+                        return Response(
+                            {"error": f"Cash on Delivery is not available: {reason}"},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
                 # 5. Authoritative Price / Tax Change Guard
                 expected_total = data.get('expected_total_amount')
                 if expected_total is not None:
@@ -1959,13 +2068,21 @@ class OrderCheckoutView(views.APIView):
                             status=status.HTTP_409_CONFLICT,
                         )
 
-                # 5. Order Creation with PENDING_CONFIRMATION status
+                # 6. Order Creation with PENDING_CONFIRMATION status
                 order_number = f"DX-ORD-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                cod_status = (
+                    CODCollectionStatusChoices.PENDING
+                    if payment_method == PaymentMethodChoices.COD
+                    else CODCollectionStatusChoices.NOT_APPLICABLE
+                )
                 order = Order.objects.create(
                     buyer=buyer,
                     order_number=order_number,
                     idempotency_key=idempotency_key or None,
                     status=OrderStatusChoices.PENDING_CONFIRMATION,
+                    payment_method=payment_method,
+                    payment_status=PaymentStatusChoices.PENDING,
+                    cod_collection_status=cod_status,
                     currency=currency,
                     place_of_supply=effective_place_of_supply,
                     seller_state=seller_state,
@@ -2013,11 +2130,18 @@ class OrderCheckoutView(views.APIView):
                         note=f"Customer order {order_number}",
                     )
 
+                payment_session = PaymentService.create_payment_session(order)
+
                 return Response(
                     {
                         "status": "success",
-                        "message": "Order created successfully. Awaiting payment/confirmation.",
+                        "message": (
+                            "Order created successfully. Awaiting payment/confirmation."
+                            if payment_method == PaymentMethodChoices.ONLINE
+                            else "Order created successfully with Cash on Delivery."
+                        ),
                         "order": OrderSerializer(order).data,
+                        "payment_session": payment_session,
                     },
                     status=status.HTTP_201_CREATED,
                 )
@@ -2025,12 +2149,16 @@ class OrderCheckoutView(views.APIView):
             if idempotency_key:
                 existing_order = Order.objects.filter(buyer=buyer, idempotency_key=idempotency_key).first()
                 if existing_order:
+                    payment_session = None
+                    if existing_order.payment_method == PaymentMethodChoices.ONLINE and existing_order.payment_status != PaymentStatusChoices.PAID:
+                        payment_session = PaymentService.create_payment_session(existing_order)
                     return Response(
                         {
                             "status": "success",
                             "message": "Order already processed (idempotent replay).",
                             "replayed": True,
                             "order": OrderSerializer(existing_order).data,
+                            "payment_session": payment_session,
                         },
                         status=status.HTTP_200_OK,
                     )
@@ -2567,3 +2695,1297 @@ class BuyerVehicleEnquiryListView(generics.ListAPIView):
         ).select_related(
             'listing', 'listing__make', 'listing__model', 'seller', 'organisation'
         )
+
+
+# ============================================================================
+# Phase 5: Payment Gateway, Webhooks, and Cash on Delivery (COD) Endpoints
+# ============================================================================
+
+def _resolve_order_by_identifier(identifier: str):
+    """Helper to resolve an Order by UUID or order_number."""
+    import uuid
+    from apps.marketplace.models import Order
+    try:
+        uuid.UUID(str(identifier))
+        return Order.objects.filter(id=identifier).first()
+    except (ValueError, AttributeError):
+        return Order.objects.filter(order_number=identifier).first()
+
+
+class AvailablePaymentMethodsView(views.APIView):
+    """
+    Returns available payment options (Online Razorpay/Stripe, Cash on Delivery)
+    based on country, currency, and cart/order amount.
+    GET /api/v1/marketplace/orders/payment-methods/
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        from decimal import Decimal
+        country = request.query_params.get('country', 'India').strip()
+        country_code = PaymentService.normalize_country_code(country)
+        default_curr = 'GBP' if country_code == 'GB' else 'INR'
+        currency = request.query_params.get('currency', default_curr).strip().upper()
+        amount_str = request.query_params.get('amount', '0.00').strip()
+        try:
+            amount = Decimal(amount_str)
+        except Exception:
+            amount = Decimal('0.00')
+
+        methods = PaymentService.get_available_payment_methods(
+            country=country,
+            currency=currency,
+            amount=amount,
+        )
+        return Response({
+            "status": "success",
+            "country": PaymentService.normalize_country_code(country),
+            "currency": currency,
+            "amount": str(amount),
+            "payment_methods": methods,
+        }, status=status.HTTP_200_OK)
+
+
+class OrderPaymentSessionCreateView(views.APIView):
+    """
+    Creates or retrieves an authoritative online payment session (Razorpay Order / Stripe PaymentIntent)
+    for an existing order.
+    POST /api/v1/marketplace/orders/<identifier>/payment/create/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Access check: Buyer or Staff
+        is_staff = request.user.is_staff or request.user.is_superuser or request.user.has_role('STAFF') or request.user.has_role('ADMIN')
+        if order.buyer_id != request.user.id and not is_staff:
+            return Response({"error": "You do not have permission to pay for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        if order.payment_status == PaymentStatusChoices.PAID:
+            return Response({
+                "status": "already_paid",
+                "message": "Order is already paid.",
+                "payment_status": order.payment_status,
+                "payment_reference": order.payment_reference,
+            }, status=status.HTTP_200_OK)
+
+        if order.status == OrderStatusChoices.CANCELLED:
+            return Response({"error": "Cannot initialize payment for a cancelled order."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            session_data = PaymentService.create_payment_session(order)
+            return Response({
+                "status": "success",
+                "order_number": order.order_number,
+                "payment_session": session_data,
+            }, status=status.HTTP_200_OK)
+        except Exception as exc:
+            return Response({"error": f"Failed to initialize payment session: {str(exc)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class OrderPaymentVerifyView(views.APIView):
+    """
+    Cryptographically verifies client payment confirmation (Razorpay signature / Stripe confirmation).
+    Never marks order as paid without server-authoritative verification.
+    POST /api/v1/marketplace/orders/<identifier>/payment/verify/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_staff = request.user.is_staff or request.user.is_superuser or request.user.has_role('STAFF') or request.user.has_role('ADMIN')
+        if order.buyer_id != request.user.id and not is_staff:
+            return Response({"error": "You do not have permission to verify payment for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = PaymentVerifyPayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        is_valid, ref_or_err, extra = PaymentService.verify_payment(
+            order=order,
+            payload=serializer.validated_data,
+            actor=request.user,
+        )
+
+        if is_valid:
+            return Response({
+                "status": "success",
+                "message": "Payment successfully verified and confirmed.",
+                "payment_reference": ref_or_err,
+                "payment_status": order.payment_status,
+                "order": OrderSerializer(order).data,
+                "extra": extra,
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "status": "failed",
+                "error": ref_or_err,
+                "payment_status": order.payment_status,
+                "extra": extra,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class OrderPaymentSimulateTestView(views.APIView):
+    """
+    Clearly isolated server-side test payment execution for development and staging environments.
+    Enforces that test-mode cannot be enabled via client flags in production.
+    POST /api/v1/marketplace/orders/<identifier>/payment/simulate/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        import hmac
+        import hashlib
+
+        # 1. Strict Server Environment Guard: strictly disabled in production
+        is_test_env = getattr(settings, 'PAYMENT_TEST_MODE', False) and (
+            getattr(settings, 'DEBUG', False) or getattr(settings, 'IS_TESTING', False)
+        )
+        if not is_test_env:
+            return Response(
+                {"error": "Simulated test-mode payments are strictly disabled in production environments."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Access check: Buyer or Staff
+        is_staff = request.user.is_staff or request.user.is_superuser or request.user.has_role('STAFF') or request.user.has_role('ADMIN')
+        if order.buyer_id != request.user.id and not is_staff:
+            return Response({"error": "You do not have permission to pay for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        if order.payment_method == PaymentMethodChoices.COD:
+            return Response({"error": "Cannot simulate online payment for a Cash on Delivery order."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if order.payment_status == PaymentStatusChoices.PAID:
+            return Response({
+                "status": "success",
+                "message": "Order is already marked as paid.",
+                "already_paid": True,
+                "order": OrderSerializer(order).data,
+            }, status=status.HTTP_200_OK)
+
+        # 2. Ensure payment session exists
+        if not order.payment_reference:
+            PaymentService.create_payment_session(order)
+            order.refresh_from_db()
+
+        # 3. Server-authoritative test verification based on order provider
+        provider = PaymentService.get_provider_for_order(order)
+        if provider.provider_name == 'STRIPE':
+            verify_payload = {
+                "payment_intent_id": order.payment_reference,
+            }
+        else:  # RAZORPAY
+            sim_payment_id = f"pay_sim_{uuid.uuid4().hex[:14]}"
+            msg = f"{order.payment_reference}|{sim_payment_id}".encode('utf-8')
+            valid_sig = hmac.new(
+                provider.key_secret.encode('utf-8'),
+                msg,
+                hashlib.sha256,
+            ).hexdigest()
+            verify_payload = {
+                "razorpay_order_id": order.payment_reference,
+                "razorpay_payment_id": sim_payment_id,
+                "razorpay_signature": valid_sig,
+            }
+
+        is_valid, ref_or_err, extra = PaymentService.verify_payment(
+            order=order,
+            payload=verify_payload,
+            actor=request.user,
+        )
+
+        if is_valid:
+            order.refresh_from_db()
+            return Response({
+                "status": "success",
+                "message": "Simulated payment successfully verified and confirmed in test mode.",
+                "payment_reference": ref_or_err,
+                "payment_status": order.payment_status,
+                "order": OrderSerializer(order).data,
+                "extra": extra,
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "status": "failed",
+                "error": ref_or_err,
+                "payment_status": order.payment_status,
+                "extra": extra,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PaymentWebhookView(views.APIView):
+    """
+    Ingests and validates webhooks from payment gateways (Razorpay / Stripe)
+    with signature verification, duplicate-event defense, and idempotent processing.
+    POST /api/v1/marketplace/payments/webhook/<provider>/
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, provider):
+        headers = {}
+        for key, value in request.META.items():
+            if key.startswith('HTTP_'):
+                header_name = key[5:].replace('_', '-').lower()
+                headers[header_name] = value
+            elif key in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
+                headers[key.replace('_', '-').lower()] = value
+
+        success, status_code, response_data = PaymentService.process_webhook(
+            provider_name=provider,
+            request_body=request.body,
+            headers=headers,
+        )
+        return Response(response_data, status=status_code)
+
+
+class OrderCODCollectionUpdateView(views.APIView):
+    """
+    Updates the Cash on Delivery collection status.
+    Strictly restricted to authorized operations staff, delivery agents, or admin roles.
+    POST /api/v1/marketplace/orders/<identifier>/cod-collection/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CODCollectionUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        target_status = serializer.validated_data['cod_collection_status']
+        notes = serializer.validated_data.get('notes', '')
+
+        success, message, extra = PaymentService.update_cod_collection(
+            order=order,
+            actor=request.user,
+            target_status=target_status,
+            notes=notes,
+        )
+
+        if not success:
+            status_code = status.HTTP_403_FORBIDDEN if "Permission denied" in message else status.HTTP_400_BAD_REQUEST
+            return Response({"error": message}, status=status_code)
+
+        return Response({
+            "status": "success",
+            "message": message,
+            "order": OrderSerializer(order).data,
+            "details": extra,
+        }, status=status.HTTP_200_OK)
+
+
+class OrderPaymentDetailView(views.APIView):
+    """
+    Returns payment status, payment method, COD collection details,
+    and the transaction audit ledger for an order.
+    Access restricted to the order buyer, seller of items in the order, or staff.
+    GET /api/v1/marketplace/orders/<identifier>/payment/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        is_staff = user.is_staff or user.is_superuser or user.has_role('STAFF') or user.has_role('ADMIN')
+        is_buyer = (order.buyer_id == user.id)
+        is_seller = OrderItem.objects.filter(order=order, listing__seller=user).exists()
+
+        if not (is_staff or is_buyer or is_seller):
+            return Response({"error": "You do not have permission to view payment details for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        transactions = PaymentTransaction.objects.filter(order=order).order_by('-created_at')
+        tx_data = [
+            {
+                "id": str(tx.id),
+                "transaction_type": tx.transaction_type,
+                "provider": tx.provider,
+                "amount": str(tx.amount),
+                "currency": tx.currency,
+                "status": tx.status,
+                "provider_transaction_id": tx.provider_transaction_id,
+                "provider_order_id": tx.provider_order_id,
+                "error_message": tx.error_message,
+                "created_at": tx.created_at.isoformat(),
+            }
+            for tx in transactions
+        ]
+
+        return Response({
+            "order_number": order.order_number,
+            "currency": order.currency,
+            "total_amount": str(order.total_amount),
+            "payment_method": order.payment_method,
+            "payment_status": order.payment_status,
+            "payment_reference": order.payment_reference,
+            "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+            "cod_collection_status": order.cod_collection_status,
+            "cod_collected_at": order.cod_collected_at.isoformat() if order.cod_collected_at else None,
+            "cod_collected_by": order.cod_collected_by.email if order.cod_collected_by else None,
+            "cod_collection_notes": order.cod_collection_notes,
+            "transactions": tx_data,
+        }, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# Phase 5 Task 2: Shipping, Logistics and Order Tracking Endpoints
+# =============================================================================
+
+def _resolve_shipment_by_identifier(identifier: str):
+    """Helper to resolve a Shipment by UUID or shipment_number."""
+    import uuid
+    from apps.marketplace.models import Shipment
+    try:
+        uuid.UUID(str(identifier))
+        return Shipment.objects.filter(id=identifier).select_related('order', 'seller', 'organisation').first()
+    except (ValueError, AttributeError):
+        return Shipment.objects.filter(shipment_number=identifier).select_related('order', 'seller', 'organisation').first()
+
+
+def _is_seller_authorized_for_order(user, order) -> bool:
+    """Checks if the user is a staff member or seller owning items in the order."""
+    if user.is_staff or user.is_superuser:
+        return True
+    from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+    org_ids = set(OrganisationMembership.objects.filter(
+        user=user,
+        is_active=True,
+        role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+    ).values_list('organisation_id', flat=True))
+
+    return order.items.filter(
+        models.Q(listing__seller=user) | models.Q(listing__organisation_id__in=org_ids)
+    ).exists()
+
+
+def _is_seller_authorized_for_shipment(user, shipment) -> bool:
+    """Checks if the user is a staff member or the seller who owns the shipment."""
+    if user.is_staff or user.is_superuser:
+        return True
+    if shipment.seller_id == user.id:
+        return True
+    if shipment.organisation_id:
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        return OrganisationMembership.objects.filter(
+            user=user,
+            organisation_id=shipment.organisation_id,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).exists()
+    return False
+
+
+class SellerOrderShipmentListCreateView(views.APIView):
+    """
+    POST: Creates a fulfillment shipment for the seller's items in an order.
+    GET: Lists shipments for this order owned by the seller.
+    POST /api/v1/marketplace/seller/orders/<identifier>/shipments/
+    GET  /api/v1/marketplace/seller/orders/<identifier>/shipments/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _is_seller_authorized_for_order(request.user, order):
+            return Response({"error": "You do not have permission to view shipments for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        user = request.user
+        if user.is_staff or user.is_superuser:
+            shipments = order.shipments.all().prefetch_related('items__order_item', 'tracking_events')
+        else:
+            from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+            org_ids = set(OrganisationMembership.objects.filter(
+                user=user,
+                is_active=True,
+                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+            ).values_list('organisation_id', flat=True))
+
+            shipments = order.shipments.filter(
+                models.Q(seller=user) | models.Q(organisation_id__in=org_ids)
+            ).prefetch_related('items__order_item', 'tracking_events').distinct()
+
+        serializer = ShipmentSerializer(shipments, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _is_seller_authorized_for_order(request.user, order):
+            return Response({"error": "You do not have permission to create shipments for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ShipmentCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            shipment = ShipmentService.create_seller_shipment(
+                order=order,
+                seller=request.user,
+                items_payload=data['items'],
+                carrier=data.get('carrier', CarrierChoices.OTHER),
+                carrier_name=data.get('carrier_name', ''),
+                tracking_number=data.get('tracking_number', ''),
+                tracking_url=data.get('tracking_url', ''),
+                estimated_delivery_at=data.get('estimated_delivery_at'),
+                delivery_notes=data.get('delivery_notes', ''),
+                dispatch_immediately=data.get('dispatch_immediately', False),
+                actor=request.user,
+            )
+            return Response(
+                {
+                    "status": "success",
+                    "message": f"Shipment {shipment.shipment_number} created successfully.",
+                    "shipment": ShipmentSerializer(shipment).data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SellerShipmentDetailView(views.APIView):
+    """
+    Retrieves full details and tracking timeline for a specific shipment.
+    GET /api/v1/marketplace/seller/shipments/<identifier>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        shipment = _resolve_shipment_by_identifier(identifier)
+        if not shipment:
+            return Response({"error": f"Shipment '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _is_seller_authorized_for_shipment(request.user, shipment):
+            return Response({"error": "You do not have permission to view this shipment."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ShipmentSerializer(shipment)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class SellerShipmentStatusUpdateView(views.APIView):
+    """
+    Updates the lifecycle status of a shipment (e.g. DISPATCHED, IN_TRANSIT, DELIVERED).
+    PATCH /api/v1/marketplace/seller/shipments/<identifier>/status/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, identifier):
+        shipment = _resolve_shipment_by_identifier(identifier)
+        if not shipment:
+            return Response({"error": f"Shipment '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _is_seller_authorized_for_shipment(request.user, shipment):
+            return Response({"error": "You do not have permission to update this shipment."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ShipmentStatusUpdatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated_shipment = ShipmentService.update_shipment_status(
+                shipment=shipment,
+                new_status=data['status'],
+                location=data.get('location', ''),
+                description=data.get('description', ''),
+                carrier_reference=data.get('carrier_reference', ''),
+                actor=request.user,
+            )
+            return Response(
+                {
+                    "status": "success",
+                    "message": f"Shipment {updated_shipment.shipment_number} status updated to '{updated_shipment.status}'.",
+                    "shipment": ShipmentSerializer(updated_shipment).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SellerShipmentTrackingEventCreateView(views.APIView):
+    """
+    Appends an operational or carrier checkpoint tracking event to a shipment.
+    POST /api/v1/marketplace/seller/shipments/<identifier>/events/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        shipment = _resolve_shipment_by_identifier(identifier)
+        if not shipment:
+            return Response({"error": f"Shipment '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _is_seller_authorized_for_shipment(request.user, shipment):
+            return Response({"error": "You do not have permission to update tracking for this shipment."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = TrackingEventCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        event = ShipmentService.add_tracking_event(
+            shipment=shipment,
+            status=data.get('status') or shipment.status,
+            description=data['description'],
+            location=data.get('location', ''),
+            event_timestamp=data.get('event_timestamp'),
+            external_checkpoint_id=data.get('external_checkpoint_id', ''),
+            actor=request.user,
+        )
+
+        return Response(
+            {
+                "status": "success",
+                "message": "Tracking event recorded successfully.",
+                "event": TrackingEventSerializer(event).data,
+                "shipment": ShipmentSerializer(shipment).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class BuyerOrderShipmentListView(views.APIView):
+    """
+    Lists all shipments and delivery tracking timelines for an order owned by the authenticated buyer.
+    GET /api/v1/marketplace/buyer/orders/<identifier>/shipments/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Buyer ownership check (or staff)
+        if order.buyer_id != request.user.id and not (request.user.is_staff or request.user.is_superuser):
+            return Response({"error": "You do not have permission to view shipments for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        shipments = order.shipments.all().prefetch_related('items__order_item', 'tracking_events')
+        serializer = ShipmentSerializer(shipments, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ShipmentTrackingLookupView(views.APIView):
+    """
+    Direct tracking lookup by tracking number or shipment reference number.
+    Access is open to the buyer of the order, seller of the shipment, or staff.
+    GET /api/v1/marketplace/shipments/track/<tracking_number>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, tracking_number):
+        from apps.marketplace.models import Shipment
+        shipment = Shipment.objects.filter(
+            models.Q(tracking_number=tracking_number) | models.Q(shipment_number=tracking_number)
+        ).select_related('order', 'seller', 'organisation').prefetch_related('items__order_item', 'tracking_events').first()
+
+        if not shipment:
+            return Response({"error": f"No shipment found with tracking reference '{tracking_number}'."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        is_staff = user.is_staff or user.is_superuser
+        is_buyer = shipment.order.buyer_id == user.id
+        is_seller = _is_seller_authorized_for_shipment(user, shipment)
+
+        if not (is_staff or is_buyer or is_seller):
+            return Response({"error": "You do not have permission to view this tracking information."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ShipmentSerializer(shipment)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AvailableCarriersView(views.APIView):
+    """
+    Returns supported logistics carriers appropriate for the order's destination country.
+    GET /api/v1/marketplace/logistics/carriers/?country=India
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        country = request.query_params.get('country', 'India')
+        from apps.marketplace.pricing import normalize_destination_country
+        try:
+            country_iso, _ = normalize_destination_country(country)
+        except Exception:
+            country_iso = 'IN' if str(country).strip().upper() in ['IN', 'INDIA'] else 'GB'
+        carriers = get_available_carriers_for_country(country_iso)
+        return Response({
+            "country": country_iso,
+            "count": len(carriers),
+            "carriers": carriers,
+        }, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# Phase 5 Task 3: Returns, Refunds & Dispute Management API Views
+# =============================================================================
+
+from apps.marketplace.models import (
+    ReturnRequest,
+    ReturnRequestTypeChoices,
+    ReturnRequestStatusChoices,
+    ReturnReasonChoices,
+    Refund,
+    RefundStatusChoices,
+    RefundMethodChoices,
+    Dispute,
+    DisputeEvent,
+    DisputeCategoryChoices,
+    DisputeStatusChoices,
+    DisputePriorityChoices,
+    DisputeResolutionChoices,
+    DisputeEventTypeChoices,
+)
+from apps.marketplace.returns.service import (
+    ReturnService,
+    RefundService,
+    DisputeService,
+    _is_staff_or_admin,
+    _has_permission,
+    _is_seller_authorized_for_order,
+    _is_seller_authorized_for_return,
+)
+from apps.marketplace.serializers import (
+    ReturnRequestSerializer,
+    ReturnRequestCreatePayloadSerializer,
+    ReturnRequestReviewPayloadSerializer,
+    RefundSerializer,
+    RefundCreatePayloadSerializer,
+    DisputeSerializer,
+    DisputeEventSerializer,
+    DisputeCreatePayloadSerializer,
+    DisputeStatusUpdatePayloadSerializer,
+    DisputeMessagePayloadSerializer,
+)
+
+
+def _resolve_return_by_identifier(identifier: str):
+    """Helper to resolve a ReturnRequest by UUID or request_number."""
+    import uuid
+    from apps.marketplace.models import ReturnRequest
+    try:
+        uuid.UUID(str(identifier))
+        return ReturnRequest.objects.filter(id=identifier).select_related('order', 'order_item', 'buyer', 'seller', 'reviewed_by').first()
+    except (ValueError, AttributeError):
+        return ReturnRequest.objects.filter(request_number=identifier).select_related('order', 'order_item', 'buyer', 'seller', 'reviewed_by').first()
+
+
+def _resolve_dispute_by_identifier(identifier: str):
+    """Helper to resolve a Dispute by UUID or dispute_number."""
+    import uuid
+    from apps.marketplace.models import Dispute
+    try:
+        uuid.UUID(str(identifier))
+        return Dispute.objects.filter(id=identifier).select_related('order', 'buyer', 'seller', 'resolved_by').first()
+    except (ValueError, AttributeError):
+        return Dispute.objects.filter(dispute_number=identifier).select_related('order', 'buyer', 'seller', 'resolved_by').first()
+
+
+def _resolve_refund_by_identifier(identifier: str):
+    """Helper to resolve a Refund by UUID or refund_number."""
+    import uuid
+    from apps.marketplace.models import Refund
+    try:
+        uuid.UUID(str(identifier))
+        return Refund.objects.filter(id=identifier).select_related('order', 'return_request', 'dispute', 'created_by', 'approved_by').first()
+    except (ValueError, AttributeError):
+        return Refund.objects.filter(refund_number=identifier).select_related('order', 'return_request', 'dispute', 'created_by', 'approved_by').first()
+
+
+class BuyerOrderReturnEligibilityView(views.APIView):
+    """
+    GET /api/v1/marketplace/buyer/orders/<identifier>/return-eligibility/
+    Evaluates cancellation and return eligibility for an order and its items.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You do not have permission to inspect this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        can_cancel, cancel_reason, cancel_amount = ReturnService.get_cancellation_eligibility(order, request.user)
+        can_return, return_reason, return_amount = ReturnService.get_return_eligibility(order, request.user)
+
+        items_eligibility = []
+        for item in order.items.all():
+            i_can_cancel, i_cancel_reason, i_cancel_amt = ReturnService.get_cancellation_eligibility(order, request.user, order_item=item)
+            i_can_return, i_return_reason, i_return_amt = ReturnService.get_return_eligibility(order, request.user, order_item=item)
+            items_eligibility.append({
+                "order_item_id": str(item.id),
+                "title": item.title,
+                "quantity": item.quantity,
+                "total_amount": str(item.total_amount),
+                "cancellation": {
+                    "eligible": i_can_cancel,
+                    "reason": i_cancel_reason,
+                    "estimated_refund": str(i_cancel_amt),
+                },
+                "return": {
+                    "eligible": i_can_return,
+                    "reason": i_return_reason,
+                    "estimated_refund": str(i_return_amt),
+                },
+            })
+
+        return Response({
+            "order_number": order.order_number,
+            "currency": order.currency,
+            "order_total": str(order.total_amount),
+            "order_status": order.status,
+            "payment_status": order.payment_status,
+            "order_cancellation": {
+                "eligible": can_cancel,
+                "reason": cancel_reason,
+                "estimated_refund": str(cancel_amount),
+            },
+            "order_return": {
+                "eligible": can_return,
+                "reason": return_reason,
+                "estimated_refund": str(return_amount),
+            },
+            "items": items_eligibility,
+        }, status=status.HTTP_200_OK)
+
+
+class BuyerOrderReturnRequestCreateView(views.APIView):
+    """
+    POST /api/v1/marketplace/buyer/orders/<identifier>/returns/
+    Creates a cancellation or return request for the order or a specific item.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You can only create return/cancellation requests for your own orders."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ReturnRequestCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        order_item = None
+        item_id = data.get('order_item_id')
+        if item_id:
+            order_item = order.items.filter(id=item_id).first()
+            if not order_item:
+                return Response({"error": f"Item '{item_id}' not found in order {order.order_number}."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            req = ReturnService.create_return_request(
+                order=order,
+                buyer=request.user,
+                request_type=data.get('request_type', ReturnRequestTypeChoices.RETURN),
+                reason=data['reason'],
+                description=data['description'],
+                evidence_urls=data.get('evidence_urls', []),
+                order_item=order_item,
+                requested_quantity=data.get('requested_quantity', 1),
+                actor=request.user,
+            )
+            return Response({
+                "status": "success",
+                "message": f"{req.get_request_type_display()} request {req.request_number} submitted successfully.",
+                "return_request": ReturnRequestSerializer(req).data,
+            }, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BuyerReturnRequestListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/buyer/returns/
+    Lists all return and cancellation requests created by the buyer.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ReturnRequestSerializer
+
+    def get_queryset(self):
+        qs = ReturnRequest.objects.filter(buyer=self.request.user).select_related('order', 'order_item', 'buyer', 'seller', 'reviewed_by')
+        req_type = self.request.query_params.get('type')
+        if req_type:
+            qs = qs.filter(request_type=req_type.strip().upper())
+        st = self.request.query_params.get('status')
+        if st:
+            qs = qs.filter(status=st.strip().upper())
+        return qs
+
+
+class BuyerReturnRequestDetailView(views.APIView):
+    """
+    GET /api/v1/marketplace/buyer/returns/<identifier>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        req = _resolve_return_by_identifier(identifier)
+        if not req or req.buyer_id != request.user.id:
+            return Response({"error": "Return request not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ReturnRequestSerializer(req).data, status=status.HTTP_200_OK)
+
+
+class BuyerReturnRequestCancelView(views.APIView):
+    """
+    POST /api/v1/marketplace/buyer/returns/<identifier>/cancel/
+    Allows buyer to withdraw their pending return request.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        req = _resolve_return_by_identifier(identifier)
+        if not req or req.buyer_id != request.user.id:
+            return Response({"error": "Return request not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            updated = ReturnService.cancel_return_request_by_buyer(req, request.user)
+            return Response({
+                "status": "success",
+                "message": f"Request {updated.request_number} has been cancelled.",
+                "return_request": ReturnRequestSerializer(updated).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SellerReturnRequestListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/seller/returns/
+    Lists returns relating to the authenticated seller or seller's organisation.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ReturnRequestSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if _is_staff_or_admin(user):
+            qs = ReturnRequest.objects.all()
+        else:
+            from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+            org_ids = set(OrganisationMembership.objects.filter(
+                user=user,
+                is_active=True,
+                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+            ).values_list('organisation_id', flat=True))
+
+            qs = ReturnRequest.objects.filter(
+                models.Q(seller=user) | models.Q(order_item__listing__organisation_id__in=org_ids)
+            ).distinct()
+
+        st = self.request.query_params.get('status')
+        if st:
+            qs = qs.filter(status=st.strip().upper())
+        req_type = self.request.query_params.get('type')
+        if req_type:
+            qs = qs.filter(request_type=req_type.strip().upper())
+        return qs.select_related('order', 'order_item', 'buyer', 'seller', 'reviewed_by')
+
+
+class SellerReturnRequestDetailView(views.APIView):
+    """
+    GET /api/v1/marketplace/seller/returns/<identifier>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        req = _resolve_return_by_identifier(identifier)
+        if not req:
+            return Response({"error": "Return request not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _is_seller_authorized_for_return(request.user, req):
+            return Response({"error": "You do not have permission to view this return request."}, status=status.HTTP_403_FORBIDDEN)
+
+        return Response(ReturnRequestSerializer(req).data, status=status.HTTP_200_OK)
+
+
+class SellerReturnRequestReviewView(views.APIView):
+    """
+    POST /api/v1/marketplace/seller/returns/<identifier>/review/
+    Seller approves or rejects a return request.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        req = _resolve_return_by_identifier(identifier)
+        if not req:
+            return Response({"error": "Return request not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReturnRequestReviewPayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated = ReturnService.review_return_request(
+                return_request=req,
+                actor=request.user,
+                action=data['action'],
+                seller_notes=data.get('seller_notes', ''),
+                rejection_reason=data.get('rejection_reason', ''),
+            )
+            return Response({
+                "status": "success",
+                "message": f"Request {updated.request_number} has been {updated.status.lower()}.",
+                "return_request": ReturnRequestSerializer(updated).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SellerReturnRequestCompleteView(views.APIView):
+    """
+    POST /api/v1/marketplace/seller/returns/<identifier>/complete/
+    Confirms physical receipt of returned item and restocks inventory.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        req = _resolve_return_by_identifier(identifier)
+        if not req:
+            return Response({"error": "Return request not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        notes = request.data.get('notes', '')
+        try:
+            completed = ReturnService.complete_return_request(
+                return_request=req,
+                actor=request.user,
+                notes=notes,
+            )
+            return Response({
+                "status": "success",
+                "message": f"Return {completed.request_number} completed and items restocked successfully.",
+                "return_request": ReturnRequestSerializer(completed).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BuyerOrderDisputeCreateView(views.APIView):
+    """
+    POST /api/v1/marketplace/buyer/orders/<identifier>/disputes/
+    Buyer opens a commercial dispute for an order.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You can only raise disputes for your own orders."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = DisputeCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            dispute = DisputeService.create_dispute(
+                order=order,
+                buyer=request.user,
+                category=data['category'],
+                description=data['description'],
+                evidence_urls=data.get('evidence_urls', []),
+                priority=data.get('priority', DisputePriorityChoices.MEDIUM),
+            )
+            return Response({
+                "status": "success",
+                "message": f"Dispute {dispute.dispute_number} created successfully.",
+                "dispute": DisputeSerializer(dispute).data,
+            }, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BuyerDisputeListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/buyer/disputes/
+    Lists disputes raised by the buyer.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DisputeSerializer
+
+    def get_queryset(self):
+        return Dispute.objects.filter(buyer=self.request.user).select_related('order', 'buyer', 'seller', 'resolved_by').prefetch_related('events__actor')
+
+
+class SellerDisputeListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/seller/disputes/
+    Lists disputes involving the seller's items/orders.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DisputeSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if _is_staff_or_admin(user):
+            return Dispute.objects.all().select_related('order', 'buyer', 'seller', 'resolved_by').prefetch_related('events__actor')
+
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        org_ids = set(OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True))
+
+        return Dispute.objects.filter(
+            models.Q(seller=user) | models.Q(order__items__listing__organisation_id__in=org_ids)
+        ).distinct().select_related('order', 'buyer', 'seller', 'resolved_by').prefetch_related('events__actor')
+
+
+class DisputeDetailView(views.APIView):
+    """
+    GET /api/v1/marketplace/disputes/<identifier>/
+    Accessible to buyer, seller, or staff.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        dispute = _resolve_dispute_by_identifier(identifier)
+        if not dispute:
+            return Response({"error": "Dispute not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_buyer = dispute.buyer_id == request.user.id
+        is_seller = dispute.seller_id == request.user.id or _is_seller_authorized_for_order(request.user, dispute.order)
+        is_staff = _is_staff_or_admin(request.user) or _has_permission(request.user, 'dispute.manage')
+
+        if not (is_buyer or is_seller or is_staff):
+            return Response({"error": "You do not have permission to view this dispute."}, status=status.HTTP_403_FORBIDDEN)
+
+        return Response(DisputeSerializer(dispute).data, status=status.HTTP_200_OK)
+
+
+class DisputeMessageCreateView(views.APIView):
+    """
+    POST /api/v1/marketplace/disputes/<identifier>/messages/
+    Allows buyer, seller, or staff to post messages and evidence to the dispute thread.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        dispute = _resolve_dispute_by_identifier(identifier)
+        if not dispute:
+            return Response({"error": "Dispute not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = DisputeMessagePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            evt = DisputeService.add_dispute_message(
+                dispute=dispute,
+                actor=request.user,
+                message=data['message'],
+                attachments=data.get('attachments', []),
+            )
+            return Response({
+                "status": "success",
+                "message": "Message posted successfully.",
+                "event": DisputeEventSerializer(evt).data,
+            }, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_403_FORBIDDEN if "Permission" in str(e) else status.HTTP_400_BAD_REQUEST)
+
+
+class OrderRefundSummaryView(views.APIView):
+    """
+    GET /api/v1/marketplace/orders/<identifier>/refund-summary/
+    Calculates current refundable balance, paid amount, and existing refunds.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_authorized = (
+            order.buyer_id == request.user.id
+            or _is_seller_authorized_for_order(request.user, order)
+            or _is_staff_or_admin(request.user)
+            or _has_permission(request.user, 'order.refund')
+        )
+        if not is_authorized:
+            return Response({"error": "Permission denied to inspect refund summary."}, status=status.HTTP_403_FORBIDDEN)
+
+        summary = RefundService.get_order_refund_summary(order)
+        return Response(summary, status=status.HTTP_200_OK)
+
+
+class AdminOrderRefundCreateView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/orders/<identifier>/refund/
+    Staff or Admin issues a refund for an order.
+    Requires 'order.refund' permission.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = RefundCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        return_request = None
+        if data.get('return_request_id'):
+            return_request = _resolve_return_by_identifier(data['return_request_id'])
+            if return_request and return_request.order_id != order.id:
+                return_request = None
+
+        dispute = None
+        if data.get('dispute_id'):
+            dispute = _resolve_dispute_by_identifier(data['dispute_id'])
+            if dispute and dispute.order_id != order.id:
+                dispute = None
+
+        try:
+            refund = RefundService.create_refund(
+                order=order,
+                amount=data['amount'],
+                reason=data['reason'],
+                actor=request.user,
+                return_request=return_request,
+                dispute=dispute,
+                refund_method=data.get('refund_method'),
+                notes=data.get('notes', ''),
+                auto_process=data.get('auto_process', False),
+            )
+            return Response({
+                "status": "success",
+                "message": f"Refund {refund.refund_number} ({refund.currency} {refund.amount}) created successfully.",
+                "refund": RefundSerializer(refund).data,
+            }, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminRefundListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/admin/refunds/
+    Lists all platform refunds for operations staff.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = RefundSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if not (_is_staff_or_admin(user) or _has_permission(user, 'order.refund') or _has_permission(user, 'finance.payout')):
+            raise PermissionDenied("You do not have permission to view platform refunds.")
+        qs = Refund.objects.all().select_related('order', 'return_request', 'dispute', 'created_by', 'approved_by')
+        st = self.request.query_params.get('status')
+        if st:
+            qs = qs.filter(status=st.strip().upper())
+        return qs
+
+
+class AdminRefundProcessView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/refunds/<identifier>/process/
+    Marks a pending or manual refund as processed/settled.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        refund = _resolve_refund_by_identifier(identifier)
+        if not refund:
+            return Response({"error": "Refund not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        gateway_reference = request.data.get('gateway_reference', '')
+        notes = request.data.get('notes', '')
+
+        try:
+            processed = RefundService.process_refund(
+                refund=refund,
+                actor=request.user,
+                gateway_reference=gateway_reference,
+                notes=notes,
+            )
+            return Response({
+                "status": "success",
+                "message": f"Refund {processed.refund_number} marked as {processed.status}.",
+                "refund": RefundSerializer(processed).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminDisputeListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/admin/disputes/
+    Lists all commercial disputes for adjudication by staff with 'dispute.manage'.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = DisputeSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if not (_is_staff_or_admin(user) or _has_permission(user, 'dispute.manage')):
+            raise PermissionDenied("You do not have permission to review disputes.")
+        qs = Dispute.objects.all().select_related('order', 'buyer', 'seller', 'resolved_by').prefetch_related('events__actor')
+        st = self.request.query_params.get('status')
+        if st:
+            qs = qs.filter(status=st.strip().upper())
+        cat = self.request.query_params.get('category')
+        if cat:
+            qs = qs.filter(category=cat.strip().upper())
+        return qs
+
+
+class AdminDisputeStatusUpdateView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/disputes/<identifier>/status/
+    Adjudicates a dispute, changes its status, and records official decisions.
+    Requires 'dispute.manage' permission.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        dispute = _resolve_dispute_by_identifier(identifier)
+        if not dispute:
+            return Response({"error": "Dispute not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = DisputeStatusUpdatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated = DisputeService.update_dispute_status(
+                dispute=dispute,
+                actor=request.user,
+                new_status=data['status'],
+                resolution=data.get('resolution', ''),
+                resolution_notes=data.get('resolution_notes', ''),
+            )
+            return Response({
+                "status": "success",
+                "message": f"Dispute {updated.dispute_number} updated to {updated.status}.",
+                "dispute": DisputeSerializer(updated).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
