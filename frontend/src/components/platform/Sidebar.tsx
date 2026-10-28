@@ -4,7 +4,6 @@ import React from "react";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
   Layers,
-  Settings,
   FileCheck2,
   ShieldCheck,
   Building2,
@@ -54,15 +53,12 @@ export default function Sidebar({
   if (isAdmin) {
     roleNavItems = [
       { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
-      { id: "admin_disputes_refunds", label: "Disputes & Refunds", icon: Scale, badge: "Cases" },
       { id: "admin_staff_management", label: "Staff Invitations & Roles", icon: UserPlus, badge: "Admin" },
-      { id: "seller_orders", label: "Customer Orders", icon: Boxes, badge: "Orders" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
-      { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Management" },
       { id: "profile", label: "My Profile", icon: User },
     ];
@@ -76,7 +72,6 @@ export default function Sidebar({
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
-      { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "seller_onboarding", label: "Partner & Seller Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Workshop Teams", icon: Building2, badge: "Organisation" },
       { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
@@ -91,7 +86,6 @@ export default function Sidebar({
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
-      { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Catalogue" },
       { id: "seller_onboarding", label: "Seller Verification Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Teams", icon: Building2, badge: "Organisation" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
@@ -106,7 +100,6 @@ export default function Sidebar({
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
-      { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
       { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
       { id: "seller_onboarding", label: "Partner Status", icon: FileCheck2, badge: "Workshop" },
       { id: "organisations", label: "Workshop & Teams", icon: Building2, badge: "Organisation" },
@@ -120,7 +113,6 @@ export default function Sidebar({
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
-      { id: "catalogue", label: "Parts & Catalogue", icon: Settings, badge: "Fitment" },
       { id: "seller_onboarding", label: "Apply to sell / Apply as workshop", icon: FileCheck2, badge: "Apply" },
       { id: "profile", label: "My Profile", icon: User },
       { id: "organisations", label: "Organisations & Teams", icon: Building2 },

@@ -82,8 +82,6 @@ def _is_seller_authorized_for_order(user, order: Order) -> bool:
 
 def _is_seller_authorized_for_return(user, return_request: ReturnRequest) -> bool:
     """Checks if user is the direct seller or organisation admin for this return request."""
-    if _is_staff_or_admin(user):
-        return True
     if not user or not user.is_authenticated:
         return False
 

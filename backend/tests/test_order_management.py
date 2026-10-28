@@ -582,3 +582,192 @@ class TestOrderManagement:
         # Unauthenticated buyer cancel
         res6 = api_client.post(f"/api/v1/marketplace/orders/{order_id}/cancel/")
         assert res6.status_code == status.HTTP_401_UNAUTHORIZED
+
+    # -------------------------------------------------------------------------
+    # 5. Role-Based Access Control: Admin Order Fulfillment Restrictions
+    # -------------------------------------------------------------------------
+
+    def test_admin_cannot_list_seller_customer_orders(
+        self, admin_auth_client, buyer_auth_client, seller_a_part
+    ):
+        """Admin users are forbidden from accessing the seller customer orders endpoint."""
+        # Create an order in the system
+        res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            build_checkout_payload([{"listing_id": str(seller_a_part.id), "quantity": 1}]),
+            format="json",
+        )
+        assert res.status_code == status.HTTP_201_CREATED
+
+        # Admin attempts to query seller customer orders list
+        admin_res = admin_auth_client.get("/api/v1/marketplace/seller/orders/")
+        assert admin_res.status_code == status.HTTP_403_FORBIDDEN
+        data = admin_res.json()
+        error_msg = data.get("message") or data.get("detail") or str(data)
+        assert "cannot access" in error_msg.lower() or "forbidden" in error_msg.lower()
+
+    def test_admin_cannot_view_seller_order_details(
+        self, admin_auth_client, buyer_auth_client, seller_a_part
+    ):
+        """Admin users cannot access seller-isolated customer order details."""
+        res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            build_checkout_payload([{"listing_id": str(seller_a_part.id), "quantity": 1}]),
+            format="json",
+        )
+        assert res.status_code == status.HTTP_201_CREATED
+        order_id = res.json()["order"]["id"]
+
+        # Admin attempts to query seller order detail
+        admin_res = admin_auth_client.get(f"/api/v1/marketplace/seller/orders/{order_id}/")
+        assert admin_res.status_code == status.HTTP_403_FORBIDDEN
+        assert "cannot access" in admin_res.json()["error"].lower()
+
+    def test_admin_cannot_confirm_seller_order(
+        self, admin_auth_client, buyer_auth_client, seller_a_part
+    ):
+        """Admin users cannot perform seller order confirmation."""
+        res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            build_checkout_payload([{"listing_id": str(seller_a_part.id), "quantity": 1}]),
+            format="json",
+        )
+        assert res.status_code == status.HTTP_201_CREATED
+        order_id = res.json()["order"]["id"]
+
+        # Admin attempts to confirm order
+        admin_patch = admin_auth_client.patch(
+            f"/api/v1/marketplace/seller/orders/{order_id}/status/",
+            {"status": OrderStatusChoices.CONFIRMED},
+            format="json",
+        )
+        assert admin_patch.status_code == status.HTTP_403_FORBIDDEN
+        assert "admin users cannot perform" in admin_patch.json()["error"].lower()
+
+        # Verify order status remained PENDING_CONFIRMATION
+        order = Order.objects.get(id=order_id)
+        assert order.status == OrderStatusChoices.PENDING_CONFIRMATION
+
+    def test_admin_cannot_mark_order_as_processing(
+        self, admin_auth_client, buyer_auth_client, seller_auth_client, seller_a_part
+    ):
+        """Admin users cannot mark orders as processing; order fulfillment must be managed by Sellers."""
+        res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            build_checkout_payload([{"listing_id": str(seller_a_part.id), "quantity": 1}]),
+            format="json",
+        )
+        assert res.status_code == status.HTTP_201_CREATED
+        order_id = res.json()["order"]["id"]
+
+        # Seller confirms order
+        seller_confirm = seller_auth_client.patch(
+            f"/api/v1/marketplace/seller/orders/{order_id}/status/",
+            {"status": OrderStatusChoices.CONFIRMED},
+            format="json",
+        )
+        assert seller_confirm.status_code == status.HTTP_200_OK
+
+        # Admin attempts to mark as PROCESSING
+        admin_patch = admin_auth_client.patch(
+            f"/api/v1/marketplace/seller/orders/{order_id}/status/",
+            {"status": OrderStatusChoices.PROCESSING},
+            format="json",
+        )
+        assert admin_patch.status_code == status.HTTP_403_FORBIDDEN
+        assert "admin users cannot perform" in admin_patch.json()["error"].lower()
+
+        # Verify status is still CONFIRMED
+        order = Order.objects.get(id=order_id)
+        assert order.status == OrderStatusChoices.CONFIRMED
+
+    def test_admin_cannot_create_shipment_or_update_shipment(
+        self, admin_auth_client, buyer_auth_client, seller_auth_client, seller_a_part
+    ):
+        """Admin users cannot create or mutate seller fulfillment shipments."""
+        res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            build_checkout_payload([{"listing_id": str(seller_a_part.id), "quantity": 2}]),
+            format="json",
+        )
+        assert res.status_code == status.HTTP_201_CREATED
+        order_data = res.json()["order"]
+        order_id = order_data["id"]
+        item_id = order_data["items"][0]["id"]
+
+        # Mark paid and confirmed by seller
+        order = Order.objects.get(id=order_id)
+        order.payment_status = "PAID"
+        order.save(update_fields=["payment_status"])
+
+        seller_auth_client.patch(
+            f"/api/v1/marketplace/seller/orders/{order_id}/status/",
+            {"status": OrderStatusChoices.CONFIRMED},
+            format="json",
+        )
+
+        # Admin attempts to create shipment
+        admin_ship_res = admin_auth_client.post(
+            f"/api/v1/marketplace/seller/orders/{order_id}/shipments/",
+            {
+                "carrier": "BLUE_DART",
+                "tracking_number": "BD123456789IN",
+                "items": [{"order_item_id": item_id, "quantity": 1}],
+            },
+            format="json",
+        )
+        assert admin_ship_res.status_code == status.HTTP_403_FORBIDDEN
+
+        # Seller creates shipment successfully
+        seller_ship_res = seller_auth_client.post(
+            f"/api/v1/marketplace/seller/orders/{order_id}/shipments/",
+            {
+                "carrier": "BLUE_DART",
+                "tracking_number": "BD123456789IN",
+                "items": [{"order_item_id": item_id, "quantity": 1}],
+            },
+            format="json",
+        )
+        assert seller_ship_res.status_code == status.HTTP_201_CREATED
+        shipment_id = seller_ship_res.json()["shipment"]["id"]
+
+        # Admin attempts to update shipment status
+        admin_update_res = admin_auth_client.patch(
+            f"/api/v1/marketplace/seller/shipments/{shipment_id}/status/",
+            {"status": "DISPATCHED"},
+            format="json",
+        )
+        assert admin_update_res.status_code == status.HTTP_403_FORBIDDEN
+
+        # Admin attempts to record tracking event
+        admin_event_res = admin_auth_client.post(
+            f"/api/v1/marketplace/seller/shipments/{shipment_id}/events/",
+            {"description": "Admin checkpoint test"},
+            format="json",
+        )
+        assert admin_event_res.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_admin_preserves_access_to_payment_records_disputes_and_refunds(
+        self, admin_auth_client, buyer_auth_client, seller_a_part
+    ):
+        """Administrative access to payment records, disputes, and refunds is preserved."""
+        res = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            build_checkout_payload([{"listing_id": str(seller_a_part.id), "quantity": 1}]),
+            format="json",
+        )
+        assert res.status_code == status.HTTP_201_CREATED
+        order_id = res.json()["order"]["id"]
+
+        # Admin can view payment records
+        payment_res = admin_auth_client.get(f"/api/v1/marketplace/orders/{order_id}/payment/")
+        assert payment_res.status_code == status.HTTP_200_OK
+        assert "payment_status" in payment_res.json()
+
+        # Admin can access admin disputes endpoint
+        disputes_res = admin_auth_client.get("/api/v1/marketplace/admin/disputes/")
+        assert disputes_res.status_code == status.HTTP_200_OK
+
+        # Admin can access admin refunds endpoint
+        refunds_res = admin_auth_client.get("/api/v1/marketplace/admin/refunds/")
+        assert refunds_res.status_code == status.HTTP_200_OK

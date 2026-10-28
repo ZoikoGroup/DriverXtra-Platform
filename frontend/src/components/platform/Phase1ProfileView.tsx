@@ -61,7 +61,7 @@ function ProfileEditForm({ user, onUpdate }: ProfileEditFormProps) {
       {saveSuccess && (
         <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs font-semibold flex items-center gap-2 shadow-sm animate-in fade-in">
           <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-          <span>Profile updated successfully via <code className="font-mono text-[11px]">PATCH /api/v1/users/me/</code>.</span>
+          <span>Profile details updated successfully.</span>
         </div>
       )}
 
@@ -125,7 +125,7 @@ function ProfileEditForm({ user, onUpdate }: ProfileEditFormProps) {
             className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold transition-all shadow hover:shadow-amber-500/20 disabled:opacity-60"
           >
             <Save className="w-3.5 h-3.5" />
-            <span>{isSaving ? "Saving to Backend..." : "Save Profile Changes"}</span>
+            <span>{isSaving ? "Saving changes..." : "Save Profile Changes"}</span>
           </button>
         </div>
       </form>
@@ -201,7 +201,7 @@ function MFAEnrolmentSection({
             <span>Two-Factor Authentication (TOTP MFA)</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Cryptographic time-based one-time password security for platform access (Doc 04 §7).
+            Time-based one-time password (TOTP) two-factor authentication for account security.
           </p>
         </div>
 
@@ -337,10 +337,10 @@ export default function Phase1ProfileView() {
         <div>
           <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
             <User className="w-5 h-5 text-amber-500" />
-            <span>Authenticated User Profile & RBAC Identity</span>
+            <span>User Profile & Account Settings</span>
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Verified identity & session tokens managed by Django endpoint <code className="text-[11px] font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-800">GET /api/v1/users/me/</code>
+            Manage your personal profile details, contact information, and account security.
           </p>
         </div>
 
@@ -348,7 +348,7 @@ export default function Phase1ProfileView() {
           onClick={() => refreshProfile()}
           disabled={isLoading}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold transition-colors shadow-sm disabled:opacity-50"
-          title="Reload profile from backend"
+          title="Refresh profile details"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin text-amber-500" : ""}`} />
           <span>Sync Profile</span>
@@ -392,7 +392,7 @@ export default function Phase1ProfileView() {
                 <span>Protected Attributes</span>
               </h2>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                Restricted fields governed by platform RBAC.
+                Restricted fields managed by platform access controls.
               </p>
             </div>
             <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-200 text-slate-700">

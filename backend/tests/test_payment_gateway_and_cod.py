@@ -865,3 +865,275 @@ class TestBug2PaymentVerificationAndIsolation:
         order = Order.objects.get(id=order_id)
         assert order.payment_status == PaymentStatusChoices.PENDING
 
+
+class TestPaymentSecurityHardeningAndWebhookSettlement:
+    """
+    Verifies the security fixes from the DriverXtra payment flow audit:
+    1. Production mock-signature rejection:
+       - 'test_sig_valid' and 'mock_valid_signature' rejected even if PAYMENT_TEST_MODE is True in production (DEBUG=False, IS_TESTING=False).
+       - Valid real-format HMAC signatures undergo proper cryptographic check.
+       - Stripe mock signature 'test_stripe_sig_valid' rejected in production.
+    2. Webhook notification delivery on successful settlement:
+       - Valid success webhook settles order and dispatches in-app notification to buyer.
+    3. Webhook retries & duplicate settlement idempotency:
+       - Retried webhook returns already_processed without re-notifying.
+       - Consecutive webhook event for already PAID order does not re-notify.
+    """
+
+    def test_production_rejects_mock_signature_even_if_misconfigured(self, buyer_auth_client, in_part, monkeypatch):
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+        from django.conf import settings
+
+        # Simulate production environment with misconfigured PAYMENT_TEST_MODE=True
+        monkeypatch.setattr(settings, 'DEBUG', False)
+        monkeypatch.setattr(settings, 'IS_TESTING', False)
+        monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', True)
+
+        provider = RazorpayPaymentProvider()
+        assert provider.test_mode is False, "Provider must enforce test_mode=False in production regardless of settings.PAYMENT_TEST_MODE"
+
+        # Create order in normal test mode first
+        monkeypatch.setattr(settings, 'IS_TESTING', True)
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_id = res.json()["order"]["id"]
+        order = Order.objects.get(id=order_id)
+
+        # Switch back to production simulation
+        monkeypatch.setattr(settings, 'DEBUG', False)
+        monkeypatch.setattr(settings, 'IS_TESTING', False)
+        monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', True)
+
+        # Attempt to verify using mock signature 'test_sig_valid'
+        verify_res = buyer_auth_client.post(
+            f"/api/v1/marketplace/orders/{order_id}/payment/verify/",
+            {
+                "razorpay_order_id": order.payment_reference,
+                "razorpay_payment_id": "pay_mock_attacker_123",
+                "razorpay_signature": "test_sig_valid",
+            },
+            format="json",
+        )
+        assert verify_res.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Invalid Razorpay payment signature" in verify_res.json()["error"]
+
+        order.refresh_from_db()
+        assert order.payment_status == PaymentStatusChoices.PENDING
+
+    def test_production_accepts_valid_hmac_and_rejects_invalid_hmac(self, buyer_auth_client, in_part, monkeypatch):
+        from django.conf import settings
+
+        # Create order
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_id = res.json()["order"]["id"]
+        order = Order.objects.get(id=order_id)
+
+        # Switch to production simulation
+        monkeypatch.setattr(settings, 'DEBUG', False)
+        monkeypatch.setattr(settings, 'IS_TESTING', False)
+        monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', False)
+
+        # 1. Invalid signature format
+        bad_res = buyer_auth_client.post(
+            f"/api/v1/marketplace/orders/{order_id}/payment/verify/",
+            {
+                "razorpay_order_id": order.payment_reference,
+                "razorpay_payment_id": "pay_test_prod_123",
+                "razorpay_signature": "0000000000000000000000000000000000000000000000000000000000000000",
+            },
+            format="json",
+        )
+        assert bad_res.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Invalid Razorpay payment signature" in bad_res.json()["error"]
+        order.refresh_from_db()
+        assert order.payment_status == PaymentStatusChoices.PENDING
+
+        # 2. Authentic HMAC-SHA256 signature calculated with server secret
+        secret = getattr(settings, 'RAZORPAY_KEY_SECRET', 'rzp_test_placeholder_secret')
+        pay_id = "pay_real_sig_123"
+        msg = f"{order.payment_reference}|{pay_id}".encode('utf-8')
+        valid_sig = hmac.new(secret.encode('utf-8'), msg, hashlib.sha256).hexdigest()
+
+        good_res = buyer_auth_client.post(
+            f"/api/v1/marketplace/orders/{order_id}/payment/verify/",
+            {
+                "razorpay_order_id": order.payment_reference,
+                "razorpay_payment_id": pay_id,
+                "razorpay_signature": valid_sig,
+            },
+            format="json",
+        )
+        assert good_res.status_code == status.HTTP_200_OK
+        order.refresh_from_db()
+        assert order.payment_status == PaymentStatusChoices.PAID
+        assert order.status == OrderStatusChoices.CONFIRMED
+
+    def test_production_rejects_stripe_mock_signature(self, buyer_auth_client, uk_part, monkeypatch):
+        from apps.marketplace.payments.stripe_provider import StripePaymentProvider
+        from django.conf import settings
+
+        monkeypatch.setattr(settings, 'DEBUG', False)
+        monkeypatch.setattr(settings, 'IS_TESTING', False)
+        monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', True)
+
+        provider = StripePaymentProvider()
+        assert provider.test_mode is False, "Stripe provider must enforce test_mode=False in production"
+
+        # Webhook verification rejects mock signature
+        is_valid, _, _, err = provider.verify_webhook(
+            b'{"id": "evt_test", "type": "payment_intent.succeeded"}',
+            {"stripe-signature": "test_stripe_sig_valid"},
+        )
+        assert is_valid is False
+        assert "Invalid Stripe webhook signature" in err.get("error", "")
+
+    def test_webhook_settlement_creates_buyer_notification(self, api_client, buyer_auth_client, in_part):
+        from apps.notifications.models import Notification
+
+        # 1. Create order
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_data = res.json()["order"]
+        order_number = order_data["order_number"]
+        order = Order.objects.get(order_number=order_number)
+        buyer = order.buyer
+
+        # Initial state
+        assert order.payment_status == PaymentStatusChoices.PENDING
+        notif_count_before = Notification.objects.filter(
+            recipient=buyer,
+            event_type="marketplace.order.payment_verified",
+        ).count()
+        assert notif_count_before == 0
+
+        # 2. Receive valid payment webhook event
+        event_id = f"rzp_evt_test_{uuid.uuid4().hex[:10]}"
+        webhook_body = json.dumps({
+            "event": "order.paid",
+            "event_id": event_id,
+            "payload": {
+                "order": {
+                    "entity": {
+                        "id": order.payment_reference,
+                        "notes": {"order_number": order_number},
+                    }
+                }
+            }
+        }).encode('utf-8')
+
+        secret = getattr(settings, 'RAZORPAY_WEBHOOK_SECRET', 'rzp_test_webhook_secret')
+        valid_signature = hmac.new(secret.encode('utf-8'), webhook_body, hashlib.sha256).hexdigest()
+
+        response = api_client.post(
+            "/api/v1/marketplace/payments/webhook/razorpay/",
+            data=webhook_body,
+            content_type="application/json",
+            HTTP_X_RAZORPAY_SIGNATURE=valid_signature,
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["settled"] is True
+
+        # 3. Verify order settled and notification created
+        order.refresh_from_db()
+        assert order.payment_status == PaymentStatusChoices.PAID
+        assert order.status == OrderStatusChoices.CONFIRMED
+
+        notif = Notification.objects.get(
+            recipient=buyer,
+            event_type="marketplace.order.payment_verified",
+        )
+        assert order_number in notif.title
+        assert "Payment Verified" in notif.title
+        assert "successfully verified" in notif.message
+
+    def test_webhook_retry_and_duplicate_events_do_not_duplicate_notifications(self, api_client, buyer_auth_client, in_part):
+        from apps.notifications.models import Notification
+
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_number = res.json()["order"]["order_number"]
+        order = Order.objects.get(order_number=order_number)
+        buyer = order.buyer
+
+        event_id = f"rzp_evt_idem_{uuid.uuid4().hex[:10]}"
+        webhook_body = json.dumps({
+            "event": "payment.captured",
+            "event_id": event_id,
+            "payload": {
+                "order": {
+                    "entity": {
+                        "id": order.payment_reference,
+                        "notes": {"order_number": order_number},
+                    }
+                }
+            }
+        }).encode('utf-8')
+
+        secret = getattr(settings, 'RAZORPAY_WEBHOOK_SECRET', 'rzp_test_webhook_secret')
+        valid_signature = hmac.new(secret.encode('utf-8'), webhook_body, hashlib.sha256).hexdigest()
+
+        # First delivery: settles order
+        res1 = api_client.post(
+            "/api/v1/marketplace/payments/webhook/razorpay/",
+            data=webhook_body,
+            content_type="application/json",
+            HTTP_X_RAZORPAY_SIGNATURE=valid_signature,
+        )
+        assert res1.status_code == status.HTTP_200_OK
+        assert res1.json()["settled"] is True
+
+        notifs_after_first = Notification.objects.filter(
+            recipient=buyer,
+            event_type="marketplace.order.payment_verified",
+        ).count()
+        assert notifs_after_first == 1
+
+        # Second delivery (retry with exact same event_id): must return already_processed
+        res2 = api_client.post(
+            "/api/v1/marketplace/payments/webhook/razorpay/",
+            data=webhook_body,
+            content_type="application/json",
+            HTTP_X_RAZORPAY_SIGNATURE=valid_signature,
+        )
+        assert res2.status_code == status.HTTP_200_OK
+        assert res2.json().get("status") == "already_processed"
+        assert res2.json().get("replayed") is True
+
+        notifs_after_retry = Notification.objects.filter(
+            recipient=buyer,
+            event_type="marketplace.order.payment_verified",
+        ).count()
+        assert notifs_after_retry == 1, "Webhook retry must not generate duplicate notifications!"
+
+        # Third delivery (different event_id, e.g. order.paid, for already PAID order):
+        event_id_2 = f"rzp_evt_second_{uuid.uuid4().hex[:10]}"
+        webhook_body_2 = json.dumps({
+            "event": "order.paid",
+            "event_id": event_id_2,
+            "payload": {
+                "order": {
+                    "entity": {
+                        "id": order.payment_reference,
+                        "notes": {"order_number": order_number},
+                    }
+                }
+            }
+        }).encode('utf-8')
+        sig_2 = hmac.new(secret.encode('utf-8'), webhook_body_2, hashlib.sha256).hexdigest()
+
+        res3 = api_client.post(
+            "/api/v1/marketplace/payments/webhook/razorpay/",
+            data=webhook_body_2,
+            content_type="application/json",
+            HTTP_X_RAZORPAY_SIGNATURE=sig_2,
+        )
+        assert res3.status_code == status.HTTP_200_OK
+        assert res3.json()["settled"] is False, "Order was already PAID so settled flag must be False"
+
+        notifs_after_third = Notification.objects.filter(
+            recipient=buyer,
+            event_type="marketplace.order.payment_verified",
+        ).count()
+        assert notifs_after_third == 1, "Subsequent webhook event on settled order must not duplicate notifications!"
+

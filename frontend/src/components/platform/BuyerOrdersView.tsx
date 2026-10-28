@@ -16,6 +16,8 @@ import {
   ReturnRequestType,
   DisputeCategory,
   DisputePriority,
+  PlatformProductReview,
+  CreateProductReviewPayload,
   resolveMediaUrl,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
@@ -53,6 +55,10 @@ import {
   UploadCloud,
   Send,
   HelpCircle,
+  Star,
+  ThumbsUp,
+  Edit3,
+  Trash2,
 } from "lucide-react";
 
 interface BuyerOrdersViewProps {
@@ -74,8 +80,8 @@ export default function BuyerOrdersView({
 }: BuyerOrdersViewProps) {
   const { user } = useAuth();
 
-  // Navigation: Orders / Returns / Disputes
-  const [activeSection, setActiveSection] = useState<"orders" | "returns" | "disputes">("orders");
+  // Navigation: Orders / Returns / Disputes / Reviews
+  const [activeSection, setActiveSection] = useState<"orders" | "returns" | "disputes" | "reviews">("orders");
 
   // Orders State
   const [orders, setOrders] = useState<PlatformOrder[]>([]);
@@ -84,6 +90,35 @@ export default function BuyerOrdersView({
   const [statusFilter, setStatusFilter] = useState<OrderStatusFilter>("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedOrder, setSelectedOrder] = useState<PlatformOrder | null>(null);
+
+  // Reviews State (Task 4)
+  const [buyerReviews, setBuyerReviews] = useState<PlatformProductReview[]>([]);
+  const [loadingReviews, setLoadingReviews] = useState(false);
+
+  // Review Submission Modal
+  const [reviewModalOrder, setReviewModalOrder] = useState<PlatformOrder | null>(null);
+  const [reviewModalItem, setReviewModalItem] = useState<PlatformOrderItem | null>(null);
+  const [reviewRating, setReviewRating] = useState<number>(5);
+  const [reviewHoverRating, setReviewHoverRating] = useState<number>(0);
+  const [reviewTitle, setReviewTitle] = useState("");
+  const [reviewComment, setReviewComment] = useState("");
+  const [sellerRatingInput, setSellerRatingInput] = useState<number>(5);
+  const [sellerHoverRatingInput, setSellerHoverRatingInput] = useState<number>(0);
+  const [sellerCommentInput, setSellerCommentInput] = useState("");
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [reviewModalError, setReviewModalError] = useState<string | null>(null);
+
+  // Edit Review Modal
+  const [editingReview, setEditingReview] = useState<PlatformProductReview | null>(null);
+  const [editRating, setEditRating] = useState<number>(5);
+  const [editHoverRating, setEditHoverRating] = useState<number>(0);
+  const [editTitle, setEditTitle] = useState("");
+  const [editComment, setEditComment] = useState("");
+  const [isSubmittingEditReview, setIsSubmittingEditReview] = useState(false);
+  const [editReviewError, setEditReviewError] = useState<string | null>(null);
+
+  // Delete review tracking
+  const [deletingReviewId, setDeletingReviewId] = useState<string | null>(null);
 
   // Cancellation state (pre-confirmation direct cancel)
   const [cancelModalOrder, setCancelModalOrder] = useState<PlatformOrder | null>(null);
@@ -192,6 +227,20 @@ export default function BuyerOrdersView({
     }
   }, [user]);
 
+  // Load reviews (Task 4)
+  const loadBuyerReviews = useCallback(async () => {
+    if (!user) return;
+    setLoadingReviews(true);
+    try {
+      const res = await api.marketplace.listBuyerReviews();
+      setBuyerReviews(Array.isArray(res) ? res : []);
+    } catch (err) {
+      console.error("Failed to load buyer reviews", err);
+    } finally {
+      setLoadingReviews(false);
+    }
+  }, [user]);
+
   useEffect(() => {
     let ignore = false;
     Promise.resolve().then(() => {
@@ -199,12 +248,13 @@ export default function BuyerOrdersView({
         loadOrders();
         loadBuyerReturns();
         loadBuyerDisputes();
+        loadBuyerReviews();
       }
     });
     return () => {
       ignore = true;
     };
-  }, [loadOrders, loadBuyerReturns, loadBuyerDisputes]);
+  }, [loadOrders, loadBuyerReturns, loadBuyerDisputes, loadBuyerReviews]);
 
   // Initial order navigation
   useEffect(() => {
@@ -419,6 +469,100 @@ export default function BuyerOrdersView({
     }
   };
 
+  // Review Handlers (Task 4)
+  const handleOpenReviewModal = (order: PlatformOrder, item: PlatformOrderItem) => {
+    setReviewModalOrder(order);
+    setReviewModalItem(item);
+    setReviewRating(5);
+    setReviewHoverRating(0);
+    setReviewTitle("");
+    setReviewComment("");
+    setSellerRatingInput(5);
+    setSellerHoverRatingInput(0);
+    setSellerCommentInput("");
+    setReviewModalError(null);
+  };
+
+  const handleSubmitReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reviewModalOrder || !reviewModalItem) return;
+    if (reviewComment.trim().length < 5) {
+      setReviewModalError("Review comment must be at least 5 characters long.");
+      return;
+    }
+    setIsSubmittingReview(true);
+    setReviewModalError(null);
+    try {
+      const payload: CreateProductReviewPayload = {
+        order_item_id: reviewModalItem.id,
+        rating: reviewRating,
+        title: reviewTitle.trim() || undefined,
+        comment: reviewComment.trim(),
+        seller_rating: sellerRatingInput,
+        seller_comment: sellerCommentInput.trim() || undefined,
+      };
+      await api.marketplace.createProductReview(reviewModalOrder.id, payload);
+      setSuccessBanner(`Your review for ${reviewModalItem.title} has been submitted!`);
+      setReviewModalOrder(null);
+      setReviewModalItem(null);
+      loadBuyerReviews();
+      loadOrders();
+    } catch (err: unknown) {
+      setReviewModalError(err instanceof Error ? err.message : "Failed to submit review.");
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  const handleOpenEditReview = (rev: PlatformProductReview) => {
+    setEditingReview(rev);
+    setEditRating(rev.rating);
+    setEditHoverRating(0);
+    setEditTitle(rev.title || "");
+    setEditComment(rev.comment || "");
+    setEditReviewError(null);
+  };
+
+  const handleSaveEditReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingReview) return;
+    if (editComment.trim().length < 5) {
+      setEditReviewError("Review comment must be at least 5 characters long.");
+      return;
+    }
+    setIsSubmittingEditReview(true);
+    setEditReviewError(null);
+    try {
+      await api.marketplace.updateProductReview(editingReview.id, {
+        rating: editRating,
+        title: editTitle.trim(),
+        comment: editComment.trim(),
+      });
+      setSuccessBanner("Review updated successfully.");
+      setEditingReview(null);
+      loadBuyerReviews();
+    } catch (err: unknown) {
+      setEditReviewError(err instanceof Error ? err.message : "Failed to update review.");
+    } finally {
+      setIsSubmittingEditReview(false);
+    }
+  };
+
+  const handleDeleteReview = async (reviewId: string) => {
+    if (!confirm("Are you sure you want to delete this review?")) return;
+    setDeletingReviewId(reviewId);
+    try {
+      await api.marketplace.deleteProductReview(reviewId);
+      setSuccessBanner("Review deleted successfully.");
+      loadBuyerReviews();
+      loadOrders();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to delete review.");
+    } finally {
+      setDeletingReviewId(null);
+    }
+  };
+
   // Status Metrics
   const counts = useMemo(() => {
     return {
@@ -430,8 +574,9 @@ export default function BuyerOrdersView({
       cancelled: orders.filter((o) => o.status === "CANCELLED").length,
       returns: buyerReturns.length,
       disputes: buyerDisputes.length,
+      reviews: buyerReviews.length,
     };
-  }, [orders, buyerReturns, buyerDisputes]);
+  }, [orders, buyerReturns, buyerDisputes, buyerReviews]);
 
   // Filtered orders
   const filteredOrders = useMemo(() => {
@@ -585,7 +730,7 @@ export default function BuyerOrdersView({
               <Package className="w-4 h-4" />
             </div>
             <span className="text-xs font-bold text-amber-400 tracking-wider uppercase">
-              Phase 5 Marketplace
+              Customer Purchases
             </span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
@@ -615,34 +760,34 @@ export default function BuyerOrdersView({
       )}
 
       {/* Primary Section Switcher */}
-      <div className="flex items-center gap-2 p-1 bg-white rounded-2xl border border-slate-200 shadow-xs max-w-lg">
+      <div className="flex flex-wrap items-center gap-2 p-1 bg-white rounded-2xl border border-slate-200 shadow-xs max-w-2xl">
         <button
           onClick={() => setActiveSection("orders")}
-          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 ${
+          className={`flex-1 min-w-[130px] py-2.5 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
             activeSection === "orders"
               ? "bg-slate-900 text-white shadow-md"
               : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
           }`}
         >
           <Package className="w-4 h-4 text-amber-400" />
-          <span>Purchased Orders ({counts.all})</span>
+          <span>Purchases ({counts.all})</span>
         </button>
 
         <button
           onClick={() => setActiveSection("returns")}
-          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 ${
+          className={`flex-1 min-w-[150px] py-2.5 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
             activeSection === "returns"
               ? "bg-slate-900 text-white shadow-md"
               : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
           }`}
         >
           <RotateCcw className="w-4 h-4 text-indigo-400" />
-          <span>Returns & Cancellations ({counts.returns})</span>
+          <span>Returns ({counts.returns})</span>
         </button>
 
         <button
           onClick={() => setActiveSection("disputes")}
-          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 ${
+          className={`flex-1 min-w-[130px] py-2.5 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
             activeSection === "disputes"
               ? "bg-slate-900 text-white shadow-md"
               : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
@@ -650,6 +795,18 @@ export default function BuyerOrdersView({
         >
           <Scale className="w-4 h-4 text-rose-400" />
           <span>Disputes ({counts.disputes})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSection("reviews")}
+          className={`flex-1 min-w-[130px] py-2.5 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
+            activeSection === "reviews"
+              ? "bg-slate-900 text-white shadow-md"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+          }`}
+        >
+          <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
+          <span>My Reviews ({counts.reviews})</span>
         </button>
       </div>
 
@@ -797,6 +954,26 @@ export default function BuyerOrdersView({
                             {item.mpn && (
                               <div className="text-[10px] text-slate-400 font-mono mt-0.5">
                                 MPN: {item.mpn} · GST: {Number(item.gst_rate)}%
+                              </div>
+                            )}
+
+                            {order.status !== "CANCELLED" && (
+                              <div className="mt-1 flex items-center gap-2">
+                                {item.is_reviewed ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200">
+                                    <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                                    <span>Reviewed</span>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenReviewModal(order, item)}
+                                    className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 px-2.5 py-0.5 rounded-lg border border-amber-300 transition-colors shadow-2xs"
+                                  >
+                                    <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
+                                    <span>Review Purchase</span>
+                                  </button>
+                                )}
                               </div>
                             )}
                           </div>
@@ -1087,6 +1264,155 @@ export default function BuyerOrdersView({
                       <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
                       <span>Open Dispute Conversation</span>
                     </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* SECTION 4: MY REVIEWS & RATINGS (Task 4)                  */}
+      {/* ========================================================= */}
+      {activeSection === "reviews" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
+            <h3 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-2">
+              <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
+              <span>Purchased Product Reviews ({buyerReviews.length})</span>
+            </h3>
+            <span className="text-[11px] text-slate-500">
+              Verified purchaser reviews and seller feedback
+            </span>
+          </div>
+
+          {loadingReviews ? (
+            <div className="p-12 text-center text-slate-400 text-xs">
+              <Loader2 className="w-6 h-6 animate-spin mx-auto text-amber-500 mb-2" />
+              <span>Loading your reviews...</span>
+            </div>
+          ) : buyerReviews.length === 0 ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center space-y-3">
+              <Star className="w-10 h-10 text-amber-300 mx-auto" />
+              <h4 className="text-sm font-black text-slate-900">No Reviews Submitted Yet</h4>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                You haven&apos;t reviewed any purchased spare parts yet. You can review delivered items directly in the &quot;Purchases&quot; tab!
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveSection("orders")}
+                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-all shadow-xs"
+              >
+                Go to Purchases
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {buyerReviews.map((rev) => (
+                <div key={rev.id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-bold text-sm text-slate-900">
+                        {rev.listing_name}
+                      </span>
+                      <span className="text-slate-300">·</span>
+                      <span className="text-xs text-slate-500 font-mono">
+                        Order #{rev.order_number}
+                      </span>
+                      {rev.is_verified_purchase && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                          <span>Verified Purchase</span>
+                        </span>
+                      )}
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                        rev.status === "APPROVED"
+                          ? "bg-blue-50 text-blue-700 border-blue-200"
+                          : rev.status === "FLAGGED"
+                          ? "bg-amber-50 text-amber-800 border-amber-300"
+                          : "bg-slate-100 text-slate-700 border-slate-200"
+                      }`}>
+                        {rev.status}
+                      </span>
+                    </div>
+
+                    <div className="text-xs text-slate-400">
+                      {new Date(rev.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                    </div>
+                  </div>
+
+                  {/* Stars & Content */}
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1.5">
+                      <div className="flex items-center text-amber-400">
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <Star
+                            key={star}
+                            className={`w-4 h-4 ${
+                              star <= rev.rating ? "fill-amber-400 text-amber-400" : "text-slate-200"
+                            }`}
+                          />
+                        ))}
+                      </div>
+                      {rev.title && (
+                        <span className="font-bold text-slate-900 text-xs ml-1">{rev.title}</span>
+                      )}
+                    </div>
+
+                    <p className="text-xs text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      {rev.comment}
+                    </p>
+                  </div>
+
+                  {/* Merchant Response Block if replied */}
+                  {rev.has_seller_reply && rev.seller_reply && (
+                    <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 text-xs space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                          <Building2 className="w-3.5 h-3.5 text-amber-700" />
+                          <span>Merchant Response from {rev.seller_name}</span>
+                        </span>
+                        {rev.seller_reply_at && (
+                          <span className="text-[10px] text-amber-700">
+                            {new Date(rev.seller_reply_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-amber-900 leading-relaxed">{rev.seller_reply}</p>
+                    </div>
+                  )}
+
+                  {/* Helpful votes & Actions */}
+                  <div className="pt-2 flex items-center justify-between border-t border-slate-100 text-xs">
+                    <div className="flex items-center gap-1.5 text-slate-400 text-[11px]">
+                      <ThumbsUp className="w-3.5 h-3.5 text-slate-400" />
+                      <span>{rev.helpful_votes} {rev.helpful_votes === 1 ? "person" : "people"} found this helpful</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditReview(rev)}
+                        className="px-3 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold transition-colors flex items-center gap-1"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-slate-500" />
+                        <span>Edit Review</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteReview(rev.id)}
+                        disabled={deletingReviewId === rev.id}
+                        className="px-3 py-1.5 rounded-xl border border-rose-200 hover:bg-rose-50 text-rose-700 text-xs font-bold transition-colors flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {deletingReviewId === rev.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                        )}
+                        <span>Delete</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -1837,6 +2163,306 @@ export default function BuyerOrdersView({
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* REVIEW SUBMISSION MODAL (Task 4)                          */}
+      {/* ========================================================= */}
+      {reviewModalOrder && reviewModalItem && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-lg w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-5 sm:p-6 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="space-y-0.5">
+                <h3 className="font-mono font-black text-amber-400 text-base flex items-center gap-2">
+                  <Star className="w-4 h-4 fill-amber-400" />
+                  <span>Review Purchased Item</span>
+                </h3>
+                <p className="text-xs text-slate-300 truncate max-w-sm">
+                  {reviewModalItem.title} · Order #{reviewModalOrder.order_number}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setReviewModalOrder(null);
+                  setReviewModalItem(null);
+                }}
+                className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitReview} className="p-5 sm:p-6 overflow-y-auto space-y-4 text-xs">
+              {reviewModalError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs">
+                  {reviewModalError}
+                </div>
+              )}
+
+              {/* Verified Purchase Badge */}
+              <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-2xl flex items-center justify-between">
+                <div>
+                  <span className="font-bold text-amber-950 block">{reviewModalItem.title}</span>
+                  <span className="text-[11px] text-amber-800 font-mono">Brand: {reviewModalItem.brand} {reviewModalItem.mpn ? `· MPN: ${reviewModalItem.mpn}` : ""}</span>
+                </div>
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                  Verified Purchase
+                </span>
+              </div>
+
+              {/* Product Rating Star Selector */}
+              <div className="space-y-1.5">
+                <label className="block font-bold text-slate-800">Product Rating *</label>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <button
+                        key={star}
+                        type="button"
+                        onClick={() => setReviewRating(star)}
+                        onMouseEnter={() => setReviewHoverRating(star)}
+                        onMouseLeave={() => setReviewHoverRating(0)}
+                        className="p-1 hover:scale-110 transition-transform"
+                      >
+                        <Star
+                          className={`w-6 h-6 ${
+                            star <= (reviewHoverRating || reviewRating)
+                              ? "fill-amber-400 text-amber-400"
+                              : "text-slate-200"
+                          }`}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-xs font-bold text-amber-600 ml-2">
+                    {(() => {
+                      const cur = reviewHoverRating || reviewRating;
+                      switch (cur) {
+                        case 1: return "1 - Poor";
+                        case 2: return "2 - Fair";
+                        case 3: return "3 - Average";
+                        case 4: return "4 - Very Good";
+                        case 5: return "5 - Excellent";
+                        default: return "";
+                      }
+                    })()}
+                  </span>
+                </div>
+              </div>
+
+              {/* Review Title */}
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">Headline / Title (Optional)</label>
+                <input
+                  type="text"
+                  value={reviewTitle}
+                  onChange={(e) => setReviewTitle(e.target.value)}
+                  placeholder="e.g. Perfect fitment for my Honda Civic, superior damping"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-slate-900 placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              {/* Written Feedback */}
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">Written Review *</label>
+                <textarea
+                  rows={4}
+                  value={reviewComment}
+                  onChange={(e) => setReviewComment(e.target.value)}
+                  placeholder="Tell other drivers about fitment, build quality, ease of installation, and performance (minimum 5 characters)..."
+                  required
+                  minLength={5}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-slate-900 placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                />
+                <span className="text-[10px] text-slate-400 block text-right mt-0.5">
+                  {reviewComment.length} characters (min 5)
+                </span>
+              </div>
+
+              {/* Optional Seller Rating Section */}
+              <div className="pt-3 border-t border-slate-200 space-y-3">
+                <span className="font-bold text-slate-800 block text-xs">
+                  Rate the Merchant / Seller Experience (Optional)
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <button
+                        key={star}
+                        type="button"
+                        onClick={() => setSellerRatingInput(star)}
+                        onMouseEnter={() => setSellerHoverRatingInput(star)}
+                        onMouseLeave={() => setSellerHoverRatingInput(0)}
+                        className="p-1 hover:scale-110 transition-transform"
+                      >
+                        <Star
+                          className={`w-5 h-5 ${
+                            star <= (sellerHoverRatingInput || sellerRatingInput)
+                              ? "fill-indigo-500 text-indigo-500"
+                              : "text-slate-200"
+                          }`}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-xs font-semibold text-indigo-700 ml-1">
+                    {sellerRatingInput} of 5 Stars
+                  </span>
+                </div>
+
+                <input
+                  type="text"
+                  value={sellerCommentInput}
+                  onChange={(e) => setSellerCommentInput(e.target.value)}
+                  placeholder="Feedback on seller packaging, dispatch speed, and communication..."
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-200 text-slate-900 placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-indigo-400"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReviewModalOrder(null);
+                    setReviewModalItem(null);
+                  }}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingReview || reviewComment.trim().length < 5}
+                  className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-black shadow-md flex items-center gap-2 disabled:opacity-40"
+                >
+                  {isSubmittingReview ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Submitting...</span>
+                    </>
+                  ) : (
+                    <span>Submit Verified Review</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* EDIT REVIEW MODAL (Task 4)                                */}
+      {/* ========================================================= */}
+      {editingReview && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-lg w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-5 sm:p-6 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="space-y-0.5">
+                <h3 className="font-mono font-black text-amber-400 text-base flex items-center gap-2">
+                  <Edit3 className="w-4 h-4" />
+                  <span>Edit Review</span>
+                </h3>
+                <p className="text-xs text-slate-300 truncate max-w-sm">
+                  {editingReview.listing_name}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingReview(null)}
+                className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditReview} className="p-5 sm:p-6 overflow-y-auto space-y-4 text-xs">
+              {editReviewError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs">
+                  {editReviewError}
+                </div>
+              )}
+
+              {/* Rating Selector */}
+              <div className="space-y-1.5">
+                <label className="block font-bold text-slate-800">Rating *</label>
+                <div className="flex items-center gap-1">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      type="button"
+                      onClick={() => setEditRating(star)}
+                      onMouseEnter={() => setEditHoverRating(star)}
+                      onMouseLeave={() => setEditHoverRating(0)}
+                      className="p-1 hover:scale-110 transition-transform"
+                    >
+                      <Star
+                        className={`w-6 h-6 ${
+                          star <= (editHoverRating || editRating)
+                            ? "fill-amber-400 text-amber-400"
+                            : "text-slate-200"
+                        }`}
+                      />
+                    </button>
+                  ))}
+                  <span className="text-xs font-bold text-amber-600 ml-2">
+                    {editRating} of 5 Stars
+                  </span>
+                </div>
+              </div>
+
+              {/* Title */}
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">Headline / Title</label>
+                <input
+                  type="text"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              {/* Comment */}
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">Review Comment *</label>
+                <textarea
+                  rows={4}
+                  value={editComment}
+                  onChange={(e) => setEditComment(e.target.value)}
+                  required
+                  minLength={5}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setEditingReview(null)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingEditReview || editComment.trim().length < 5}
+                  className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-black shadow-md flex items-center gap-2 disabled:opacity-40"
+                >
+                  {isSubmittingEditReview ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <span>Save Changes</span>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

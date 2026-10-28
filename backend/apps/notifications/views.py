@@ -33,6 +33,9 @@ class NotificationListView(generics.ListAPIView):
                 queryset = queryset.filter(is_read=False)
             elif value not in FALSE_VALUES:
                 raise DRFValidationError({'unread': "Must be 'true' or 'false'."})
+        event_type = self.request.query_params.get('event_type')
+        if event_type:
+            queryset = queryset.filter(event_type=event_type.strip())
         return queryset
 
 
@@ -91,5 +94,21 @@ class NotificationMarkAllReadView(views.APIView):
                 "message": "All notifications marked as read.",
                 "updated_count": updated,
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class NotificationDeleteView(views.APIView):
+    """Delete one of the current user's notifications.
+
+    DELETE /api/v1/notifications/<id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, id):
+        notification = generics.get_object_or_404(recipient_notifications(request.user), id=id)
+        notification.delete()
+        return Response(
+            {"status": "success", "message": "Notification deleted."},
             status=status.HTTP_200_OK,
         )

@@ -8,6 +8,8 @@ import {
   MarketplacePartListing,
   VehicleCatalogueApplication,
   CataloguePhotoProposal,
+  PlatformProductReview,
+  PlatformReviewReport,
 } from "@/lib/api/client";
 import {
   CheckCircle2,
@@ -21,6 +23,12 @@ import {
   AlertTriangle,
   FilePlus,
   Camera,
+  Star,
+  Flag,
+  ShieldAlert,
+  Trash2,
+  Filter,
+  MessageSquare,
 } from "lucide-react";
 
 interface AdminMarketplaceReviewViewProps {
@@ -32,7 +40,9 @@ export default function AdminMarketplaceReviewView({
   initialVehicleId,
   initialPartId,
 }: AdminMarketplaceReviewViewProps = {}) {
-  const [activeQueue, setActiveQueue] = useState<"vehicles" | "parts" | "applications" | "photo_proposals">("vehicles");
+  const [activeQueue, setActiveQueue] = useState<
+    "vehicles" | "parts" | "applications" | "photo_proposals" | "reviews"
+  >("vehicles");
   const [statusFilter, setStatusFilter] = useState<string>("PENDING_APPROVAL");
 
   // Queues
@@ -41,6 +51,24 @@ export default function AdminMarketplaceReviewView({
   const [applications, setApplications] = useState<VehicleCatalogueApplication[]>([]);
   const [photoProposals, setPhotoProposals] = useState<CataloguePhotoProposal[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // Reviews & Reports Moderation Queue (Task 4)
+  const [reviewsSubTab, setReviewsSubTab] = useState<"reviews" | "reports">("reviews");
+  const [adminReviews, setAdminReviews] = useState<PlatformProductReview[]>([]);
+  const [adminReports, setAdminReports] = useState<PlatformReviewReport[]>([]);
+  const [reviewStatusFilter, setReviewStatusFilter] = useState<string>("ALL");
+  const [reportStatusFilter, setReportStatusFilter] = useState<string>("ALL");
+  const [reviewSearch, setReviewSearch] = useState<string>("");
+  const [selectedReviewForAction, setSelectedReviewForAction] = useState<{
+    review: PlatformProductReview;
+    action: "APPROVE" | "FLAG" | "REJECT" | "DELETE";
+  } | null>(null);
+  const [selectedReportForAction, setSelectedReportForAction] = useState<{
+    report: PlatformReviewReport;
+    action: "DISMISS" | "HIDE_REVIEW" | "DELETE_REVIEW";
+  } | null>(null);
+  const [moderationNotes, setModerationNotes] = useState("");
+  const [moderationSubmitting, setModerationSubmitting] = useState(false);
 
   // Inspector & Review Modal
   const [inspectVehicle, setInspectVehicle] = useState<MarketplaceVehicleListing | null>(null);
@@ -114,6 +142,87 @@ export default function AdminMarketplaceReviewView({
     }
   }, [statusFilter]);
 
+  const fetchAdminReviews = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params: { status?: string; search?: string } = {};
+      if (reviewStatusFilter !== "ALL") params.status = reviewStatusFilter;
+      if (reviewSearch.trim()) params.search = reviewSearch.trim();
+      const res = await api.marketplace.listAdminReviews(params);
+      setAdminReviews(res.results || []);
+    } catch (err) {
+      console.error("Failed to load admin reviews queue", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [reviewStatusFilter, reviewSearch]);
+
+  const fetchAdminReports = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params: { status?: string } = {};
+      if (reportStatusFilter !== "ALL") params.status = reportStatusFilter;
+      const res = await api.marketplace.listAdminReviewReports(params);
+      setAdminReports(res.results || []);
+    } catch (err) {
+      console.error("Failed to load admin reports queue", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [reportStatusFilter]);
+
+  const handleConfirmReviewModeration = async () => {
+    if (!selectedReviewForAction) return;
+    setModerationSubmitting(true);
+    try {
+      const res = await api.marketplace.moderateAdminReview(
+        selectedReviewForAction.review.id,
+        selectedReviewForAction.action,
+        moderationNotes
+      );
+      if (selectedReviewForAction.action === "DELETE") {
+        setAdminReviews((prev) => prev.filter((r) => r.id !== selectedReviewForAction.review.id));
+      } else {
+        setAdminReviews((prev) =>
+          prev.map((r) => (r.id === selectedReviewForAction.review.id ? res.review : r))
+        );
+      }
+      setSuccessMessage(`Review ${selectedReviewForAction.action.toLowerCase()}d successfully.`);
+      setSelectedReviewForAction(null);
+      setModerationNotes("");
+    } catch (err: unknown) {
+      const e = err as Error;
+      setErrorMessage(e?.message || "Failed to moderate review.");
+    } finally {
+      setModerationSubmitting(false);
+    }
+  };
+
+  const handleConfirmReportResolution = async () => {
+    if (!selectedReportForAction) return;
+    setModerationSubmitting(true);
+    try {
+      const res = await api.marketplace.resolveAdminReviewReport(
+        selectedReportForAction.report.id,
+        {
+          action: selectedReportForAction.action,
+          admin_notes: moderationNotes,
+        }
+      );
+      setAdminReports((prev) =>
+        prev.map((r) => (r.id === selectedReportForAction.report.id ? res.report : r))
+      );
+      setSuccessMessage(`Report resolved (${selectedReportForAction.action}).`);
+      setSelectedReportForAction(null);
+      setModerationNotes("");
+    } catch (err: unknown) {
+      const e = err as Error;
+      setErrorMessage(e?.message || "Failed to resolve report.");
+    } finally {
+      setModerationSubmitting(false);
+    }
+  };
+
   useEffect(() => {
     let ignore = false;
     const loadQueue = async () => {
@@ -134,6 +243,19 @@ export default function AdminMarketplaceReviewView({
         } else if (activeQueue === "photo_proposals") {
           const data = await api.catalogue.listPhotoProposals(resolveCatalogueStatus(statusFilter));
           if (!ignore) setPhotoProposals(data);
+        } else if (activeQueue === "reviews") {
+          if (reviewsSubTab === "reviews") {
+            const params: { status?: string; search?: string } = {};
+            if (reviewStatusFilter !== "ALL") params.status = reviewStatusFilter;
+            if (reviewSearch.trim()) params.search = reviewSearch.trim();
+            const res = await api.marketplace.listAdminReviews(params);
+            if (!ignore) setAdminReviews(res.results || []);
+          } else {
+            const params: { status?: string } = {};
+            if (reportStatusFilter !== "ALL") params.status = reportStatusFilter;
+            const res = await api.marketplace.listAdminReviewReports(params);
+            if (!ignore) setAdminReports(res.results || []);
+          }
         }
       } catch (err) {
         if (!ignore) console.error("Failed to load review queue", err);
@@ -143,7 +265,7 @@ export default function AdminMarketplaceReviewView({
     return () => {
       ignore = true;
     };
-  }, [activeQueue, statusFilter]);
+  }, [activeQueue, statusFilter, reviewsSubTab, reviewStatusFilter, reportStatusFilter, reviewSearch]);
 
   // Handle external navigation (from Global Search) to a specific admin vehicle review item
   useEffect(() => {
@@ -314,48 +436,154 @@ export default function AdminMarketplaceReviewView({
             <Camera className="w-3.5 h-3.5" />
             <span>Photo Proposals ({photoProposals.length})</span>
           </button>
+          <button
+            onClick={() => setActiveQueue("reviews")}
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+              activeQueue === "reviews"
+                ? "bg-amber-500 text-slate-950 shadow-md"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            <Star className="w-3.5 h-3.5" />
+            <span>Reviews & Reports ({adminReviews.length + adminReports.length})</span>
+          </button>
         </div>
       </div>
 
       {/* Filter Tabs & Refresh */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-white p-3.5 rounded-2xl border border-slate-200">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-bold text-slate-600">Filter Queue:</span>
-          <button
-            onClick={() => {
-              if (activeQueue === "vehicles") fetchVehicles();
-              else if (activeQueue === "parts") fetchParts();
-              else if (activeQueue === "applications") fetchApplications();
-              else if (activeQueue === "photo_proposals") fetchPhotoProposals();
-            }}
-            disabled={loading}
-            className="px-3 py-1 rounded-xl font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs transition-colors flex items-center gap-1"
-            title="Refresh review queue"
-          >
-            <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin text-amber-500" : ""}`} />
-            <span>Refresh Queue</span>
-          </button>
-        </div>
-        <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
-          {["PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "ALL"].map((st) => (
+      {activeQueue !== "reviews" ? (
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-white p-3.5 rounded-2xl border border-slate-200">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-slate-600">Filter Queue:</span>
             <button
-              key={st}
-              onClick={() => setStatusFilter(st)}
-              className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors ${
-                statusFilter === st
-                  ? "bg-slate-900 text-white"
-                  : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
-              }`}
+              onClick={() => {
+                if (activeQueue === "vehicles") fetchVehicles();
+                else if (activeQueue === "parts") fetchParts();
+                else if (activeQueue === "applications") fetchApplications();
+                else if (activeQueue === "photo_proposals") fetchPhotoProposals();
+              }}
+              disabled={loading}
+              className="px-3 py-1 rounded-xl font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs transition-colors flex items-center gap-1"
+              title="Refresh review queue"
             >
-              {st === "PENDING_APPROVAL"
-                ? "Pending Approval"
-                : st === "ALL"
-                ? "All Records"
-                : st.replace("_", " ")}
+              <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin text-amber-500" : ""}`} />
+              <span>Refresh Queue</span>
             </button>
-          ))}
+          </div>
+          <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
+            {["PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "ALL"].map((st) => (
+              <button
+                key={st}
+                onClick={() => setStatusFilter(st)}
+                className={`px-3 py-1.5 rounded-xl font-bold whitespace-nowrap transition-colors ${
+                  statusFilter === st
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                }`}
+              >
+                {st === "PENDING_APPROVAL"
+                  ? "Pending Approval"
+                  : st === "ALL"
+                  ? "All Records"
+                  : st.replace("_", " ")}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      ) : (
+        /* Reviews Moderation Sub-tabs & Filters (Task 4) */
+        <div className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+            {/* Sub Tabs */}
+            <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl self-start">
+              <button
+                onClick={() => setReviewsSubTab("reviews")}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  reviewsSubTab === "reviews"
+                    ? "bg-white text-slate-900 shadow-xs"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                <Star className="w-3.5 h-3.5 text-amber-500" />
+                <span>Customer Reviews ({adminReviews.length})</span>
+              </button>
+              <button
+                onClick={() => setReviewsSubTab("reports")}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  reviewsSubTab === "reports"
+                    ? "bg-white text-slate-900 shadow-xs"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                <Flag className="w-3.5 h-3.5 text-rose-500" />
+                <span>Community Reports ({adminReports.length})</span>
+              </button>
+            </div>
+
+            {/* Refresh */}
+            <button
+              onClick={() => {
+                if (reviewsSubTab === "reviews") fetchAdminReviews();
+                else fetchAdminReports();
+              }}
+              disabled={loading}
+              className="px-3.5 py-1.5 rounded-xl font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs transition-colors flex items-center gap-1.5 self-start sm:self-auto"
+            >
+              <RotateCcw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-amber-500" : ""}`} />
+              <span>Refresh {reviewsSubTab === "reviews" ? "Reviews" : "Reports"}</span>
+            </button>
+          </div>
+
+          {/* Sub Tab Filter Bars */}
+          {reviewsSubTab === "reviews" ? (
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-slate-100">
+              <div className="flex items-center gap-1.5 overflow-x-auto text-xs">
+                <span className="text-slate-400 font-semibold mr-1">Status:</span>
+                {["ALL", "PENDING", "APPROVED", "FLAGGED", "REJECTED"].map((st) => (
+                  <button
+                    key={st}
+                    onClick={() => setReviewStatusFilter(st)}
+                    className={`px-3 py-1 rounded-xl font-bold whitespace-nowrap transition-colors ${
+                      reviewStatusFilter === st
+                        ? "bg-slate-900 text-white"
+                        : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                    }`}
+                  >
+                    {st === "ALL" ? "All Reviews" : st}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="Search reviews..."
+                  value={reviewSearch}
+                  onChange={(e) => setReviewSearch(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs w-full sm:w-48 focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 overflow-x-auto text-xs pt-2 border-t border-slate-100">
+              <span className="text-slate-400 font-semibold mr-1">Report Status:</span>
+              {["ALL", "PENDING", "RESOLVED", "DISMISSED"].map((st) => (
+                <button
+                  key={st}
+                  onClick={() => setReportStatusFilter(st)}
+                  className={`px-3 py-1 rounded-xl font-bold whitespace-nowrap transition-colors ${
+                    reportStatusFilter === st
+                      ? "bg-slate-900 text-white"
+                      : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                  }`}
+                >
+                  {st === "ALL" ? "All Reports" : st}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* =========================================================================
           QUEUE: VEHICLES
@@ -663,6 +891,298 @@ export default function AdminMarketplaceReviewView({
                 </div>
               ))}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* =========================================================================
+          QUEUE: REVIEWS & COMMUNITY REPORTS (Task 4)
+      ========================================================================= */}
+      {activeQueue === "reviews" && (
+        <div className="space-y-4">
+          {reviewsSubTab === "reviews" ? (
+            /* Sub-queue: Reviews */
+            loading ? (
+              <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center space-y-3">
+                <RotateCcw className="w-8 h-8 animate-spin text-amber-500 mx-auto" />
+                <p className="text-xs text-slate-500">Loading reviews for moderation...</p>
+              </div>
+            ) : adminReviews.length === 0 ? (
+              <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center mx-auto">
+                  <Star className="w-6 h-6" />
+                </div>
+                <h4 className="text-base font-bold text-slate-900">No Reviews In Queue</h4>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                  There are no customer product reviews matching the selected filter status ({reviewStatusFilter}).
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {adminReviews.map((rev) => (
+                  <div
+                    key={rev.id}
+                    className="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-xs space-y-3"
+                  >
+                    {/* Header */}
+                    <div className="flex flex-wrap items-start justify-between gap-2 pb-3 border-b border-slate-100">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-slate-900 text-sm">
+                            {rev.part_name || "Spare Part"}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              rev.status === "APPROVED"
+                                ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                : rev.status === "FLAGGED"
+                                ? "bg-amber-100 text-amber-800 border border-amber-200"
+                                : rev.status === "REJECTED"
+                                ? "bg-rose-100 text-rose-800 border border-rose-200"
+                                : "bg-blue-100 text-blue-800 border border-blue-200"
+                            }`}
+                          >
+                            {rev.status}
+                          </span>
+                          {rev.is_verified_purchase && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              <span>Verified Purchase</span>
+                            </span>
+                          )}
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-100 text-slate-600">
+                            Order #{rev.order_number || "—"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 mt-1.5">
+                          <div className="flex items-center text-amber-400">
+                            {[1, 2, 3, 4, 5].map((s) => (
+                              <Star
+                                key={s}
+                                className={`w-3.5 h-3.5 ${
+                                  s <= rev.rating ? "fill-amber-400 text-amber-400" : "text-slate-200"
+                                }`}
+                              />
+                            ))}
+                          </div>
+                          <span className="text-xs font-bold text-slate-800">{rev.rating}.0 / 5.0</span>
+                          <span className="text-xs text-slate-400">·</span>
+                          <span className="text-xs text-slate-600 font-semibold">
+                            By: {rev.user_full_name || rev.user_email || "Customer"}
+                          </span>
+                          <span className="text-xs text-slate-400">·</span>
+                          <span className="text-xs text-slate-400">
+                            Merchant: <strong className="text-slate-700">{rev.seller_name || "—"}</strong>
+                          </span>
+                          <span className="text-xs text-slate-400">·</span>
+                          <span className="text-xs text-slate-400">
+                            {new Date(rev.created_at).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Admin Moderation Actions */}
+                      <div className="flex items-center gap-1.5">
+                        {rev.status !== "APPROVED" && (
+                          <button
+                            onClick={() => {
+                              setSelectedReviewForAction({ review: rev, action: "APPROVE" });
+                              setModerationNotes("");
+                            }}
+                            className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Approve</span>
+                          </button>
+                        )}
+                        {rev.status !== "FLAGGED" && (
+                          <button
+                            onClick={() => {
+                              setSelectedReviewForAction({ review: rev, action: "FLAG" });
+                              setModerationNotes("");
+                            }}
+                            className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1"
+                          >
+                            <Flag className="w-3.5 h-3.5" />
+                            <span>Flag</span>
+                          </button>
+                        )}
+                        {rev.status !== "REJECTED" && (
+                          <button
+                            onClick={() => {
+                              setSelectedReviewForAction({ review: rev, action: "REJECT" });
+                              setModerationNotes("");
+                            }}
+                            className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl transition-all shadow-xs flex items-center gap-1"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                            <span>Hide / Reject</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            setSelectedReviewForAction({ review: rev, action: "DELETE" });
+                            setModerationNotes("");
+                          }}
+                          className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all border border-slate-200 flex items-center gap-1"
+                          title="Permanently remove review"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Delete</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Headline & Comment */}
+                    {rev.headline && (
+                      <h5 className="text-xs font-black text-slate-900">{rev.headline}</h5>
+                    )}
+                    <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-line bg-slate-50 p-3 rounded-xl border border-slate-100">
+                      {rev.comment}
+                    </p>
+
+                    {/* Merchant Reply if existing */}
+                    {rev.seller_reply && (
+                      <div className="p-3 bg-amber-50/50 rounded-xl border border-amber-200/60 text-xs space-y-1">
+                        <span className="font-bold text-amber-900 text-[11px] block">
+                          Merchant Response ({rev.seller_name}):
+                        </span>
+                        <p className="text-slate-700 italic text-[11px]">{rev.seller_reply}</p>
+                      </div>
+                    )}
+
+                    {/* Moderation Notes Banner if existing */}
+                    {rev.moderation_notes && (
+                      <div className="text-[11px] text-slate-500 bg-slate-100 px-3 py-1.5 rounded-lg flex items-center gap-2">
+                        <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Moderator Note: {rev.moderation_notes}</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )
+          ) : (
+            /* Sub-queue: Community Reports */
+            loading ? (
+              <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center space-y-3">
+                <RotateCcw className="w-8 h-8 animate-spin text-amber-500 mx-auto" />
+                <p className="text-xs text-slate-500">Loading community reports...</p>
+              </div>
+            ) : adminReports.length === 0 ? (
+              <div className="bg-white rounded-3xl p-12 border border-slate-200 text-center space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-600 flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+                <h4 className="text-base font-bold text-slate-900">Zero Pending Reports</h4>
+                <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                  All community review reports have been adjudicated.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {adminReports.map((rep) => (
+                  <div
+                    key={rep.id}
+                    className="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-xs space-y-3"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2 pb-3 border-b border-slate-100">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-800 border border-rose-200 flex items-center gap-1">
+                            <Flag className="w-3 h-3 text-rose-600" />
+                            <span>{rep.reason_display || rep.reason}</span>
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              rep.status === "RESOLVED"
+                                ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                : rep.status === "DISMISSED"
+                                ? "bg-slate-100 text-slate-700 border border-slate-200"
+                                : "bg-amber-100 text-amber-800 border border-amber-200"
+                            }`}
+                          >
+                            Status: {rep.status}
+                          </span>
+                          <span className="text-xs text-slate-400">
+                            Reported on {new Date(rep.created_at).toLocaleString()}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600 mt-1">
+                          Reporter: <strong>{rep.reporter_name || rep.reporter_email || "Anonymous"}</strong>
+                        </p>
+                      </div>
+
+                      {/* Report Resolution Actions */}
+                      {rep.status === "PENDING" && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setSelectedReportForAction({ report: rep, action: "DISMISS" });
+                              setModerationNotes("");
+                            }}
+                            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all border border-slate-200"
+                          >
+                            Dismiss
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedReportForAction({ report: rep, action: "HIDE_REVIEW" });
+                              setModerationNotes("");
+                            }}
+                            className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl transition-all shadow-xs"
+                          >
+                            Hide Review
+                          </button>
+                          <button
+                            onClick={() => {
+                              setSelectedReportForAction({ report: rep, action: "DELETE_REVIEW" });
+                              setModerationNotes("");
+                            }}
+                            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-all"
+                          >
+                            Delete Review
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Report Reason Details */}
+                    {rep.details && (
+                      <div className="p-3 bg-rose-50/50 rounded-xl border border-rose-100 text-xs text-rose-900 space-y-0.5">
+                        <span className="font-bold text-[11px] block">Reporter&apos;s Claim:</span>
+                        <p className="italic">{rep.details}</p>
+                      </div>
+                    )}
+
+                    {/* Reported Review Preview */}
+                    {rep.review_detail ? (
+                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-1.5">
+                        <div className="flex items-center justify-between text-[11px] text-slate-500">
+                          <span className="font-bold text-slate-700">
+                            Reported Review Content (by {rep.review_detail.user_full_name || "Buyer"} · {rep.review_detail.rating}★)
+                          </span>
+                          <span>Product: {rep.review_detail.part_name || "Spare Part"}</span>
+                        </div>
+                        {rep.review_detail.headline && (
+                          <h6 className="font-bold text-slate-900 text-xs">{rep.review_detail.headline}</h6>
+                        )}
+                        <p className="text-slate-600">{rep.review_detail.comment}</p>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-slate-400 italic">Review content details unavailable.</div>
+                    )}
+
+                    {/* Resolution Notes if resolved */}
+                    {rep.admin_notes && (
+                      <div className="text-[11px] text-slate-500 bg-slate-100 px-3 py-1.5 rounded-lg">
+                        Resolution Action ({rep.action_taken || "Done"}): {rep.admin_notes}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )
           )}
         </div>
       )}
@@ -1293,6 +1813,126 @@ export default function AdminMarketplaceReviewView({
                   <span>Confirm Decision</span>
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: REVIEW MODERATION CONFIRMATION (Task 4)
+      ========================================================================= */}
+      {selectedReviewForAction && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-base font-black text-slate-900">
+                Confirm Review {selectedReviewForAction.action}
+              </h3>
+              <button
+                onClick={() => setSelectedReviewForAction(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs space-y-1">
+              <div className="font-bold text-slate-800">
+                {selectedReviewForAction.review.user_full_name || "Customer"} · {selectedReviewForAction.review.rating}★
+              </div>
+              <p className="text-slate-600 italic line-clamp-2">
+                &ldquo;{selectedReviewForAction.review.comment}&rdquo;
+              </p>
+            </div>
+
+            <div className="space-y-1 text-xs">
+              <label className="font-bold text-slate-700">Moderator Notes (Optional)</label>
+              <textarea
+                rows={3}
+                value={moderationNotes}
+                onChange={(e) => setModerationNotes(e.target.value)}
+                placeholder="Reason or compliance policy reference for this moderation decision..."
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setSelectedReviewForAction(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={moderationSubmitting}
+                onClick={handleConfirmReviewModeration}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl"
+              >
+                {moderationSubmitting ? "Processing..." : `Confirm ${selectedReviewForAction.action}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: REPORT RESOLUTION CONFIRMATION (Task 4)
+      ========================================================================= */}
+      {selectedReportForAction && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-base font-black text-slate-900">
+                Resolve Report ({selectedReportForAction.action})
+              </h3>
+              <button
+                onClick={() => setSelectedReportForAction(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs space-y-1">
+              <div className="font-bold text-slate-800">
+                Reported Reason: {selectedReportForAction.report.reason}
+              </div>
+              {selectedReportForAction.report.details && (
+                <p className="text-slate-600 italic">
+                  &ldquo;{selectedReportForAction.report.details}&rdquo;
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1 text-xs">
+              <label className="font-bold text-slate-700">Resolution Notes (Optional)</label>
+              <textarea
+                rows={3}
+                value={moderationNotes}
+                onChange={(e) => setModerationNotes(e.target.value)}
+                placeholder="Log internal details for this report resolution..."
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setSelectedReportForAction(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={moderationSubmitting}
+                onClick={handleConfirmReportResolution}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl"
+              >
+                {moderationSubmitting ? "Resolving..." : "Confirm Resolution"}
+              </button>
             </div>
           </div>
         </div>

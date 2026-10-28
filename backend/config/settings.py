@@ -365,7 +365,9 @@ PRICE_OUTLIER_THRESHOLD = Decimal(os.getenv("PRICE_OUTLIER_THRESHOLD", "0.5"))
 # PAYMENT GATEWAY & CASH ON DELIVERY (COD) CONFIGURATION
 # =========================================================
 
-PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "True").lower() in ("true", "1", "yes")
+# Payment test mode is explicitly opt-in (defaults to False in production).
+# Only permitted in development (DEBUG=True) or automated testing (IS_TESTING=True).
+PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "True" if IS_TESTING else "False").lower() in ("true", "1", "yes")
 
 # Razorpay (India / INR)
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "rzp_test_placeholder_key")

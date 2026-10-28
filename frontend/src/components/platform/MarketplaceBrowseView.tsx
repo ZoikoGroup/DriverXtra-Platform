@@ -12,6 +12,10 @@ import {
   CataloguePartOffer,
   GarageVehicle,
   PartBrowseFacets,
+  PlatformProductReview,
+  ProductRatingSummary,
+  SellerReputationSummary,
+  ReviewReportReason,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
@@ -44,6 +48,11 @@ import {
   MessageCircle,
   Send,
   ShoppingCart,
+  Star,
+  ThumbsUp,
+  Flag,
+  Share2,
+  Check,
 } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 
@@ -115,6 +124,23 @@ export default function MarketplaceBrowseView({
   const [catalogueOffers, setCatalogueOffers] = useState<CataloguePartOffer[]>([]);
   const [offersLoading, setOffersLoading] = useState(false);
 
+  // Reviews & Seller Reputation State (Task 4)
+  const [partReviews, setPartReviews] = useState<PlatformProductReview[]>([]);
+  const [partRatingSummary, setPartRatingSummary] = useState<ProductRatingSummary | null>(null);
+  const [partReviewsLoading, setPartReviewsLoading] = useState(false);
+  const [partReviewRatingFilter, setPartReviewRatingFilter] = useState<number | null>(null);
+  const [sellerReputation, setSellerReputation] = useState<SellerReputationSummary | null>(null);
+  const [sellerReputationLoading, setSellerReputationLoading] = useState(false);
+  const [votingHelpfulId, setVotingHelpfulId] = useState<string | null>(null);
+
+  // Report Review State
+  const [reportingReview, setReportingReview] = useState<PlatformProductReview | null>(null);
+  const [reportReason, setReportReason] = useState<ReviewReportReason>("SPAM");
+  const [reportDetails, setReportDetails] = useState("");
+  const [reportSubmitting, setReportSubmitting] = useState(false);
+  const [reportSuccess, setReportSuccess] = useState<string | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
+
   // Reference data
   const [makes, setMakes] = useState<VehicleMake[]>([]);
   const [models, setModels] = useState<VehicleModel[]>([]);
@@ -139,6 +165,40 @@ export default function MarketplaceBrowseView({
       .catch(console.error);
   }, [initialVehicleId]);
 
+  // Reviews and Seller Reputation Loaders (Task 4)
+  const loadPartReviewsAndReputation = useCallback(async (partId: string, sellerId?: string | number) => {
+    setPartReviewsLoading(true);
+    try {
+      const [reviewsRes, ratingSummaryRes] = await Promise.all([
+        api.marketplace.getPartReviews(partId),
+        api.marketplace.getPartRatingSummary(partId),
+      ]);
+      setPartReviews(reviewsRes?.results || []);
+      setPartRatingSummary(ratingSummaryRes || null);
+    } catch (err) {
+      console.error("Failed to load part reviews", err);
+      setPartReviews([]);
+      setPartRatingSummary(null);
+    } finally {
+      setPartReviewsLoading(false);
+    }
+
+    if (sellerId) {
+      setSellerReputationLoading(true);
+      try {
+        const rep = await api.marketplace.getSellerReputation(String(sellerId));
+        setSellerReputation(rep);
+      } catch (err) {
+        console.error("Failed to load seller reputation", err);
+        setSellerReputation(null);
+      } finally {
+        setSellerReputationLoading(false);
+      }
+    } else {
+      setSellerReputation(null);
+    }
+  }, []);
+
   // Handle external navigation (from Global Search) to a specific spare part
   useEffect(() => {
     if (!initialPartId) return;
@@ -148,6 +208,8 @@ export default function MarketplaceBrowseView({
         setActiveTab("parts");
         setSelectedPart(p);
         setSelectedPartImageIdx(0);
+        setPartReviewRatingFilter(null);
+        loadPartReviewsAndReputation(p.id, p.seller_id || p.seller);
       })
       .catch(console.error);
   }, [initialPartId]);
@@ -548,10 +610,81 @@ export default function MarketplaceBrowseView({
     maxVehiclePrice,
   ]);
 
+  const handleRatingFilterChange = (star: number | null) => {
+    setPartReviewRatingFilter(star);
+    if (selectedPart) {
+      setPartReviewsLoading(true);
+      api.marketplace
+        .getPartReviews(selectedPart.id, star ? { rating: star } : undefined)
+        .then((res) => setPartReviews(res?.results || []))
+        .catch((err) => console.error("Error filtering reviews", err))
+        .finally(() => setPartReviewsLoading(false));
+    }
+  };
+
+  const handleVoteHelpful = async (reviewId: string) => {
+    if (!user) {
+      alert("Please log in to vote on reviews.");
+      return;
+    }
+    setVotingHelpfulId(reviewId);
+    try {
+      const res = await api.marketplace.voteReviewHelpful(reviewId);
+      setPartReviews((prev) =>
+        prev.map((r) =>
+          r.id === reviewId
+            ? { ...r, helpful_count: res.helpful_count, has_voted_helpful: res.has_voted }
+            : r
+        )
+      );
+    } catch (err) {
+      console.error("Failed to vote helpful", err);
+    } finally {
+      setVotingHelpfulId(null);
+    }
+  };
+
+  const handleOpenReportModal = (review: PlatformProductReview) => {
+    setReportingReview(review);
+    setReportReason("SPAM");
+    setReportDetails("");
+    setReportSuccess(null);
+    setReportError(null);
+  };
+
+  const handleSubmitReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reportingReview) return;
+    if (!user) {
+      setReportError("Please log in to report a review.");
+      return;
+    }
+    setReportSubmitting(true);
+    setReportError(null);
+    try {
+      await api.marketplace.reportReview(reportingReview.id, {
+        reason: reportReason,
+        details: reportDetails,
+      });
+      setReportSuccess("Thank you. Your report has been submitted to platform administrators.");
+      setTimeout(() => {
+        setReportingReview(null);
+        setReportSuccess(null);
+      }, 1800);
+    } catch (err: unknown) {
+      const e = err as Error;
+      setReportError(e?.message || "Failed to submit report. Please try again.");
+    } finally {
+      setReportSubmitting(false);
+    }
+  };
+
   // Open part inspector & load other offers for linked catalogue part (Phase 3 Part B)
   const handleSelectPart = (part: MarketplacePartListing) => {
     setSelectedPart(part);
     setSelectedPartImageIdx(0);
+    setPartReviewRatingFilter(null);
+    loadPartReviewsAndReputation(part.id, part.seller_id || part.seller);
     if (selectedVehicleId) {
       api.marketplace
         .getPart(part.id, { fits_vehicle: selectedVehicleId })
@@ -1542,6 +1675,31 @@ export default function MarketplaceBrowseView({
                             <div>
                               <h4 className="text-sm font-black text-slate-950 line-clamp-1">{p.name}</h4>
                               <p className="text-[11px] text-slate-500 font-mono mt-0.5">MPN: {p.mpn}</p>
+                              {/* Rating & Seller Reputation summary (Task 4) */}
+                              <div className="flex items-center justify-between text-xs pt-1.5 border-t border-slate-100">
+                                <div className="flex items-center gap-1.5">
+                                  {p.rating && p.rating > 0 ? (
+                                    <>
+                                      <div className="flex items-center text-amber-500">
+                                        <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                                        <span className="ml-1 font-bold text-slate-900 text-xs">
+                                          {Number(p.rating).toFixed(1)}
+                                        </span>
+                                      </div>
+                                      <span className="text-slate-400 text-[11px]">
+                                        ({p.review_count ?? 0})
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <span className="text-[11px] text-slate-400 font-medium">No reviews yet</span>
+                                  )}
+                                </div>
+                                {p.seller_rating !== undefined && p.seller_rating !== null && Number(p.seller_rating) > 0 && (
+                                  <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
+                                    Seller: {Number(p.seller_rating).toFixed(1)} ★
+                                  </span>
+                                )}
+                              </div>
                             </div>
 
                           <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 text-xs space-y-1">
@@ -2432,6 +2590,247 @@ export default function MarketplaceBrowseView({
               </div>
             )}
 
+            {/* Seller Reputation & Performance Card (Task 4) */}
+            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-600 font-bold text-xs">
+                    ★
+                  </div>
+                  <div>
+                    <h5 className="font-bold text-slate-900 text-xs">Seller Reputation & Performance</h5>
+                    <p className="text-[11px] text-slate-500">
+                      Sold by <span className="font-semibold text-slate-800">{sellerReputation?.seller_name || selectedPart.seller_name || "Verified Merchant"}</span>
+                    </p>
+                  </div>
+                </div>
+                {sellerReputation && (
+                  <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-xl">
+                    <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
+                    <span className="text-xs font-black text-amber-900">
+                      {Number(sellerReputation.average_rating || 0).toFixed(1)} / 5.0
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {sellerReputationLoading ? (
+                <div className="py-2 text-center text-xs text-slate-400">Loading seller metrics...</div>
+              ) : sellerReputation ? (
+                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200/60 text-center">
+                  <div className="p-2 bg-white rounded-xl border border-slate-100">
+                    <div className="text-[10px] text-slate-500">Reviews</div>
+                    <div className="text-xs font-bold text-slate-900">{sellerReputation.review_count}</div>
+                  </div>
+                  <div className="p-2 bg-white rounded-xl border border-slate-100">
+                    <div className="text-[10px] text-slate-500">Positive Feedback</div>
+                    <div className="text-xs font-bold text-emerald-600">{sellerReputation.positive_feedback_rate}%</div>
+                  </div>
+                  <div className="p-2 bg-white rounded-xl border border-slate-100">
+                    <div className="text-[10px] text-slate-500">Response Rate</div>
+                    <div className="text-xs font-bold text-slate-900">{sellerReputation.response_rate}%</div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-[11px] text-slate-500 italic">Seller has no public ratings yet.</div>
+              )}
+            </div>
+
+            {/* Product Ratings & Verified Purchaser Reviews (Task 4) */}
+            <div className="space-y-3 pt-2 border-t border-slate-200">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <h5 className="font-bold text-slate-900 text-sm">Customer Reviews & Ratings</h5>
+                  {partRatingSummary && partRatingSummary.review_count > 0 && (
+                    <span className="text-xs text-slate-500 font-medium">
+                      ({partRatingSummary.review_count} {partRatingSummary.review_count === 1 ? "review" : "reviews"})
+                    </span>
+                  )}
+                </div>
+                {partRatingSummary && partRatingSummary.review_count > 0 && (
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex items-center">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <Star
+                          key={star}
+                          className={`w-3.5 h-3.5 ${
+                            star <= Math.round(partRatingSummary.average_rating)
+                              ? "fill-amber-400 text-amber-400"
+                              : "text-slate-300"
+                          }`}
+                        />
+                      ))}
+                    </div>
+                    <span className="text-xs font-black text-slate-800">
+                      {Number(partRatingSummary.average_rating).toFixed(1)} out of 5
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Rating Breakdown & Filter Bars */}
+              {partRatingSummary && partRatingSummary.review_count > 0 && (
+                <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] text-slate-500 pb-1">
+                    <span>Rating Breakdown</span>
+                    {partReviewRatingFilter && (
+                      <button
+                        onClick={() => handleRatingFilterChange(null)}
+                        className="text-amber-600 hover:text-amber-700 font-bold underline"
+                      >
+                        Clear Filter (Show All)
+                      </button>
+                    )}
+                  </div>
+                  {[5, 4, 3, 2, 1].map((star) => {
+                    const count = partRatingSummary.distribution?.[star as 1 | 2 | 3 | 4 | 5] || 0;
+                    const pct =
+                      partRatingSummary.review_count > 0
+                        ? Math.round((count / partRatingSummary.review_count) * 100)
+                        : 0;
+                    const isSelected = partReviewRatingFilter === star;
+
+                    return (
+                      <button
+                        key={star}
+                        type="button"
+                        onClick={() => handleRatingFilterChange(isSelected ? null : star)}
+                        className={`w-full flex items-center gap-2 text-xs py-0.5 px-1.5 rounded-lg transition-colors text-left ${
+                          isSelected ? "bg-amber-100/80 font-bold" : "hover:bg-slate-100"
+                        }`}
+                      >
+                        <span className="w-12 text-[11px] text-slate-600 font-medium flex items-center gap-1">
+                          {star} <Star className="w-2.5 h-2.5 fill-amber-400 text-amber-400 inline" />
+                        </span>
+                        <div className="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-amber-400 rounded-full transition-all duration-300"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <span className="w-10 text-[10px] text-slate-500 text-right">
+                          {count} ({pct}%)
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Reviews List */}
+              <div className="space-y-3 pt-1">
+                {partReviewsLoading ? (
+                  <div className="py-6 text-center text-xs text-slate-400">Loading customer reviews...</div>
+                ) : partReviews.length === 0 ? (
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-center space-y-1">
+                    <p className="text-xs font-semibold text-slate-700">No customer reviews yet</p>
+                    <p className="text-[11px] text-slate-500">
+                      {partReviewRatingFilter
+                        ? `No ${partReviewRatingFilter}-star reviews found. Try viewing all reviews.`
+                        : "Only eligible verified purchasers can submit reviews after completing their order."}
+                    </p>
+                  </div>
+                ) : (
+                  partReviews.map((review) => (
+                    <div
+                      key={review.id}
+                      className="p-3.5 bg-white rounded-2xl border border-slate-200/80 space-y-2 shadow-xs"
+                    >
+                      {/* Review Header */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-900">
+                              {review.user_full_name || "Verified Buyer"}
+                            </span>
+                            {review.is_verified_purchase && (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+                                <span>Verified Purchase</span>
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <div className="flex items-center text-amber-400">
+                              {[1, 2, 3, 4, 5].map((s) => (
+                                <Star
+                                  key={s}
+                                  className={`w-3 h-3 ${
+                                    s <= review.rating ? "fill-amber-400 text-amber-400" : "text-slate-300"
+                                  }`}
+                                />
+                              ))}
+                            </div>
+                            <span className="text-[11px] text-slate-400">
+                              {new Date(review.created_at).toLocaleDateString()}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Report Button */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenReportModal(review)}
+                          title="Report inappropriate review"
+                          className="text-slate-400 hover:text-rose-600 transition-colors p-1"
+                        >
+                          <Flag className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      {/* Headline & Comment */}
+                      {review.headline && (
+                        <h6 className="text-xs font-bold text-slate-900">{review.headline}</h6>
+                      )}
+                      <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-line">
+                        {review.comment}
+                      </p>
+
+                      {/* Merchant / Seller Reply */}
+                      {review.seller_reply && (
+                        <div className="mt-2 p-2.5 bg-slate-50 rounded-xl border border-slate-200/60 text-xs space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="font-bold text-slate-800 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                              Response from Seller ({review.seller_name || "Merchant"}):
+                            </span>
+                            {review.seller_reply_at && (
+                              <span className="text-slate-400 text-[10px]">
+                                {new Date(review.seller_reply_at).toLocaleDateString()}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-slate-600 italic text-[11px]">{review.seller_reply}</p>
+                        </div>
+                      )}
+
+                      {/* Helpful Voting */}
+                      <div className="pt-1.5 flex items-center justify-between text-[11px] text-slate-500 border-t border-slate-100">
+                        <span>Was this review helpful?</span>
+                        <button
+                          type="button"
+                          disabled={votingHelpfulId === review.id}
+                          onClick={() => handleVoteHelpful(review.id)}
+                          className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                            review.has_voted_helpful
+                              ? "bg-amber-100 text-amber-900 border border-amber-300"
+                              : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                          }`}
+                        >
+                          <ThumbsUp
+                            className={`w-3 h-3 ${
+                              review.has_voted_helpful ? "fill-amber-600 text-amber-600" : ""
+                            }`}
+                          />
+                          <span>{review.helpful_count || 0}</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
             <div className="pt-2 flex items-center justify-end gap-2">
               <button
                 type="button"
@@ -2465,6 +2864,91 @@ export default function MarketplaceBrowseView({
                 Close Inspector
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: COMMUNITY REVIEW REPORTING (Task 4)
+      ========================================================================= */}
+      {reportingReview && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600">
+                  <Flag className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Report Review</h3>
+                  <p className="text-xs text-slate-500">Flag policy violations for moderation</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setReportingReview(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {reportSuccess ? (
+              <div className="p-4 bg-emerald-50 text-emerald-800 rounded-2xl text-xs font-semibold border border-emerald-200 text-center">
+                {reportSuccess}
+              </div>
+            ) : (
+              <form onSubmit={handleSubmitReport} className="space-y-4 text-xs">
+                {reportError && (
+                  <div className="p-3 bg-rose-50 text-rose-800 rounded-xl border border-rose-200">
+                    {reportError}
+                  </div>
+                )}
+
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Reason for Reporting</label>
+                  <select
+                    value={reportReason}
+                    onChange={(e) => setReportReason(e.target.value as ReviewReportReason)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-white text-xs font-medium focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                  >
+                    <option value="SPAM">Spam or Advertising</option>
+                    <option value="OFFENSIVE">Offensive, Abusive, or Hate Speech</option>
+                    <option value="MISLEADING">Misleading or False Information</option>
+                    <option value="INAPPROPRIATE">Inappropriate Content</option>
+                    <option value="OTHER">Other Issue</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-bold text-slate-700">Additional Details</label>
+                  <textarea
+                    rows={3}
+                    value={reportDetails}
+                    onChange={(e) => setReportDetails(e.target.value)}
+                    placeholder="Explain why this review violates platform community guidelines..."
+                    className="w-full p-2.5 rounded-xl border border-slate-200 bg-white text-xs placeholder:text-slate-400 focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setReportingReview(null)}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={reportSubmitting}
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                  >
+                    <Flag className="w-3.5 h-3.5" />
+                    <span>{reportSubmitting ? "Submitting..." : "Submit Report"}</span>
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

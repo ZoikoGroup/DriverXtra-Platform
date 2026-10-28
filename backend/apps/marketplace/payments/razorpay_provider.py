@@ -20,7 +20,19 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         self.key_id = getattr(settings, 'RAZORPAY_KEY_ID', 'rzp_test_placeholder_key')
         self.key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', 'rzp_test_placeholder_secret')
         self.webhook_secret = getattr(settings, 'RAZORPAY_WEBHOOK_SECRET', 'rzp_test_webhook_secret')
-        self.test_mode = getattr(settings, 'PAYMENT_TEST_MODE', True)
+        self.test_mode = self._is_test_mode_allowed()
+
+    @staticmethod
+    def _is_test_mode_allowed() -> bool:
+        """
+        Enforces strict environment restriction:
+        Test mode is only permitted if explicitly opted in AND
+        running in development (DEBUG=True) or automated testing (IS_TESTING=True).
+        In production, test_mode is strictly False regardless of environment variable misconfigurations.
+        """
+        opted_in = getattr(settings, 'PAYMENT_TEST_MODE', False)
+        is_safe_env = getattr(settings, 'DEBUG', False) or getattr(settings, 'IS_TESTING', False)
+        return bool(opted_in and is_safe_env)
 
     def _to_paise(self, amount: Decimal) -> int:
         """Converts decimal amount to integer paise (1 INR = 100 paise)."""
@@ -33,8 +45,10 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         cancel_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Creates an authoritative Razorpay order.
+        Creates an authoritative Razorpay order session.
         In test mode or mock settings, creates a deterministic test order ID.
+        In production, live Razorpay payments remain disabled until live gateway credentials
+        and server-to-server order creation are configured.
         """
         if order.currency != 'INR':
             raise ValueError(f"Razorpay provider only supports INR transactions; received '{order.currency}'.")
@@ -42,23 +56,31 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         amount_paise = self._to_paise(order.total_amount)
         receipt_id = f"rcpt_{order.order_number}"
 
-        # Standard simulated / test-mode order generation
-        order_id = f"order_rzp_{uuid.uuid4().hex[:14]}"
+        if self.test_mode:
+            # Standard simulated / test-mode order generation
+            order_id = f"order_rzp_{uuid.uuid4().hex[:14]}"
+            return {
+                "provider": self.provider_name,
+                "provider_order_id": order_id,
+                "amount": str(order.total_amount),
+                "amount_minor": amount_paise,
+                "currency": "INR",
+                "key_id": self.key_id,
+                "receipt": receipt_id,
+                "notes": {
+                    "order_number": order.order_number,
+                    "order_id": str(order.id),
+                    "buyer_email": order.buyer.email,
+                },
+                "is_test_mode": True,
+            }
 
-        return {
-            "provider": self.provider_name,
-            "provider_order_id": order_id,
-            "amount": str(order.total_amount),
-            "amount_minor": amount_paise,
-            "currency": "INR",
-            "key_id": self.key_id,
-            "receipt": receipt_id,
-            "notes": {
-                "order_number": order.order_number,
-                "order_id": str(order.id),
-                "buyer_email": order.buyer.email,
-            },
-        }
+        # Real gateway integration check:
+        # Live Razorpay payments are disabled until genuine API credentials and SDK integration are configured.
+        raise RuntimeError(
+            "Live Razorpay online payments are currently disabled. Real gateway order creation "
+            "requires live Razorpay credentials (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET) and official API integration."
+        )
 
     def verify_payment(
         self,
@@ -92,7 +114,8 @@ class RazorpayPaymentProvider(BasePaymentProvider):
             hashlib.sha256,
         ).hexdigest()
 
-        # In test mode, accept simulated valid signature or exact HMAC match
+        # In legitimate test mode ONLY, accept designated mock signatures.
+        # In production (when test_mode is False), mock signatures are strictly rejected.
         is_valid = hmac.compare_digest(generated_signature, razorpay_signature)
         if not is_valid and self.test_mode and razorpay_signature in ('test_sig_valid', 'mock_valid_signature'):
             is_valid = True

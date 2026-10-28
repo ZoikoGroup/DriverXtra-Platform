@@ -447,7 +447,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       }
       setStep("review");
     } catch (err: unknown) {
-      let msg = "Failed to calculate taxes with backend.";
+      let msg = "Failed to calculate order taxes. Please check your delivery address and try again.";
       if (err instanceof ApiError) {
         msg = err.message;
       } else if (err instanceof Error) {
@@ -628,10 +628,10 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                 )}
               </div>
               <p className="text-[11px] text-slate-400">
-                {step === "cart" && "Phase 4 Marketplace Commerce · Spare Parts"}
+                {step === "cart" && "Marketplace Checkout · Spare Parts"}
                 {step === "shipping" && "Step 1 of 2: Shipping & Contact Information"}
                 {step === "review" && "Step 2 of 2: Authoritative Tax Breakdown & Confirmation"}
-                {step === "confirmed" && "Order recorded with immutable backend ledger"}
+                {step === "confirmed" && "Order placed successfully"}
               </p>
             </div>
           </div>
@@ -1601,7 +1601,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                     }
                     disabled={isValidating}
                     className="px-3.5 py-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
-                    title="Verify stock availability and statutory tax with backend"
+                    title="Verify stock availability and calculate tax"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isValidating ? "animate-spin text-amber-500" : ""}`} />
                     <span className="hidden sm:inline">Verify Stock</span>

@@ -72,6 +72,25 @@ from apps.marketplace.views import (
     AdminRefundProcessView,
     AdminDisputeListView,
     AdminDisputeStatusUpdateView,
+    BuyerOrderReviewEligibilityView,
+    BuyerOrderReviewCreateView,
+    ProductReviewListCreateView,
+    ProductReviewDetailUpdateDeleteView,
+    ProductReviewSellerReplyView,
+    ProductReviewReportView,
+    ProductReviewHelpfulVoteView,
+    BuyerReviewsListView,
+    MarketplacePartReviewsView,
+    SellerReputationView,
+    SellerReviewsListView,
+    SellerRatingListCreateView,
+    SellerRatingDetailView,
+    SellerRatingReplyView,
+    SellerRatingReportView,
+    AdminReviewListView,
+    AdminReviewModerationView,
+    AdminReviewReportListView,
+    AdminReviewReportResolveView,
 )
 
 urlpatterns = [
@@ -184,5 +203,30 @@ urlpatterns = [
     path('admin/orders/<str:identifier>/refund/', AdminOrderRefundCreateView.as_view(), name='marketplace-admin-order-refund'),
     path('admin/refunds/<str:identifier>/process/', AdminRefundProcessView.as_view(), name='marketplace-admin-refund-process'),
     path('admin/refunds/', AdminRefundListView.as_view(), name='marketplace-admin-refunds-list'),
+
+    # 12. Reviews, Ratings & Seller Reputation (Phase 5 Task 4)
+    path('browse/parts/<uuid:id>/reviews/', MarketplacePartReviewsView.as_view(), name='marketplace-part-reviews'),
+    path('buyer/orders/<str:identifier>/review-eligibility/', BuyerOrderReviewEligibilityView.as_view(), name='marketplace-buyer-order-review-eligibility'),
+    path('buyer/orders/<str:identifier>/reviews/', BuyerOrderReviewCreateView.as_view(), name='marketplace-buyer-order-review-create'),
+    path('buyer/reviews/', BuyerReviewsListView.as_view(), name='marketplace-buyer-reviews-list'),
+    path('reviews/<uuid:id>/reply/', ProductReviewSellerReplyView.as_view(), name='marketplace-review-reply'),
+    path('reviews/<uuid:id>/report/', ProductReviewReportView.as_view(), name='marketplace-review-report'),
+    path('reviews/<uuid:id>/helpful/', ProductReviewHelpfulVoteView.as_view(), name='marketplace-review-helpful'),
+    path('reviews/<uuid:id>/', ProductReviewDetailUpdateDeleteView.as_view(), name='marketplace-review-detail'),
+    path('reviews/', ProductReviewListCreateView.as_view(), name='marketplace-reviews-list-create'),
+
+    # 13. Seller Reputation & Reviews
+    path('sellers/<uuid:id>/reputation/', SellerReputationView.as_view(), name='marketplace-seller-reputation'),
+    path('seller/reviews/', SellerReviewsListView.as_view(), name='marketplace-seller-reviews-list'),
+    path('seller-ratings/<uuid:id>/reply/', SellerRatingReplyView.as_view(), name='marketplace-seller-rating-reply'),
+    path('seller-ratings/<uuid:id>/report/', SellerRatingReportView.as_view(), name='marketplace-seller-rating-report'),
+    path('seller-ratings/<uuid:id>/', SellerRatingDetailView.as_view(), name='marketplace-seller-rating-detail'),
+    path('seller-ratings/', SellerRatingListCreateView.as_view(), name='marketplace-seller-ratings-list-create'),
+
+    # 14. Admin Review Moderation & Report Handling
+    path('admin/reviews/<uuid:id>/moderate/', AdminReviewModerationView.as_view(), name='marketplace-admin-review-moderate'),
+    path('admin/reviews/', AdminReviewListView.as_view(), name='marketplace-admin-reviews-list'),
+    path('admin/review-reports/<uuid:id>/resolve/', AdminReviewReportResolveView.as_view(), name='marketplace-admin-review-report-resolve'),
+    path('admin/review-reports/', AdminReviewReportListView.as_view(), name='marketplace-admin-review-reports-list'),
 ]
 

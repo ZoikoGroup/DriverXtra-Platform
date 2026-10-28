@@ -102,7 +102,7 @@ export default function RegisterPage() {
           Create Platform Account
         </h2>
         <p className="text-xs text-slate-400 mt-1">
-          Phase 1 Identity Registration • Real API Integration
+          Secure registration for vehicle buyers, sellers, and workshops
         </p>
       </div>
 
@@ -273,7 +273,7 @@ export default function RegisterPage() {
                   </p>
                   <div className="pt-1 flex items-center gap-1.5 text-[10px] text-slate-500">
                     <ShieldCheck className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                    <span>Administrative and staff privileges are strictly prohibited for public self-registration.</span>
+                    <span>Staff and administrative roles are provisioned by platform administrators by invitation.</span>
                   </div>
                 </div>
 

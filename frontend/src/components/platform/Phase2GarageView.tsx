@@ -86,7 +86,7 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
         setSelectedVehicle(null);
       }
     } catch (err: unknown) {
-      setErrorMsg(err instanceof ApiError ? err.message : "Failed to load garage vehicles from backend.");
+      setErrorMsg(err instanceof ApiError ? err.message : "Failed to load garage vehicles. Please refresh or try again.");
     } finally {
       setIsLoading(false);
     }
@@ -104,7 +104,7 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
       })
       .catch((err: unknown) => {
         if (!ignore) {
-          setErrorMsg(err instanceof ApiError ? err.message : "Failed to load garage vehicles from backend.");
+          setErrorMsg(err instanceof ApiError ? err.message : "Failed to load garage vehicles. Please refresh or try again.");
           setIsLoading(false);
         }
       });
@@ -292,7 +292,7 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
         <div>
           <div className="flex items-center gap-2">
             <span className="p-1.5 rounded-lg bg-amber-400 text-slate-950 font-black text-xs">
-              Phase 2
+              Garage
             </span>
             <h1 className="text-xl font-black text-slate-950">My Personal Garage</h1>
           </div>
@@ -347,7 +347,7 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
       {isLoading && vehicles.length === 0 ? (
         <div className="p-16 bg-white rounded-2xl border border-slate-200 text-center space-y-3">
           <div className="w-8 h-8 border-3 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="text-xs font-bold text-slate-700">Loading your personal garage from backend...</p>
+          <p className="text-xs font-bold text-slate-700">Loading your personal garage...</p>
         </div>
       ) : vehicles.length === 0 ? (
         <div className="p-16 bg-white rounded-2xl border border-slate-200 text-center space-y-4">
@@ -377,7 +377,7 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
           <div className="lg:col-span-2 space-y-4">
             <div className="flex items-center justify-between text-xs font-bold text-slate-600 px-1">
               <span>{vehicles.length} {vehicles.length === 1 ? "Vehicle" : "Vehicles"} Registered</span>
-              <span className="text-[11px] font-normal text-slate-500">Live backend records via <code className="font-mono">/api/v1/garage/vehicles/</code></span>
+              <span className="text-[11px] font-normal text-slate-500">Registered Vehicles</span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -640,7 +640,7 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
                 </div>
                 <div>
                   <h3 className="text-base font-black text-slate-950">Add Vehicle to Garage</h3>
-                  <p className="text-[11px] text-slate-500">Phase 2 DRF API Integration</p>
+                  <p className="text-[11px] text-slate-500">Verified Vehicle Registry</p>
                 </div>
               </div>
               <button

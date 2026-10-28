@@ -149,7 +149,7 @@ export default function TopBar({
               <div className="absolute right-0 mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 p-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
                 <div className="p-2 border-b border-slate-100 flex items-center justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    Switch Active Role (JWT Claim)
+                    Switch Active Role
                   </span>
                   <ShieldCheck className="w-3.5 h-3.5 text-amber-500" />
                 </div>

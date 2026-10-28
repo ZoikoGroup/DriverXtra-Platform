@@ -326,7 +326,7 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
         <div>
           <div className="flex items-center gap-2">
             <span className="p-1.5 rounded-lg bg-amber-400 text-slate-950 font-black text-xs">
-              Phase 2
+              Verification
             </span>
             <h1 className="text-xl font-black text-slate-950">Seller Onboarding & Verification</h1>
           </div>
@@ -391,7 +391,7 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
           {isLoadingApp ? (
             <div className="p-12 bg-white rounded-2xl border border-slate-200 text-center space-y-3">
               <div className="w-6 h-6 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto"></div>
-              <p className="text-xs font-bold text-slate-700">Verifying onboarding status from backend...</p>
+              <p className="text-xs font-bold text-slate-700">Checking verification status...</p>
             </div>
           ) : application ? (
             <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
@@ -890,7 +890,7 @@ export default function Phase2SellerOnboardingView({ initialTab }: { initialTab?
                     <tr>
                       <td colSpan={6} className="py-12 text-center text-slate-500">
                         <div className="w-5 h-5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                        <span>Loading applications from backend...</span>
+                        <span>Loading verification applications...</span>
                       </td>
                     </tr>
                   ) : adminApplications.length === 0 ? (
