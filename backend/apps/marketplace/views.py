@@ -1,8 +1,12 @@
 import os
+import datetime
 import uuid
+import logging
 from django.conf import settings
 from django.core.files.storage import default_storage
 from rest_framework import generics, permissions, status, views
+
+logger = logging.getLogger(__name__)
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.exceptions import (
@@ -251,7 +255,52 @@ class MarketplacePartListView(generics.ListAPIView):
         queryset = SparePartListing.objects.filter(
             status=ListingStatusChoices.APPROVED,
             is_active=True,
-        ).select_related('category', 'seller', 'organisation', 'catalogue_part').prefetch_related('compatible_variants')
+        ).select_related(
+            'category', 'seller', 'organisation', 'catalogue_part'
+        ).prefetch_related('compatible_variants')
+
+        # Precompute approved review statistics to avoid per-listing queries.
+        from django.db.models import Avg, Subquery
+        from apps.marketplace.models import (
+            ProductReview, SellerReview, ReviewStatusChoices,
+        )
+
+        product_avg = (
+            ProductReview.objects.filter(
+                listing_id=OuterRef('pk'),
+                status=ReviewStatusChoices.APPROVED,
+            )
+            .order_by()
+            .values('listing_id')
+            .annotate(value=Avg('rating'))
+            .values('value')[:1]
+        )
+        product_count = (
+            ProductReview.objects.filter(
+                listing_id=OuterRef('pk'),
+                status=ReviewStatusChoices.APPROVED,
+            )
+            .order_by()
+            .values('listing_id')
+            .annotate(value=Count('id'))
+            .values('value')[:1]
+        )
+        seller_avg = (
+            SellerReview.objects.filter(
+                seller_id=OuterRef('seller_id'),
+                status=ReviewStatusChoices.APPROVED,
+            )
+            .order_by()
+            .values('seller_id')
+            .annotate(value=Avg('rating'))
+            .values('value')[:1]
+        )
+
+        queryset = queryset.annotate(
+            approved_avg_rating=Subquery(product_avg),
+            approved_review_count=Subquery(product_count),
+            approved_seller_avg_rating=Subquery(seller_avg),
+        )
 
         params = self.request.query_params
 
@@ -1780,6 +1829,12 @@ class OrderCheckoutView(views.APIView):
 
         buyer = request.user
 
+        # Auto-expire stale abandoned online orders to release held stock
+        try:
+            PaymentService.expire_stale_pending_orders()
+        except Exception as exc:
+            logger.warning("Could not auto-expire stale orders: %s", str(exc))
+
         # 1. Idempotency Guard (early replay check)
         idempotency_key = (
             request.headers.get('Idempotency-Key')
@@ -1792,7 +1847,11 @@ class OrderCheckoutView(views.APIView):
             if existing_order:
                 payment_session = None
                 if existing_order.payment_method == PaymentMethodChoices.ONLINE and existing_order.payment_status != PaymentStatusChoices.PAID:
-                    payment_session = PaymentService.create_payment_session(existing_order)
+                    try:
+                        payment_session = PaymentService.create_payment_session(existing_order)
+                    except Exception as exc:
+                        logger.warning("Could not create payment session during idempotency replay: %s", str(exc))
+                        payment_session = {"error": str(exc), "is_available": False}
                 return Response(
                     {
                         "status": "success",
@@ -2050,6 +2109,8 @@ class OrderCheckoutView(views.APIView):
                             status=status.HTTP_400_BAD_REQUEST,
                         )
 
+
+
                 # 5. Authoritative Price / Tax Change Guard
                 expected_total = data.get('expected_total_amount')
                 if expected_total is not None:
@@ -2130,7 +2191,30 @@ class OrderCheckoutView(views.APIView):
                         note=f"Customer order {order_number}",
                     )
 
-                payment_session = PaymentService.create_payment_session(order)
+                record_audit_entry(
+                    event_type="marketplace.order.created",
+                    action="marketplace:order.create",
+                    resource_type="Order",
+                    resource_id=str(order.id),
+                    actor_id=buyer.id,
+                    metadata={
+                        "order_number": order.order_number,
+                        "total_amount": str(order.total_amount),
+                        "currency": order.currency,
+                        "payment_method": order.payment_method,
+                        "item_count": len(calculated_items),
+                    },
+                )
+
+                payment_session = None
+                try:
+                    payment_session = PaymentService.create_payment_session(order)
+                except Exception as exc:
+                    logger.warning("Could not initialize payment session for order %s: %s", order.order_number, str(exc))
+                    payment_session = {
+                        "error": str(exc),
+                        "is_available": False,
+                    }
 
                 return Response(
                     {
@@ -2151,7 +2235,10 @@ class OrderCheckoutView(views.APIView):
                 if existing_order:
                     payment_session = None
                     if existing_order.payment_method == PaymentMethodChoices.ONLINE and existing_order.payment_status != PaymentStatusChoices.PAID:
-                        payment_session = PaymentService.create_payment_session(existing_order)
+                        try:
+                            payment_session = PaymentService.create_payment_session(existing_order)
+                        except Exception as exc:
+                            payment_session = {"error": str(exc), "is_available": False}
                     return Response(
                         {
                             "status": "success",
@@ -2175,6 +2262,10 @@ class BuyerOrderListView(generics.ListAPIView):
 
     def get_queryset(self):
         from apps.marketplace.models import Order
+        try:
+            PaymentService.expire_stale_pending_orders()
+        except Exception as exc:
+            logger.warning("Could not auto-expire stale orders on order list: %s", str(exc))
         return Order.objects.filter(buyer=self.request.user).prefetch_related('items__listing__seller').order_by('-created_at')
 
 
@@ -2295,18 +2386,22 @@ class SellerOrderListView(generics.ListAPIView):
         from django.db.models import Q
 
         user = self.request.user
-        if user.is_staff or user.is_superuser:
-            qs = Order.objects.all()
-        else:
-            org_ids = OrganisationMembership.objects.filter(
-                user=user,
-                is_active=True,
-                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
-            ).values_list('organisation_id', flat=True)
+        # Admin and staff users do not have access to seller customer orders dashboard unless acting as seller
+        if (user.is_staff or user.is_superuser or (hasattr(user, 'has_role') and (user.has_role('ADMIN') or user.has_role('STAFF')))) and not (hasattr(user, 'has_role') and user.has_role('SELLER')):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(
+                "Admin users cannot access seller customer orders. Order confirmation and fulfillment must be managed by Sellers."
+            )
 
-            qs = Order.objects.filter(
-                Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids)
-            ).distinct()
+        org_ids = OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True)
+
+        qs = Order.objects.filter(
+            Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids)
+        ).distinct()
 
         status_param = self.request.query_params.get('status')
         if status_param and status_param.upper() != 'ALL':
@@ -2348,16 +2443,21 @@ class SellerOrderDetailView(views.APIView):
             is_uuid = False
 
         user = request.user
+        if (user.is_staff or user.is_superuser or (hasattr(user, 'has_role') and (user.has_role('ADMIN') or user.has_role('STAFF')))) and not (hasattr(user, 'has_role') and user.has_role('SELLER')):
+            return Response(
+                {"error": "Admin users cannot access seller customer orders. Order confirmation and fulfillment must be managed by Sellers."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         query_filter = Q(id=identifier) if is_uuid else Q(order_number=identifier)
 
-        if not (user.is_staff or user.is_superuser):
-            org_ids = OrganisationMembership.objects.filter(
-                user=user,
-                is_active=True,
-                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
-            ).values_list('organisation_id', flat=True)
+        org_ids = OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True)
 
-            query_filter &= (Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids))
+        query_filter &= (Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids))
 
         order = Order.objects.filter(query_filter).select_related('buyer').prefetch_related(
             'items__listing__seller', 'items__listing__organisation'
@@ -2409,16 +2509,22 @@ class SellerOrderStatusUpdateView(views.APIView):
             is_uuid = False
 
         user = request.user
+        # Prevent Admin and Staff users from performing seller order fulfillment actions
+        if user.is_staff or user.is_superuser or (hasattr(user, 'has_role') and (user.has_role('ADMIN') or user.has_role('STAFF'))):
+            return Response(
+                {"error": "Admin users cannot perform seller order fulfillment actions. Order confirmation and fulfillment must be managed by Sellers."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         query_filter = Q(id=identifier) if is_uuid else Q(order_number=identifier)
 
-        if not (user.is_staff or user.is_superuser):
-            org_ids = OrganisationMembership.objects.filter(
-                user=user,
-                is_active=True,
-                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
-            ).values_list('organisation_id', flat=True)
+        org_ids = OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True)
 
-            query_filter &= (Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids))
+        query_filter &= (Q(items__listing__seller=user) | Q(items__listing__organisation_id__in=org_ids))
 
         order = Order.objects.filter(query_filter).select_related('buyer').prefetch_related(
             'items__listing__seller', 'items__listing__organisation'
@@ -2782,6 +2888,10 @@ class OrderPaymentSessionCreateView(views.APIView):
                 "order_number": order.order_number,
                 "payment_session": session_data,
             }, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except RuntimeError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except Exception as exc:
             return Response({"error": f"Failed to initialize payment session: {str(exc)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -2922,6 +3032,47 @@ class OrderPaymentSimulateTestView(views.APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
+
+
+class OrderPaymentCancelView(views.APIView):
+    """
+    Cancels an unpaid online order, halts payment collection, and restores
+    held items back to seller stock immediately.
+    POST /api/v1/marketplace/orders/<identifier>/payment/cancel/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        from apps.marketplace.serializers import OrderSerializer
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_staff = request.user.is_staff or request.user.is_superuser or request.user.has_role('STAFF') or request.user.has_role('ADMIN')
+        if order.buyer_id != request.user.id and not is_staff:
+            return Response({"error": "You do not have permission to cancel payment for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        reason = str(request.data.get('reason', 'Payment cancelled by buyer')).strip()
+        success, message, extra = PaymentService.cancel_unpaid_order(
+            order=order,
+            actor=request.user,
+            reason=reason,
+        )
+
+        if success:
+            order.refresh_from_db()
+            return Response({
+                "status": "success",
+                "message": message,
+                "order": OrderSerializer(order).data,
+                "extra": extra,
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "status": "failed",
+                "error": message,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
 class PaymentWebhookView(views.APIView):
     """
     Ingests and validates webhooks from payment gateways (Razorpay / Stripe)
@@ -3007,6 +3158,12 @@ class OrderPaymentDetailView(views.APIView):
         if not (is_staff or is_buyer or is_seller):
             return Response({"error": "You do not have permission to view payment details for this order."}, status=status.HTTP_403_FORBIDDEN)
 
+        if order.payment_method == PaymentMethodChoices.ONLINE and order.payment_status == PaymentStatusChoices.PENDING:
+            expiry_minutes = getattr(settings, 'PAYMENT_EXPIRY_MINUTES', 30)
+            if order.created_at and order.created_at < timezone.now() - datetime.timedelta(minutes=expiry_minutes):
+                PaymentService.cancel_unpaid_order(order, reason=f"Order payment window ({expiry_minutes} mins) expired.")
+                order.refresh_from_db()
+
         transactions = PaymentTransaction.objects.filter(order=order).order_by('-created_at')
         tx_data = [
             {
@@ -3056,9 +3213,7 @@ def _resolve_shipment_by_identifier(identifier: str):
 
 
 def _is_seller_authorized_for_order(user, order) -> bool:
-    """Checks if the user is a staff member or seller owning items in the order."""
-    if user.is_staff or user.is_superuser:
-        return True
+    """Checks if the user is a seller owning items in the order."""
     from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
     org_ids = set(OrganisationMembership.objects.filter(
         user=user,
@@ -3072,9 +3227,7 @@ def _is_seller_authorized_for_order(user, order) -> bool:
 
 
 def _is_seller_authorized_for_shipment(user, shipment) -> bool:
-    """Checks if the user is a staff member or the seller who owns the shipment."""
-    if user.is_staff or user.is_superuser:
-        return True
+    """Checks if the user is the seller who owns the shipment."""
     if shipment.seller_id == user.id:
         return True
     if shipment.organisation_id:
@@ -3106,24 +3259,33 @@ class SellerOrderShipmentListCreateView(views.APIView):
             return Response({"error": "You do not have permission to view shipments for this order."}, status=status.HTTP_403_FORBIDDEN)
 
         user = request.user
-        if user.is_staff or user.is_superuser:
-            shipments = order.shipments.all().prefetch_related('items__order_item', 'tracking_events')
-        else:
-            from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
-            org_ids = set(OrganisationMembership.objects.filter(
-                user=user,
-                is_active=True,
-                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
-            ).values_list('organisation_id', flat=True))
+        if (user.is_staff or user.is_superuser or (hasattr(user, 'has_role') and (user.has_role('ADMIN') or user.has_role('STAFF')))) and not (hasattr(user, 'has_role') and user.has_role('SELLER')):
+            return Response(
+                {"error": "Admin users cannot access seller order fulfillment."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-            shipments = order.shipments.filter(
-                models.Q(seller=user) | models.Q(organisation_id__in=org_ids)
-            ).prefetch_related('items__order_item', 'tracking_events').distinct()
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        org_ids = set(OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True))
+
+        shipments = order.shipments.filter(
+            models.Q(seller=user) | models.Q(organisation_id__in=org_ids)
+        ).prefetch_related('items__order_item', 'tracking_events').distinct()
 
         serializer = ShipmentSerializer(shipments, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request, identifier):
+        if request.user.is_staff or request.user.is_superuser or (hasattr(request.user, 'has_role') and (request.user.has_role('ADMIN') or request.user.has_role('STAFF'))):
+            return Response(
+                {"error": "Admin users cannot perform seller shipment fulfillment actions. Fulfillment must be managed by Sellers."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         order = _resolve_order_by_identifier(identifier)
         if not order:
             return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -3188,6 +3350,12 @@ class SellerShipmentStatusUpdateView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request, identifier):
+        if request.user.is_staff or request.user.is_superuser or (hasattr(request.user, 'has_role') and (request.user.has_role('ADMIN') or request.user.has_role('STAFF'))):
+            return Response(
+                {"error": "Admin users cannot perform seller shipment fulfillment actions. Fulfillment must be managed by Sellers."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         shipment = _resolve_shipment_by_identifier(identifier)
         if not shipment:
             return Response({"error": f"Shipment '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -3228,6 +3396,12 @@ class SellerShipmentTrackingEventCreateView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, identifier):
+        if request.user.is_staff or request.user.is_superuser or (hasattr(request.user, 'has_role') and (request.user.has_role('ADMIN') or request.user.has_role('STAFF'))):
+            return Response(
+                {"error": "Admin users cannot record seller shipment tracking events. Fulfillment must be managed by Sellers."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         shipment = _resolve_shipment_by_identifier(identifier)
         if not shipment:
             return Response({"error": f"Shipment '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -3578,20 +3752,21 @@ class SellerReturnRequestListView(generics.ListAPIView):
     serializer_class = ReturnRequestSerializer
 
     def get_queryset(self):
+        from rest_framework.exceptions import PermissionDenied
         user = self.request.user
-        if _is_staff_or_admin(user):
-            qs = ReturnRequest.objects.all()
-        else:
-            from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
-            org_ids = set(OrganisationMembership.objects.filter(
-                user=user,
-                is_active=True,
-                role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
-            ).values_list('organisation_id', flat=True))
+        if (user.is_staff or user.is_superuser or (hasattr(user, 'has_role') and (user.has_role('ADMIN') or user.has_role('STAFF')))) and not (hasattr(user, 'has_role') and user.has_role('SELLER')):
+            raise PermissionDenied("Admin users do not have access to the seller return list.")
 
-            qs = ReturnRequest.objects.filter(
-                models.Q(seller=user) | models.Q(order_item__listing__organisation_id__in=org_ids)
-            ).distinct()
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        org_ids = set(OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True))
+
+        qs = ReturnRequest.objects.filter(
+            models.Q(seller=user) | models.Q(order_item__listing__organisation_id__in=org_ids)
+        ).distinct()
 
         st = self.request.query_params.get('status')
         if st:
@@ -3627,6 +3802,9 @@ class SellerReturnRequestReviewView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, identifier):
+        if (request.user.is_staff or request.user.is_superuser or (hasattr(request.user, 'has_role') and (request.user.has_role('ADMIN') or request.user.has_role('STAFF')))) and not (hasattr(request.user, 'has_role') and request.user.has_role('SELLER')):
+            return Response({"error": "Admin users do not have access to seller return fulfillment actions."}, status=status.HTTP_403_FORBIDDEN)
+
         req = _resolve_return_by_identifier(identifier)
         if not req:
             return Response({"error": "Return request not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -3660,6 +3838,9 @@ class SellerReturnRequestCompleteView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, identifier):
+        if (request.user.is_staff or request.user.is_superuser or (hasattr(request.user, 'has_role') and (request.user.has_role('ADMIN') or request.user.has_role('STAFF')))) and not (hasattr(request.user, 'has_role') and request.user.has_role('SELLER')):
+            return Response({"error": "Admin users do not have access to seller return fulfillment actions."}, status=status.HTTP_403_FORBIDDEN)
+
         req = _resolve_return_by_identifier(identifier)
         if not req:
             return Response({"error": "Return request not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -3738,9 +3919,10 @@ class SellerDisputeListView(generics.ListAPIView):
     serializer_class = DisputeSerializer
 
     def get_queryset(self):
+        from rest_framework.exceptions import PermissionDenied
         user = self.request.user
-        if _is_staff_or_admin(user):
-            return Dispute.objects.all().select_related('order', 'buyer', 'seller', 'resolved_by').prefetch_related('events__actor')
+        if (user.is_staff or user.is_superuser or (hasattr(user, 'has_role') and (user.has_role('ADMIN') or user.has_role('STAFF')))) and not (hasattr(user, 'has_role') and user.has_role('SELLER')):
+            raise PermissionDenied("Admin users do not have access to seller operational dispute workflows.")
 
         from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
         org_ids = set(OrganisationMembership.objects.filter(
@@ -3984,6 +4166,746 @@ class AdminDisputeStatusUpdateView(views.APIView):
                 "status": "success",
                 "message": f"Dispute {updated.dispute_number} updated to {updated.status}.",
                 "dispute": DisputeSerializer(updated).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# =============================================================================
+# Phase 5 Task 4: Reviews, Ratings & Seller Reputation API Views
+# =============================================================================
+
+from apps.marketplace.models import (
+    ProductReview,
+    SellerReview,
+    ReviewReport,
+    ReviewStatusChoices,
+    ReviewReportReasonChoices,
+    ReviewReportStatusChoices,
+    ReviewReportActionChoices,
+)
+from apps.marketplace.reviews import (
+    ReviewEligibilityService,
+    ReputationService,
+    ReviewWorkflowService,
+    _is_staff_or_admin,
+    _is_seller_authorized_for_review,
+)
+from apps.marketplace.serializers import (
+    ProductReviewSerializer,
+    ProductReviewCreatePayloadSerializer,
+    ProductReviewUpdatePayloadSerializer,
+    SellerReviewSerializer,
+    SellerReviewCreatePayloadSerializer,
+    ReviewSellerReplyPayloadSerializer,
+    ReviewReportSerializer,
+    ReviewReportCreatePayloadSerializer,
+    ReviewReportResolvePayloadSerializer,
+    ReviewModerationPayloadSerializer,
+)
+
+
+class BuyerOrderReviewEligibilityView(views.APIView):
+    """
+    GET /api/v1/marketplace/buyer/orders/<identifier>/review-eligibility/
+    Evaluates review eligibility for all items in an order.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You do not have permission to inspect this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        eligibility_data = ReviewEligibilityService.get_order_review_eligibility(order, request.user)
+        return Response(eligibility_data, status=status.HTTP_200_OK)
+
+
+class BuyerOrderReviewCreateView(views.APIView):
+    """
+    POST /api/v1/marketplace/buyer/orders/<identifier>/reviews/
+    Submits a product review (and optional seller rating) for an eligible purchase.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You can only review purchases from your own orders."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ProductReviewCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        order_item_id = data['order_item_id']
+        order_item = order.items.filter(id=order_item_id).first()
+        if not order_item:
+            return Response({"error": f"Order item '{order_item_id}' not found in order '{order.order_number}'."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            review = ReviewWorkflowService.create_product_review(
+                buyer=request.user,
+                order=order,
+                order_item=order_item,
+                rating=data['rating'],
+                comment=data['comment'],
+                title=data.get('title', ''),
+                seller_rating=data.get('seller_rating'),
+                seller_comment=data.get('seller_comment', ''),
+                actor=request.user,
+            )
+            return Response(ProductReviewSerializer(review).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ProductReviewListCreateView(views.APIView):
+    """
+    GET /api/v1/marketplace/reviews/
+    POST /api/v1/marketplace/reviews/
+    Lists reviews or creates a review from direct payload.
+    """
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
+
+    def get(self, request):
+        qs = ProductReview.objects.select_related('order', 'order_item', 'listing', 'buyer', 'seller', 'organisation').all()
+
+        # Public browsing only sees approved reviews
+        if not request.user.is_authenticated or not _is_staff_or_admin(request.user):
+            qs = qs.filter(status=ReviewStatusChoices.APPROVED)
+        else:
+            status_param = request.query_params.get('status')
+            if status_param and status_param != 'ALL':
+                qs = qs.filter(status=status_param.strip().upper())
+
+        listing_id = request.query_params.get('listing') or request.query_params.get('listing_id')
+        if listing_id:
+            qs = qs.filter(listing_id=listing_id)
+
+        seller_id = request.query_params.get('seller') or request.query_params.get('seller_id')
+        if seller_id:
+            qs = qs.filter(seller_id=seller_id)
+
+        buyer_id = request.query_params.get('buyer') or request.query_params.get('buyer_id')
+        if buyer_id:
+            if buyer_id == 'me' and request.user.is_authenticated:
+                qs = qs.filter(buyer=request.user)
+            else:
+                qs = qs.filter(buyer_id=buyer_id)
+
+        rating_param = request.query_params.get('rating')
+        if rating_param:
+            try:
+                qs = qs.filter(rating=int(rating_param))
+            except ValueError:
+                pass
+
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        page = paginator.paginate_queryset(qs, request)
+        serializer = ProductReviewSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        serializer = ProductReviewCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        order_item_id = data['order_item_id']
+        order_item = OrderItem.objects.select_related('order', 'listing', 'listing__seller').filter(id=order_item_id).first()
+        if not order_item:
+            return Response({"error": f"Order item '{order_item_id}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        order = order_item.order
+        try:
+            review = ReviewWorkflowService.create_product_review(
+                buyer=request.user,
+                order=order,
+                order_item=order_item,
+                rating=data['rating'],
+                comment=data['comment'],
+                title=data.get('title', ''),
+                seller_rating=data.get('seller_rating'),
+                seller_comment=data.get('seller_comment', ''),
+                actor=request.user,
+            )
+            return Response(ProductReviewSerializer(review).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ProductReviewDetailUpdateDeleteView(views.APIView):
+    """
+    GET /api/v1/marketplace/reviews/<uuid:id>/
+    PATCH /api/v1/marketplace/reviews/<uuid:id>/
+    DELETE /api/v1/marketplace/reviews/<uuid:id>/
+    Retrieves, edits, or deletes an individual product review.
+    """
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'DELETE'):
+            return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
+
+    def get(self, request, id):
+        review = ProductReview.objects.select_related('order', 'order_item', 'listing', 'buyer', 'seller').filter(id=id).first()
+        if not review:
+            return Response({"error": "Review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Non-approved reviews visible only to author or staff/admin
+        if review.status != ReviewStatusChoices.APPROVED:
+            if not request.user.is_authenticated or (request.user.id != review.buyer_id and not _is_staff_or_admin(request.user)):
+                return Response({"error": "Review not found or not published."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(ProductReviewSerializer(review).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, id):
+        review = ProductReview.objects.filter(id=id).first()
+        if not review:
+            return Response({"error": "Review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ProductReviewUpdatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated = ReviewWorkflowService.update_product_review(
+                review=review,
+                user=request.user,
+                rating=data.get('rating'),
+                title=data.get('title'),
+                comment=data.get('comment'),
+            )
+            return Response(ProductReviewSerializer(updated).data, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, id):
+        review = ProductReview.objects.filter(id=id).first()
+        if not review:
+            return Response({"error": "Review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            ReviewWorkflowService.delete_product_review(review, request.user)
+            return Response({"message": "Review deleted successfully."}, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class ProductReviewSellerReplyView(views.APIView):
+    """
+    POST /api/v1/marketplace/reviews/<uuid:id>/reply/
+    Allows the merchant to post a public response to a product review.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        review = ProductReview.objects.filter(id=id).first()
+        if not review:
+            return Response({"error": "Review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReviewSellerReplyPayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            updated = ReviewWorkflowService.add_seller_reply(review, request.user, serializer.validated_data['reply'])
+            return Response(ProductReviewSerializer(updated).data, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class ProductReviewReportView(views.APIView):
+    """
+    POST /api/v1/marketplace/reviews/<uuid:id>/report/
+    Flags an inappropriate review for admin moderation.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        review = ProductReview.objects.filter(id=id).first()
+        if not review:
+            return Response({"error": "Review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReviewReportCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            report = ReviewWorkflowService.report_review(
+                user=request.user,
+                review=review,
+                reason=serializer.validated_data['reason'],
+                details=serializer.validated_data.get('details', ''),
+            )
+            return Response({
+                "message": "Review reported successfully. Our moderation team will investigate.",
+                "report_id": str(report.id),
+            }, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ProductReviewHelpfulVoteView(views.APIView):
+    """
+    POST /api/v1/marketplace/reviews/<uuid:id>/helpful/
+    Toggles a helpful vote on a product review.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        review = ProductReview.objects.filter(id=id).first()
+        if not review:
+            return Response({"error": "Review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        has_voted, total_votes = ReviewWorkflowService.vote_helpful(request.user, review)
+        return Response({
+            "has_voted": has_voted,
+            "helpful_votes": total_votes,
+        }, status=status.HTTP_200_OK)
+
+
+class BuyerReviewsListView(views.APIView):
+    """
+    GET /api/v1/marketplace/buyer/reviews/
+    Lists reviews submitted by the current authenticated buyer.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        qs = ProductReview.objects.filter(buyer=request.user).select_related('order', 'order_item', 'listing', 'seller', 'organisation').order_by('-created_at')
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        page = paginator.paginate_queryset(qs, request)
+        serializer = ProductReviewSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class MarketplacePartReviewsView(views.APIView):
+    """
+    GET /api/v1/marketplace/browse/parts/<uuid:id>/reviews/
+    Public listing reviews view returning paginated approved reviews and aggregated rating summary.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, id):
+        part = SparePartListing.objects.filter(id=id).first()
+        if not part:
+            return Response({"error": "Spare part listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        summary = ReputationService.get_product_rating_summary(part)
+
+        qs = ProductReview.objects.filter(
+            listing=part,
+            status=ReviewStatusChoices.APPROVED,
+        ).select_related('buyer', 'seller', 'seller_replied_by').order_by('-created_at')
+
+        rating_filter = request.query_params.get('rating')
+        if rating_filter:
+            try:
+                qs = qs.filter(rating=int(rating_filter))
+            except ValueError:
+                pass
+
+        paginator = PageNumberPagination()
+        paginator.page_size = int(request.query_params.get('page_size', 10))
+        page = paginator.paginate_queryset(qs, request)
+        serialized_reviews = ProductReviewSerializer(page, many=True).data
+
+        response_data = paginator.get_paginated_response(serialized_reviews).data
+        response_data['summary'] = summary
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+class SellerReputationView(views.APIView):
+    """
+    GET /api/v1/marketplace/sellers/<uuid:id>/reputation/
+    Public seller reputation summary.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, id):
+        seller = User.objects.filter(id=id).first()
+        if not seller:
+            return Response({"error": "Seller not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        summary = ReputationService.get_seller_reputation_summary(seller)
+        return Response(summary, status=status.HTTP_200_OK)
+
+
+class SellerReviewsListView(views.APIView):
+    """
+    GET /api/v1/marketplace/seller/reviews/
+    Lists reviews received on the authenticated seller's inventory and orders.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+        user_org_ids = list(OrganisationMembership.objects.filter(
+            user=user,
+            is_active=True,
+            role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+        ).values_list('organisation_id', flat=True))
+
+        qs = ProductReview.objects.filter(
+            models.Q(seller=user) | models.Q(organisation_id__in=user_org_ids)
+        ).select_related('order', 'order_item', 'listing', 'buyer', 'organisation').order_by('-created_at')
+
+        # Filters
+        st = request.query_params.get('status')
+        if st and st != 'ALL':
+            qs = qs.filter(status=st.strip().upper())
+
+        rating_param = request.query_params.get('rating')
+        if rating_param:
+            try:
+                qs = qs.filter(rating=int(rating_param))
+            except ValueError:
+                pass
+
+        has_reply = request.query_params.get('has_reply')
+        if has_reply is not None:
+            if has_reply.lower() in ('true', '1'):
+                qs = qs.exclude(seller_reply='')
+            elif has_reply.lower() in ('false', '0'):
+                qs = qs.filter(seller_reply='')
+
+        reputation = ReputationService.get_seller_reputation_summary(user)
+
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        page = paginator.paginate_queryset(qs, request)
+        serialized_reviews = ProductReviewSerializer(page, many=True).data
+
+        response_data = paginator.get_paginated_response(serialized_reviews).data
+        response_data['reputation'] = reputation
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+class SellerRatingListCreateView(views.APIView):
+    """
+    GET /api/v1/marketplace/seller-ratings/
+    POST /api/v1/marketplace/seller-ratings/
+    List seller reviews or submit a seller rating directly.
+    """
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
+
+    def get(self, request):
+        qs = SellerReview.objects.select_related('order', 'buyer', 'seller', 'organisation').all()
+        seller_id = request.query_params.get('seller') or request.query_params.get('seller_id')
+        if seller_id:
+            qs = qs.filter(seller_id=seller_id)
+
+        buyer_id = request.query_params.get('buyer') or request.query_params.get('buyer_id')
+        if buyer_id:
+            if buyer_id == 'me' and request.user.is_authenticated:
+                qs = qs.filter(buyer=request.user)
+            else:
+                qs = qs.filter(buyer_id=buyer_id)
+
+        if not request.user.is_authenticated or not _is_staff_or_admin(request.user):
+            qs = qs.filter(status=ReviewStatusChoices.APPROVED)
+
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        page = paginator.paginate_queryset(qs, request)
+        serializer = SellerReviewSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        serializer = SellerReviewCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        order = _resolve_order_by_identifier(data['order_id'])
+        if not order:
+            return Response({"error": f"Order '{data['order_id']}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if order.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You can only rate sellers for your own purchases."}, status=status.HTTP_403_FORBIDDEN)
+
+        if order.status == OrderStatusChoices.CANCELLED:
+            return Response({"error": "Cannot submit rating for a cancelled order."}, status=status.HTTP_400_BAD_REQUEST)
+
+        seller = User.objects.filter(id=data['seller_id']).first()
+        if not seller:
+            return Response({"error": f"Seller '{data['seller_id']}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Check duplicate
+        if SellerReview.objects.filter(order=order, seller=seller).exists():
+            return Response({"error": "You have already submitted a rating for this seller on this order."}, status=status.HTTP_400_BAD_REQUEST)
+
+        seller_review = SellerReview.objects.create(
+            order=order,
+            buyer=request.user,
+            seller=seller,
+            rating=data['rating'],
+            communication_rating=data.get('communication_rating'),
+            delivery_rating=data.get('delivery_rating'),
+            item_description_rating=data.get('item_description_rating'),
+            comment=data.get('comment', '').strip(),
+            status=ReviewStatusChoices.APPROVED,
+            is_verified_purchase=True,
+        )
+
+        record_audit_entry(
+            event_type="marketplace.seller_review.created",
+            action="marketplace:seller_review.create",
+            resource_type="SellerReview",
+            resource_id=str(seller_review.id),
+            actor_id=request.user.id,
+            metadata={
+                "order_id": str(order.id),
+                "seller_id": str(seller.id),
+                "rating": data['rating'],
+            },
+        )
+
+        return Response(SellerReviewSerializer(seller_review).data, status=status.HTTP_201_CREATED)
+
+
+class SellerRatingDetailView(views.APIView):
+    """
+    GET /api/v1/marketplace/seller-ratings/<uuid:id>/
+    PATCH /api/v1/marketplace/seller-ratings/<uuid:id>/
+    DELETE /api/v1/marketplace/seller-ratings/<uuid:id>/
+    """
+    def get_permissions(self):
+        if self.request.method in ('PATCH', 'DELETE'):
+            return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
+
+    def get(self, request, id):
+        sr = SellerReview.objects.select_related('order', 'buyer', 'seller').filter(id=id).first()
+        if not sr:
+            return Response({"error": "Seller rating not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(SellerReviewSerializer(sr).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, id):
+        sr = SellerReview.objects.filter(id=id).first()
+        if not sr:
+            return Response({"error": "Seller rating not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if sr.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You are not authorized to edit this rating."}, status=status.HTTP_403_FORBIDDEN)
+
+        rating = request.data.get('rating')
+        if rating is not None:
+            try:
+                rating_int = int(rating)
+                if not (1 <= rating_int <= 5):
+                    return Response({"error": "Rating must be between 1 and 5."}, status=status.HTTP_400_BAD_REQUEST)
+                sr.rating = rating_int
+            except (ValueError, TypeError):
+                return Response({"error": "Rating must be an integer."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if 'comment' in request.data:
+            sr.comment = str(request.data['comment']).strip()
+
+        sr.save(update_fields=['rating', 'comment', 'updated_at'])
+        return Response(SellerReviewSerializer(sr).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, id):
+        sr = SellerReview.objects.filter(id=id).first()
+        if not sr:
+            return Response({"error": "Seller rating not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if sr.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+            return Response({"error": "You are not authorized to delete this rating."}, status=status.HTTP_403_FORBIDDEN)
+
+        sr.delete()
+        return Response({"message": "Seller rating deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class SellerRatingReplyView(views.APIView):
+    """
+    POST /api/v1/marketplace/seller-ratings/<uuid:id>/reply/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        sr = SellerReview.objects.filter(id=id).first()
+        if not sr:
+            return Response({"error": "Seller review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReviewSellerReplyPayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            updated = ReviewWorkflowService.add_seller_reply(sr, request.user, serializer.validated_data['reply'])
+            return Response(SellerReviewSerializer(updated).data, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class SellerRatingReportView(views.APIView):
+    """
+    POST /api/v1/marketplace/seller-ratings/<uuid:id>/report/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        sr = SellerReview.objects.filter(id=id).first()
+        if not sr:
+            return Response({"error": "Seller review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReviewReportCreatePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            report = ReviewWorkflowService.report_review(
+                user=request.user,
+                review=sr,
+                reason=serializer.validated_data['reason'],
+                details=serializer.validated_data.get('details', ''),
+            )
+            return Response({
+                "message": "Seller review reported successfully.",
+                "report_id": str(report.id),
+            }, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminReviewListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/admin/reviews/
+    Administrator / staff queue to inspect product reviews for moderation.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ProductReviewSerializer
+
+    def get_queryset(self):
+        if not _is_staff_or_admin(self.request.user):
+            raise PermissionDenied("Administrative moderation privileges required.")
+
+        qs = ProductReview.objects.select_related(
+            'order', 'order_item', 'listing', 'buyer', 'seller', 'organisation'
+        ).all().order_by('-created_at')
+
+        st = self.request.query_params.get('status')
+        if st and st != 'ALL':
+            qs = qs.filter(status=st.strip().upper())
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                models.Q(title__icontains=search)
+                | models.Q(comment__icontains=search)
+                | models.Q(listing__name__icontains=search)
+                | models.Q(buyer__email__icontains=search)
+                | models.Q(seller__email__icontains=search)
+            )
+
+        rating_param = self.request.query_params.get('rating')
+        if rating_param:
+            try:
+                qs = qs.filter(rating=int(rating_param))
+            except ValueError:
+                pass
+
+        return qs
+
+
+class AdminReviewModerationView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/reviews/<uuid:id>/moderate/
+    Moderates a review: APPROVE, FLAG, HIDE, or DELETE.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        if not _is_staff_or_admin(request.user):
+            return Response({"error": "Staff or administrator role required for moderation."}, status=status.HTTP_403_FORBIDDEN)
+
+        review = ProductReview.objects.filter(id=id).first()
+        if not review:
+            return Response({"error": "Review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReviewModerationPayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated = ReviewWorkflowService.moderate_review(
+                review=review,
+                admin_user=request.user,
+                action=data['action'],
+                admin_notes=data.get('admin_notes', ''),
+            )
+            if updated is None:
+                return Response({"message": "Review deleted successfully by administrator."}, status=status.HTTP_200_OK)
+            return Response({
+                "message": f"Review {updated.id} status updated to {updated.status}.",
+                "review": ProductReviewSerializer(updated).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminReviewReportListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/admin/review-reports/
+    Administrator queue of community/seller review reports.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ReviewReportSerializer
+
+    def get_queryset(self):
+        if not _is_staff_or_admin(self.request.user):
+            raise PermissionDenied("Administrative moderation privileges required.")
+
+        qs = ReviewReport.objects.select_related(
+            'product_review', 'seller_review', 'reporter', 'resolved_by'
+        ).all().order_by('-created_at')
+
+        st = self.request.query_params.get('status')
+        if st and st != 'ALL':
+            qs = qs.filter(status=st.strip().upper())
+
+        return qs
+
+
+class AdminReviewReportResolveView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/review-reports/<uuid:id>/resolve/
+    Resolves a review report: DISMISS, HIDE_REVIEW, or DELETE_REVIEW.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        if not _is_staff_or_admin(request.user):
+            return Response({"error": "Staff or administrator role required to resolve reports."}, status=status.HTTP_403_FORBIDDEN)
+
+        report = ReviewReport.objects.filter(id=id).first()
+        if not report:
+            return Response({"error": "Review report not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReviewReportResolvePayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            resolved = ReviewWorkflowService.resolve_report(
+                report=report,
+                admin_user=request.user,
+                action=data['action'],
+                admin_notes=data.get('admin_notes', ''),
+            )
+            return Response({
+                "message": f"Report {resolved.id} resolved with action '{resolved.action_taken}'.",
+                "report": ReviewReportSerializer(resolved).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
             return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)

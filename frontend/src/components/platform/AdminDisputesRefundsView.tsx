@@ -386,7 +386,7 @@ export default function AdminDisputesRefundsView() {
               Operations Control
             </span>
             <span className="text-xs text-indigo-300 font-semibold">
-              Phase 5 Task 3 • Returns, Refunds & Dispute Adjudication
+              Dispute Resolution & Order Refunds
             </span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white flex items-center gap-3">

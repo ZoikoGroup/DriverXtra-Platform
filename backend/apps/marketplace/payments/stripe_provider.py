@@ -20,7 +20,29 @@ class StripePaymentProvider(BasePaymentProvider):
         self.publishable_key = getattr(settings, 'STRIPE_PUBLISHABLE_KEY', 'pk_test_placeholder_key')
         self.secret_key = getattr(settings, 'STRIPE_SECRET_KEY', 'sk_test_placeholder_secret')
         self.webhook_secret = getattr(settings, 'STRIPE_WEBHOOK_SECRET', 'whsec_test_placeholder_secret')
-        self.test_mode = getattr(settings, 'PAYMENT_TEST_MODE', True)
+        self.test_mode = self._is_test_mode_allowed()
+
+    @property
+    def is_configured(self) -> bool:
+        """Indicates whether genuine (non-placeholder) Stripe credentials are configured."""
+        if not self.secret_key or not self.publishable_key:
+            return False
+        clean_secret = self.secret_key.strip().lower()
+        if 'placeholder' in clean_secret or 'sk_test_mock' in clean_secret:
+            return False
+        return len(clean_secret) >= 10 and clean_secret.startswith(('sk_live_', 'sk_test_'))
+
+    @staticmethod
+    def _is_test_mode_allowed() -> bool:
+        """
+        Enforces strict environment restriction:
+        Test mode is only permitted if explicitly opted in AND
+        running in development (DEBUG=True) or automated testing (IS_TESTING=True).
+        In production, test_mode is strictly False regardless of environment variable misconfigurations.
+        """
+        opted_in = getattr(settings, 'PAYMENT_TEST_MODE', False)
+        is_safe_env = getattr(settings, 'DEBUG', False) or getattr(settings, 'IS_TESTING', False)
+        return bool(opted_in and is_safe_env)
 
     def _to_pence(self, amount: Decimal) -> int:
         """Converts decimal amount to integer pence (1 GBP = 100 pence)."""
@@ -40,23 +62,38 @@ class StripePaymentProvider(BasePaymentProvider):
             raise ValueError(f"Stripe UK provider only supports GBP transactions; received '{order.currency}'.")
 
         amount_pence = self._to_pence(order.total_amount)
-        payment_intent_id = f"pi_test_{uuid.uuid4().hex[:18]}"
-        client_secret = f"{payment_intent_id}_secret_{uuid.uuid4().hex[:12]}"
 
-        return {
-            "provider": self.provider_name,
-            "provider_order_id": payment_intent_id,
-            "client_secret": client_secret,
-            "amount": str(order.total_amount),
-            "amount_minor": amount_pence,
-            "currency": "GBP",
-            "publishable_key": self.publishable_key,
-            "metadata": {
-                "order_number": order.order_number,
-                "order_id": str(order.id),
-                "buyer_email": order.buyer.email,
-            },
-        }
+        if self.test_mode:
+            payment_intent_id = f"pi_test_{uuid.uuid4().hex[:18]}"
+            client_secret = f"{payment_intent_id}_secret_{uuid.uuid4().hex[:12]}"
+
+            return {
+                "provider": self.provider_name,
+                "provider_order_id": payment_intent_id,
+                "client_secret": client_secret,
+                "amount": str(order.total_amount),
+                "amount_minor": amount_pence,
+                "currency": "GBP",
+                "publishable_key": self.publishable_key,
+                "metadata": {
+                    "order_number": order.order_number,
+                    "order_id": str(order.id),
+                    "buyer_email": order.buyer.email,
+                },
+                "is_test_mode": True,
+            }
+
+        # In production, check if real Stripe API credentials are configured
+        has_real_stripe_key = (
+            bool(self.secret_key)
+            and not self.secret_key.startswith('sk_test_placeholder')
+            and self.secret_key.startswith(('sk_live_', 'sk_test_'))
+        )
+        if not has_real_stripe_key:
+            raise RuntimeError(
+                "Live Stripe online payments are currently disabled. Real Stripe checkout requires "
+                "production Stripe API credentials (STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY)."
+            )
 
     def verify_payment(
         self,
@@ -96,6 +133,8 @@ class StripePaymentProvider(BasePaymentProvider):
         )
 
         if not self.test_mode or has_real_stripe_key:
+            if not has_real_stripe_key:
+                return False, "Production Stripe verification requires valid Stripe API keys.", {}
             import urllib.request
             import urllib.error
             url = f"https://api.stripe.com/v1/payment_intents/{payment_intent_id}"
@@ -124,13 +163,16 @@ class StripePaymentProvider(BasePaymentProvider):
             except Exception as e:
                 return False, f"Failed to communicate with Stripe API: {str(e)}", {}
 
-        # Deterministic sandbox verification in test mode
-        return True, payment_intent_id, {
-            "payment_intent_id": payment_intent_id,
-            "status": "succeeded",
-            "verified": True,
-            "test_mode": True,
-        }
+        # Deterministic sandbox verification in legitimate test mode only
+        if self.test_mode:
+            return True, payment_intent_id, {
+                "payment_intent_id": payment_intent_id,
+                "status": "succeeded",
+                "verified": True,
+                "test_mode": True,
+            }
+
+        return False, "Live Stripe verification requires valid Stripe API keys.", {}
 
     def verify_webhook(
         self,

@@ -45,6 +45,7 @@ import {
 
 interface SellerOrdersViewProps {
   initialOrderId?: string;
+  initialMainTab?: "orders" | "returns" | "disputes";
 }
 
 type OrderStatusFilter =
@@ -57,8 +58,11 @@ type OrderStatusFilter =
 
 export default function SellerOrdersView({
   initialOrderId,
+  initialMainTab,
 }: SellerOrdersViewProps) {
   const { user } = useAuth();
+  const activeRole = user?.activeRole || (user?.rawRoles && user?.rawRoles[0]) || "BUYER";
+  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF" || Boolean(user?.is_staff || user?.is_superuser);
   const [orders, setOrders] = useState<SellerOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -113,7 +117,13 @@ export default function SellerOrdersView({
   const [trackingEventError, setTrackingEventError] = useState<string | null>(null);
 
   // Main Tab Navigation
-  const [activeMainTab, setActiveMainTab] = useState<"orders" | "returns" | "disputes">("orders");
+  const [activeMainTab, setActiveMainTab] = useState<"orders" | "returns" | "disputes">(initialMainTab || "orders");
+
+  useEffect(() => {
+    if (initialMainTab) {
+      setActiveMainTab(initialMainTab);
+    }
+  }, [initialMainTab]);
 
   // Returns & RMAs State
   const [sellerReturns, setSellerReturns] = useState<PlatformReturnRequest[]>([]);
@@ -855,6 +865,16 @@ export default function SellerOrdersView({
         <div className="absolute right-0 top-0 bottom-0 w-80 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-amber-500/10 via-transparent to-transparent pointer-events-none" />
       </div>
 
+      {/* Admin View-Only Informational Alert */}
+      {isAdmin && (
+        <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 flex items-center gap-3 shadow-xs">
+          <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+          <p className="text-xs">
+            <span className="font-bold">Admin Notice:</span> Customer Orders, fulfillment actions, shipping dispatch, and returns/disputes are managed strictly by Sellers. Fulfillment actions are disabled for Admin users.
+          </p>
+        </div>
+      )}
+
       {/* Success Banner */}
       {successBanner && (
         <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 flex items-start justify-between gap-3 shadow-xs">
@@ -1144,7 +1164,7 @@ export default function SellerOrdersView({
 
                   {/* Permitted Status Transition Buttons */}
                   <div className="flex items-center gap-2">
-                    {order.status === "PENDING_CONFIRMATION" && (
+                    {!isAdmin && order.status === "PENDING_CONFIRMATION" && (
                       <>
                         <button
                           onClick={() => {
@@ -1170,7 +1190,7 @@ export default function SellerOrdersView({
                       </>
                     )}
 
-                    {order.status === "CONFIRMED" && (
+                    {!isAdmin && order.status === "CONFIRMED" && (
                       <>
                         <button
                           onClick={() => {
@@ -1196,7 +1216,7 @@ export default function SellerOrdersView({
                       </>
                     )}
 
-                    {order.status === "PROCESSING" && (
+                    {!isAdmin && order.status === "PROCESSING" && (
                       <>
                         <button
                           onClick={() => {
@@ -1418,7 +1438,7 @@ export default function SellerOrdersView({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      {ret.status === "PENDING" && (
+                      {!isAdmin && ret.status === "PENDING" && (
                         <>
                           <button
                             onClick={() => {
@@ -1445,7 +1465,7 @@ export default function SellerOrdersView({
                         </>
                       )}
 
-                      {ret.status === "APPROVED" && ret.request_type === "RETURN" && (
+                      {!isAdmin && ret.status === "APPROVED" && ret.request_type === "RETURN" && (
                         <button
                           onClick={() => {
                             setCompleteReturnError(null);
@@ -1799,7 +1819,7 @@ export default function SellerOrdersView({
                     </p>
                   </div>
 
-                  {selectedOrder.status !== "CANCELLED" && (
+                  {!isAdmin && selectedOrder.status !== "CANCELLED" && (
                     <button
                       onClick={() => openCreateShipmentModal(selectedOrder)}
                       className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
@@ -2301,7 +2321,7 @@ export default function SellerOrdersView({
             {/* Modal Footer Actions */}
             <div className="p-4 sm:p-5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-2">
-                {selectedOrder.status === "PENDING_CONFIRMATION" && (
+                {!isAdmin && selectedOrder.status === "PENDING_CONFIRMATION" && (
                   <>
                     <button
                       onClick={() => {
@@ -2327,7 +2347,7 @@ export default function SellerOrdersView({
                   </>
                 )}
 
-                {selectedOrder.status === "CONFIRMED" && (
+                {!isAdmin && selectedOrder.status === "CONFIRMED" && (
                   <>
                     <button
                       onClick={() => {
@@ -2353,7 +2373,7 @@ export default function SellerOrdersView({
                   </>
                 )}
 
-                {selectedOrder.status === "PROCESSING" && (
+                {!isAdmin && selectedOrder.status === "PROCESSING" && (
                   <>
                     <button
                       onClick={() => {

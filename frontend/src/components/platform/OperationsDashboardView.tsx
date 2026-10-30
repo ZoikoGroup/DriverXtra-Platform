@@ -37,7 +37,7 @@ export default function OperationsDashboardView({ activeTab }: { activeTab: stri
             Demo data
           </span>
           <span className="text-xs text-slate-500 font-medium">
-            Internal Operations Control Plane (Doc 24) • Simulated Prototype Data
+            Platform Operations Control Plane
           </span>
         </div>
       </div>
@@ -47,7 +47,7 @@ export default function OperationsDashboardView({ activeTab }: { activeTab: stri
           <span className="w-3.5 h-3.5 rounded-full bg-amber-400 animate-ping shrink-0"></span>
           <div className="text-xs">
             <div className="font-bold text-amber-300">
-              OPERATIONS CONTROL PLANE (DOC 24 SPECIFICATION)
+              OPERATIONS CONTROL PLANE
             </div>
             <div className="text-slate-400 mt-0.5">
               Active Session: <strong className="text-white">UK-PRODUCTION-CELL-01</strong> • Elevated JIT Privilege • Immutable Audit Log Stream
@@ -76,7 +76,7 @@ export default function OperationsDashboardView({ activeTab }: { activeTab: stri
 
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
           <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            Trust & Fraud Flags (Doc 11)
+            Trust & Risk Flags
           </span>
           <div className="text-2xl font-black text-rose-600 mt-1 flex items-baseline justify-between">
             <span>1 Quarantined</span>
@@ -86,7 +86,7 @@ export default function OperationsDashboardView({ activeTab }: { activeTab: stri
 
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
           <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            Open Dispute Cases (Doc 15)
+            Open Dispute Cases
           </span>
           <div className="text-2xl font-black text-emerald-700 mt-1 flex items-baseline justify-between">
             <span>12 Cases</span>
@@ -101,7 +101,7 @@ export default function OperationsDashboardView({ activeTab }: { activeTab: stri
           <div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-black uppercase tracking-wider text-rose-700 bg-rose-100 px-2 py-0.5 rounded">
-                Doc 24 §15 Maker-Checker
+                Maker-Checker Approvals
               </span>
               <span className="text-xs text-slate-500">• Four-Eyes Dual Sign-Off Invariant</span>
             </div>
@@ -188,7 +188,7 @@ export default function OperationsDashboardView({ activeTab }: { activeTab: stri
                 <CheckCircle2 className="w-12 h-12 text-emerald-500 mx-auto animate-bounce mb-2" />
                 <h5 className="text-sm font-bold text-slate-900">Action Authorized & Executed!</h5>
                 <p className="text-xs text-slate-500 mt-1">
-                  Immutable audit record written to PostgreSQL. Ledger transaction unblocked.
+                  Audit record recorded successfully. Transaction unblocked.
                 </p>
               </div>
             ) : (
@@ -199,7 +199,7 @@ export default function OperationsDashboardView({ activeTab }: { activeTab: stri
                 </div>
 
                 <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-950">
-                  <strong className="font-bold">Doc 24 Four-Eyes Invariant:</strong> As the secondary checker, you affirm that you have examined the factual evidence bundle and authorize the execution.
+                  <strong className="font-bold">Dual-Control Policy:</strong> As the secondary checker, you affirm that you have examined the factual evidence bundle and authorize the execution.
                 </div>
 
                 <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">

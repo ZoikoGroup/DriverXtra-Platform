@@ -276,7 +276,34 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
         message = fieldErrors.join("; ");
       }
     } else if (typeof data === "string") {
-      message = data;
+      const trimmed = data.trim();
+      if (
+        trimmed.startsWith("<!DOCTYPE") ||
+        trimmed.startsWith("<html") ||
+        trimmed.includes("<body") ||
+        trimmed.includes("Traceback (most recent call last):")
+      ) {
+        // Sanitize raw Django HTML error tracebacks
+        const excMatch = trimmed.match(/<pre class="exception_value">([^<]+)<\/pre>/i);
+        const titleMatch = trimmed.match(/<title>([^<]+)<\/title>/i);
+        if (excMatch && excMatch[1]) {
+          message = `Server Error: ${excMatch[1].replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim()}`;
+        } else if (titleMatch && titleMatch[1]) {
+          message = `Server Error: ${titleMatch[1].trim()}`;
+        } else {
+          message = `Server error (${response.status}). The requested operation could not be completed.`;
+        }
+      } else {
+        message = data;
+      }
+    }
+
+    // Guard against any lingering HTML markup in error messages
+    if (typeof message === "string" && message.includes("<")) {
+      message = message.replace(/<[^>]*>/g, "").trim();
+    }
+    if (!message) {
+      message = `Server error (${response.status}).`;
     }
 
     throw new ApiError(message, response.status, details);
@@ -1381,6 +1408,27 @@ export const api = {
       });
     },
 
+    async cancelPayment(
+      identifier: string,
+      reason?: string
+    ): Promise<{
+      status: string;
+      message: string;
+      order?: PlatformOrder;
+      error?: string;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        order?: PlatformOrder;
+        error?: string;
+      }>(`/marketplace/orders/${identifier}/payment/cancel/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
+      });
+    },
+
     async updateCODCollection(
       identifier: string,
       payload: CODCollectionUpdatePayload
@@ -1883,12 +1931,248 @@ export const api = {
         attachments: payload.attachments || payload.evidence_urls,
       });
     },
+
+    // Reviews, Ratings & Seller Reputation (Task 4)
+    async getPartReviews(
+      listingId: string,
+      params?: { page?: number; rating?: number; page_size?: number }
+    ): Promise<{ count: number; next: string | null; previous: string | null; results: PlatformProductReview[]; summary: ProductRatingSummary }> {
+      const q = new URLSearchParams();
+      if (params?.page) q.set("page", String(params.page));
+      if (params?.rating) q.set("rating", String(params.rating));
+      if (params?.page_size) q.set("page_size", String(params.page_size));
+      const qs = q.toString();
+      return apiRequest<{ count: number; next: string | null; previous: string | null; results: PlatformProductReview[]; summary: ProductRatingSummary }>(
+        `/marketplace/browse/parts/${listingId}/reviews/${qs ? `?${qs}` : ""}`,
+        { method: "GET", requiresAuth: false }
+      );
+    },
+
+    async getPartRatingSummary(listingId: string): Promise<ProductRatingSummary> {
+      const res = await this.getPartReviews(listingId);
+      return res.summary;
+    },
+
+    async getOrderReviewEligibility(orderIdentifier: string): Promise<OrderReviewEligibilityResponse> {
+      return apiRequest<OrderReviewEligibilityResponse>(
+        `/marketplace/buyer/orders/${orderIdentifier}/review-eligibility/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async createProductReview(
+      orderIdentifier: string,
+      payload: CreateProductReviewPayload
+    ): Promise<PlatformProductReview> {
+      return apiRequest<PlatformProductReview>(
+        `/marketplace/buyer/orders/${orderIdentifier}/reviews/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+
+    async updateProductReview(
+      reviewId: string,
+      payload: { rating?: number; title?: string; comment?: string }
+    ): Promise<PlatformProductReview> {
+      return apiRequest<PlatformProductReview>(
+        `/marketplace/reviews/${reviewId}/`,
+        {
+          method: "PATCH",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+
+    async deleteProductReview(reviewId: string): Promise<{ message: string }> {
+      return apiRequest<{ message: string }>(
+        `/marketplace/reviews/${reviewId}/`,
+        { method: "DELETE", requiresAuth: true }
+      );
+    },
+
+    async replyToProductReview(reviewId: string, reply: string): Promise<PlatformProductReview> {
+      return apiRequest<PlatformProductReview>(
+        `/marketplace/reviews/${reviewId}/reply/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify({ reply }),
+        }
+      );
+    },
+
+    async reportProductReview(
+      reviewId: string,
+      payload: { reason: ReviewReportReason; details?: string }
+    ): Promise<{ message: string; report_id: string }> {
+      return apiRequest<{ message: string; report_id: string }>(
+        `/marketplace/reviews/${reviewId}/report/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+
+    async voteHelpfulReview(reviewId: string): Promise<{ has_voted: boolean; helpful_votes: number }> {
+      return apiRequest<{ has_voted: boolean; helpful_votes: number }>(
+        `/marketplace/reviews/${reviewId}/helpful/`,
+        { method: "POST", requiresAuth: true }
+      );
+    },
+
+    async voteReviewHelpful(reviewId: string): Promise<{ has_voted: boolean; helpful_votes: number; helpful_count: number }> {
+      const res = await this.voteHelpfulReview(reviewId);
+      return { ...res, helpful_count: res.helpful_votes };
+    },
+
+    async reportReview(
+      reviewId: string,
+      payload: { reason: ReviewReportReason; details?: string }
+    ): Promise<{ message: string; report_id: string }> {
+      return this.reportProductReview(reviewId, payload);
+    },
+
+    async listBuyerReviews(): Promise<PlatformProductReview[]> {
+      const res = await apiRequest<PlatformProductReview[] | { results: PlatformProductReview[] }>(
+        `/marketplace/buyer/reviews/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getSellerReputation(sellerId: string): Promise<SellerReputationSummary> {
+      return apiRequest<SellerReputationSummary>(
+        `/marketplace/sellers/${sellerId}/reputation/`,
+        { method: "GET", requiresAuth: false }
+      );
+    },
+
+    async listSellerReviews(params?: {
+      status?: string;
+      rating?: number;
+      has_reply?: boolean;
+      page?: number;
+    }): Promise<{ count: number; results: PlatformProductReview[]; reputation: SellerReputationSummary }> {
+      const q = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") q.set("status", params.status);
+      if (params?.rating) q.set("rating", String(params.rating));
+      if (params?.has_reply !== undefined) q.set("has_reply", String(params.has_reply));
+      if (params?.page) q.set("page", String(params.page));
+      const qs = q.toString();
+      return apiRequest<{ count: number; results: PlatformProductReview[]; reputation: SellerReputationSummary }>(
+        `/marketplace/seller/reviews/${qs ? `?${qs}` : ""}`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async createSellerRating(payload: CreateSellerRatingPayload): Promise<PlatformSellerReview> {
+      return apiRequest<PlatformSellerReview>(
+        `/marketplace/seller-ratings/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+
+    async replyToSellerReview(reviewId: string, reply: string): Promise<PlatformSellerReview> {
+      return apiRequest<PlatformSellerReview>(
+        `/marketplace/seller-ratings/${reviewId}/reply/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify({ reply }),
+        }
+      );
+    },
+
+    async listAdminReviews(params?: { status?: string; search?: string; rating?: number }): Promise<PlatformProductReview[] & { results: PlatformProductReview[] }> {
+      const q = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") q.set("status", params.status);
+      if (params?.search) q.set("search", params.search);
+      if (params?.rating) q.set("rating", String(params.rating));
+      const qs = q.toString();
+      const res = await apiRequest<PlatformProductReview[] | { results: PlatformProductReview[] }>(
+        `/marketplace/admin/reviews/${qs ? `?${qs}` : ""}`,
+        { method: "GET", requiresAuth: true }
+      );
+      const arr = Array.isArray(res) ? res : res.results || [];
+      (arr as unknown as { results: PlatformProductReview[] }).results = arr;
+      return arr as PlatformProductReview[] & { results: PlatformProductReview[] };
+    },
+
+    async moderateAdminReview(
+      reviewId: string,
+      actionOrPayload:
+        | "APPROVE"
+        | "FLAG"
+        | "HIDE"
+        | "REJECT"
+        | "DELETE"
+        | { action: "APPROVE" | "FLAG" | "HIDE" | "REJECT" | "DELETE"; admin_notes?: string },
+      admin_notes?: string
+    ): Promise<{ message: string; review: PlatformProductReview }> {
+      const payload =
+        typeof actionOrPayload === "string"
+          ? {
+              action: actionOrPayload === "REJECT" ? "HIDE" : actionOrPayload,
+              admin_notes,
+            }
+          : {
+              ...actionOrPayload,
+              action: actionOrPayload.action === "REJECT" ? "HIDE" : actionOrPayload.action,
+            };
+      return apiRequest<{ message: string; review: PlatformProductReview }>(
+        `/marketplace/admin/reviews/${reviewId}/moderate/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
+
+    async listAdminReviewReports(params?: { status?: string }): Promise<PlatformReviewReport[] & { results: PlatformReviewReport[] }> {
+      const q = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") q.set("status", params.status);
+      const qs = q.toString();
+      const res = await apiRequest<PlatformReviewReport[] | { results: PlatformReviewReport[] }>(
+        `/marketplace/admin/review-reports/${qs ? `?${qs}` : ""}`,
+        { method: "GET", requiresAuth: true }
+      );
+      const arr = Array.isArray(res) ? res : res.results || [];
+      (arr as unknown as { results: PlatformReviewReport[] }).results = arr;
+      return arr as PlatformReviewReport[] & { results: PlatformReviewReport[] };
+    },
+
+    async resolveAdminReviewReport(
+      reportId: string,
+      payload: { action: "DISMISS" | "HIDE_REVIEW" | "DELETE_REVIEW"; admin_notes?: string }
+    ): Promise<{ message: string; report: PlatformReviewReport }> {
+      return apiRequest<{ message: string; report: PlatformReviewReport }>(
+        `/marketplace/admin/review-reports/${reportId}/resolve/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        }
+      );
+    },
   },
 
   notifications: {
-    async list(params?: { unread?: boolean; page?: number }): Promise<PaginatedNotificationsResponse> {
+    async list(params?: { unread?: boolean; event_type?: string; page?: number }): Promise<PaginatedNotificationsResponse> {
       const query = new URLSearchParams();
       if (params?.unread) query.set("unread", "true");
+      if (params?.event_type) query.set("event_type", params.event_type);
       if (params?.page) query.set("page", String(params.page));
       const qs = query.toString();
       return apiRequest<PaginatedNotificationsResponse>(`/notifications/${qs ? `?${qs}` : ""}`, {
@@ -1919,6 +2203,13 @@ export const api = {
         requiresAuth: true,
       });
       return data.updated_count;
+    },
+
+    async delete(id: string): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>(`/notifications/${id}/`, {
+        method: "DELETE",
+        requiresAuth: true,
+      });
     },
   },
 };
@@ -2386,6 +2677,8 @@ export interface PlatformOrderItem {
   igst_amount: string | number;
   tax_amount: string | number;
   total_amount: string | number;
+  is_reviewed?: boolean;
+  review?: PlatformProductReview | null;
 }
 
 export interface PlatformTrackingEvent {
@@ -2639,6 +2932,7 @@ export interface OrderPaymentDetailResponse {
 export interface MarketplacePartListing {
   id: string;
   seller?: string;
+  seller_id?: string;
   seller_name?: string;
   organisation?: string | null;
   organisation_name?: string | null;
@@ -2674,6 +2968,11 @@ export interface MarketplacePartListing {
   gst_amount?: string | number;
   total_price?: string | number;
   tax_breakdown?: TaxBreakdown;
+
+  // Ratings & Reputation
+  rating?: number;
+  review_count?: number;
+  seller_rating?: number;
 
   primary_image_url?: string;
   images?: string[];
@@ -3186,3 +3485,186 @@ export interface UpdateDisputeStatusPayload {
   resolution?: DisputeResolution;
   resolution_notes?: string;
 }
+
+// ==========================================
+// Review, Rating & Reputation Types (Task 4)
+// ==========================================
+
+export type ReviewStatus = "PENDING" | "APPROVED" | "FLAGGED" | "REJECTED";
+export type ReviewReportReason = "SPAM" | "ABUSIVE" | "IRRELEVANT" | "FAKE_PURCHASE" | "CONFLICT_OF_INTEREST" | "OTHER";
+export type ReviewReportStatus = "PENDING" | "RESOLVED" | "DISMISSED";
+export type ReviewReportAction = "NO_ACTION" | "REVIEW_HIDDEN" | "REVIEW_DELETED" | "DISMISSED";
+
+export interface PlatformProductReview {
+  id: string;
+  order: string;
+  order_id?: string;
+  order_number: string;
+  order_item: string;
+  order_item_id: string;
+  listing: string;
+  listing_id: string;
+  listing_name: string;
+  part_name?: string;
+  buyer_id: string;
+  buyer_name: string;
+  user_full_name?: string;
+  user_email?: string;
+  seller_id: string;
+  seller_name: string;
+  organisation_id?: string | null;
+  organisation_name?: string | null;
+  rating: number;
+  title: string;
+  headline?: string;
+  comment: string;
+  status: ReviewStatus;
+  is_verified_purchase: boolean;
+  seller_reply?: string;
+  seller_reply_at?: string | null;
+  has_seller_reply: boolean;
+  seller_replied_by_name?: string | null;
+  helpful_votes: number;
+  helpful_count?: number;
+  has_voted_helpful?: boolean;
+  moderation_notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformSellerReview {
+  id: string;
+  order: string;
+  order_number: string;
+  buyer_id: string;
+  buyer_name: string;
+  seller_id: string;
+  seller_name: string;
+  organisation_id?: string | null;
+  organisation_name?: string | null;
+  rating: number;
+  communication_rating?: number | null;
+  delivery_rating?: number | null;
+  item_description_rating?: number | null;
+  comment: string;
+  status: ReviewStatus;
+  is_verified_purchase: boolean;
+  seller_reply?: string;
+  seller_reply_at?: string | null;
+  has_seller_reply: boolean;
+  seller_replied_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformReviewReport {
+  id: string;
+  product_review?: string | null;
+  product_review_detail?: PlatformProductReview | null;
+  review_detail?: PlatformProductReview | null;
+  seller_review?: string | null;
+  seller_review_detail?: PlatformSellerReview | null;
+  review_type: "PRODUCT" | "SELLER";
+  target_review_title?: string;
+  target_review_comment?: string;
+  target_review_rating?: number;
+  target_review_status?: string;
+  reporter_id: string;
+  reporter_name: string;
+  reporter_email: string;
+  reason: ReviewReportReason;
+  reason_display?: string;
+  details: string;
+  status: ReviewReportStatus;
+  action_taken?: ReviewReportAction;
+  admin_notes?: string;
+  resolved_at?: string | null;
+  resolved_by_name?: string | null;
+  created_at: string;
+}
+
+export interface ProductRatingSummary {
+  average_rating: number;
+  review_count: number;
+  distribution: {
+    "1": number;
+    "2": number;
+    "3": number;
+    "4": number;
+    "5": number;
+  };
+  recommendation_percentage: number;
+}
+
+export interface SellerReputationSummary {
+  seller_id: string;
+  seller_name: string;
+  average_rating: number;
+  positive_percentage: number;
+  positive_feedback_rate?: number;
+  response_rate: number;
+  total_reviews_count: number;
+  review_count?: number;
+  seller_reviews_count: number;
+  product_reviews_count: number;
+  communication_avg: number;
+  delivery_avg: number;
+  item_description_avg: number;
+  rating_distribution: {
+    "1": number;
+    "2": number;
+    "3": number;
+    "4": number;
+    "5": number;
+  };
+  rating_breakdown?: {
+    "1": number;
+    "2": number;
+    "3": number;
+    "4": number;
+    "5": number;
+  };
+}
+
+export interface OrderReviewItemEligibility {
+  order_item_id: string;
+  listing_id: string;
+  listing_title: string;
+  listing_brand: string;
+  seller_id: string;
+  seller_name: string;
+  eligible: boolean;
+  reason?: string;
+  is_reviewed: boolean;
+  review_id?: string | null;
+  rating?: number | null;
+}
+
+export interface OrderReviewEligibilityResponse {
+  order_id: string;
+  order_number: string;
+  order_status: string;
+  eligible: boolean;
+  reason?: string;
+  items: OrderReviewItemEligibility[];
+}
+
+export interface CreateProductReviewPayload {
+  order_item_id: string;
+  rating: number;
+  title?: string;
+  comment: string;
+  seller_rating?: number;
+  seller_comment?: string;
+}
+
+export interface CreateSellerRatingPayload {
+  order_id: string;
+  seller_id: string;
+  rating: number;
+  communication_rating?: number;
+  delivery_rating?: number;
+  item_description_rating?: number;
+  comment?: string;
+}
+

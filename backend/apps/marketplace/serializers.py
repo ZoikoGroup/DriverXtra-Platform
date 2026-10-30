@@ -39,6 +39,13 @@ from apps.marketplace.models import (
     DisputePriorityChoices,
     DisputeEvent,
     DisputeEventTypeChoices,
+    ProductReview,
+    SellerReview,
+    ReviewReport,
+    ReviewStatusChoices,
+    ReviewReportReasonChoices,
+    ReviewReportStatusChoices,
+    ReviewReportActionChoices,
 )
 from apps.catalogue.models import Part
 from apps.marketplace.services import change_price, _UNSET, get_seller_public_info
@@ -790,11 +797,15 @@ class VehicleListingPublicSerializer(serializers.ModelSerializer):
 class SparePartListingPublicSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     category_slug = serializers.CharField(source='category.slug', read_only=True)
+    seller_id = serializers.UUIDField(source='seller.id', read_only=True)
     seller_name = serializers.CharField(source='seller.full_name', read_only=True)
     organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
     compatible_variants = VehicleVariantSerializer(many=True, read_only=True)
     availability = serializers.SerializerMethodField()
     fitment = serializers.SerializerMethodField()
+    rating = serializers.SerializerMethodField()
+    review_count = serializers.SerializerMethodField()
+    seller_rating = serializers.SerializerMethodField()
 
     # Tax & GST Transparency
     hsn_code = serializers.CharField(read_only=True)
@@ -838,11 +849,39 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'images',
             'compatible_variants',
             'compatibility_notes',
+            'seller_id',
             'seller_name',
             'organisation_name',
+            'rating',
+            'review_count',
+            'seller_rating',
             'status',
             'created_at',
         ]
+
+    def get_rating(self, obj) -> float:
+        if hasattr(obj, 'approved_avg_rating'):
+            return round(float(obj.approved_avg_rating or 0.0), 1)
+        from django.db.models import Avg
+        avg = obj.reviews.filter(status=ReviewStatusChoices.APPROVED).aggregate(Avg('rating'))['rating__avg']
+        return round(float(avg or 0.0), 1)
+
+    def get_review_count(self, obj) -> int:
+        if hasattr(obj, 'approved_review_count'):
+            return int(obj.approved_review_count or 0)
+        return obj.reviews.filter(status=ReviewStatusChoices.APPROVED).count()
+
+    def get_seller_rating(self, obj) -> float:
+        if hasattr(obj, 'approved_seller_avg_rating'):
+            return round(float(obj.approved_seller_avg_rating or 0.0), 1)
+        if not obj.seller_id:
+            return 0.0
+        from django.db.models import Avg
+        avg = SellerReview.objects.filter(
+            seller_id=obj.seller_id,
+            status=ReviewStatusChoices.APPROVED,
+        ).aggregate(Avg('rating'))['rating__avg']
+        return round(float(avg or 0.0), 1)
 
     def get_gst_amount(self, obj) -> Decimal:
         return obj.gst_amount
@@ -1141,6 +1180,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
     seller_name = serializers.SerializerMethodField()
     seller_id = serializers.SerializerMethodField()
     listing_id = serializers.UUIDField(source='listing.id', read_only=True, allow_null=True)
+    is_reviewed = serializers.SerializerMethodField()
+    review = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderItem
@@ -1164,6 +1205,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'igst_amount',
             'tax_amount',
             'total_amount',
+            'is_reviewed',
+            'review',
         ]
         read_only_fields = fields
 
@@ -1175,6 +1218,28 @@ class OrderItemSerializer(serializers.ModelSerializer):
     def get_seller_id(self, obj):
         if obj.listing and obj.listing.seller_id:
             return str(obj.listing.seller_id)
+        return None
+
+    def _get_review(self, obj):
+        try:
+            return obj.product_review
+        except Exception:
+            return None
+
+    def get_is_reviewed(self, obj) -> bool:
+        return self._get_review(obj) is not None
+
+    def get_review(self, obj):
+        rev = self._get_review(obj)
+        if rev:
+            return {
+                "id": str(rev.id),
+                "rating": rev.rating,
+                "title": rev.title,
+                "comment": rev.comment,
+                "status": rev.status,
+                "created_at": rev.created_at.isoformat(),
+            }
         return None
 
 
@@ -1384,8 +1449,6 @@ class SellerOrderSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return []
         user = request.user
-        if user.is_staff or user.is_superuser:
-            return ShipmentSerializer(obj.shipments.all(), many=True).data
 
         from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
         from django.db.models import Q
@@ -1443,9 +1506,6 @@ class SellerOrderSerializer(serializers.ModelSerializer):
             order._cached_seller_items = []
             return order._cached_seller_items
         user = request.user
-        if user.is_staff or user.is_superuser:
-            order._cached_seller_items = list(order.items.all())
-            return order._cached_seller_items
 
         from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
         org_ids = set(OrganisationMembership.objects.filter(
@@ -2055,5 +2115,181 @@ class DisputeMessagePayloadSerializer(serializers.Serializer):
         required=False,
         default=list,
     )
+
+
+# =============================================================================
+# Phase 5 Task 4: Reviews, Ratings & Seller Reputation Serializers
+# =============================================================================
+
+class ProductReviewSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    order_item_id = serializers.UUIDField(source='order_item.id', read_only=True)
+    listing_id = serializers.UUIDField(source='listing.id', read_only=True)
+    listing_name = serializers.CharField(source='listing.name', read_only=True)
+    listing_image_url = serializers.CharField(source='listing.primary_image_url', read_only=True)
+    buyer_id = serializers.UUIDField(source='buyer.id', read_only=True)
+    buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+    seller_id = serializers.UUIDField(source='seller.id', read_only=True)
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+    seller_replied_by_name = serializers.CharField(source='seller_replied_by.full_name', read_only=True, allow_null=True)
+    has_seller_reply = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductReview
+        fields = [
+            'id',
+            'order_id',
+            'order_number',
+            'order_item_id',
+            'listing_id',
+            'listing_name',
+            'listing_image_url',
+            'buyer_id',
+            'buyer_name',
+            'seller_id',
+            'seller_name',
+            'organisation_name',
+            'rating',
+            'title',
+            'comment',
+            'status',
+            'is_verified_purchase',
+            'seller_reply',
+            'seller_reply_at',
+            'seller_replied_by_name',
+            'has_seller_reply',
+            'helpful_votes',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_has_seller_reply(self, obj) -> bool:
+        return bool(obj.seller_reply and obj.seller_reply.strip())
+
+
+class ProductReviewCreatePayloadSerializer(serializers.Serializer):
+    order_id = serializers.CharField(required=False, allow_blank=True, default='')
+    order_item_id = serializers.UUIDField(required=True)
+    rating = serializers.IntegerField(min_value=1, max_value=5, required=True)
+    title = serializers.CharField(required=False, allow_blank=True, max_length=255, default='')
+    comment = serializers.CharField(required=True, min_length=5)
+    seller_rating = serializers.IntegerField(min_value=1, max_value=5, required=False, allow_null=True, default=None)
+    seller_comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class ProductReviewUpdatePayloadSerializer(serializers.Serializer):
+    rating = serializers.IntegerField(min_value=1, max_value=5, required=False)
+    title = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    comment = serializers.CharField(required=False, min_length=5)
+
+
+class SellerReviewSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(source='order.id', read_only=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    buyer_id = serializers.UUIDField(source='buyer.id', read_only=True)
+    buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+    seller_id = serializers.UUIDField(source='seller.id', read_only=True)
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+    seller_replied_by_name = serializers.CharField(source='seller_replied_by.full_name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = SellerReview
+        fields = [
+            'id',
+            'order_id',
+            'order_number',
+            'buyer_id',
+            'buyer_name',
+            'seller_id',
+            'seller_name',
+            'organisation_name',
+            'rating',
+            'communication_rating',
+            'delivery_rating',
+            'item_description_rating',
+            'comment',
+            'status',
+            'is_verified_purchase',
+            'seller_reply',
+            'seller_reply_at',
+            'seller_replied_by_name',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class SellerReviewCreatePayloadSerializer(serializers.Serializer):
+    order_id = serializers.CharField(required=True)
+    seller_id = serializers.UUIDField(required=True)
+    rating = serializers.IntegerField(min_value=1, max_value=5, required=True)
+    communication_rating = serializers.IntegerField(min_value=1, max_value=5, required=False, allow_null=True, default=None)
+    delivery_rating = serializers.IntegerField(min_value=1, max_value=5, required=False, allow_null=True, default=None)
+    item_description_rating = serializers.IntegerField(min_value=1, max_value=5, required=False, allow_null=True, default=None)
+    comment = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class ReviewSellerReplyPayloadSerializer(serializers.Serializer):
+    reply = serializers.CharField(required=True, min_length=3)
+
+
+class ReviewReportSerializer(serializers.ModelSerializer):
+    reporter_email = serializers.CharField(source='reporter.email', read_only=True)
+    reporter_name = serializers.CharField(source='reporter.full_name', read_only=True)
+    resolved_by_email = serializers.CharField(source='resolved_by.email', read_only=True, allow_null=True)
+    product_review_title = serializers.CharField(source='product_review.title', read_only=True, default='')
+    product_review_comment = serializers.CharField(source='product_review.comment', read_only=True, default='')
+    target_type = serializers.SerializerMethodField()
+    target_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReviewReport
+        fields = [
+            'id',
+            'target_type',
+            'target_id',
+            'product_review_id',
+            'seller_review_id',
+            'product_review_title',
+            'product_review_comment',
+            'reporter_id',
+            'reporter_email',
+            'reporter_name',
+            'reason',
+            'details',
+            'status',
+            'action_taken',
+            'admin_notes',
+            'resolved_by_email',
+            'resolved_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_target_type(self, obj) -> str:
+        return 'PRODUCT_REVIEW' if obj.product_review_id else 'SELLER_REVIEW'
+
+    def get_target_id(self, obj) -> str:
+        return str(obj.product_review_id or obj.seller_review_id)
+
+
+class ReviewReportCreatePayloadSerializer(serializers.Serializer):
+    reason = serializers.ChoiceField(choices=ReviewReportReasonChoices.choices)
+    details = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class ReviewReportResolvePayloadSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['DISMISS', 'HIDE_REVIEW', 'DELETE_REVIEW'])
+    admin_notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class ReviewModerationPayloadSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['APPROVE', 'FLAG', 'HIDE', 'DELETE'])
+    admin_notes = serializers.CharField(required=False, allow_blank=True, default='')
 
 

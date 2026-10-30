@@ -365,12 +365,16 @@ PRICE_OUTLIER_THRESHOLD = Decimal(os.getenv("PRICE_OUTLIER_THRESHOLD", "0.5"))
 # PAYMENT GATEWAY & CASH ON DELIVERY (COD) CONFIGURATION
 # =========================================================
 
-PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "True").lower() in ("true", "1", "yes")
+# Payment test mode is explicitly opt-in (defaults to False in production).
+# Only permitted in development (DEBUG=True) or automated testing (IS_TESTING=True).
+PAYMENT_TEST_MODE = os.getenv("PAYMENT_TEST_MODE", "True" if (DEBUG or IS_TESTING) else "False").lower() in ("true", "1", "yes")
 
 # Razorpay (India / INR)
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "rzp_test_placeholder_key")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "rzp_test_placeholder_secret")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "rzp_test_webhook_secret")
+RAZORPAY_API_URL = os.getenv("RAZORPAY_API_URL", "https://api.razorpay.com/v1")
+PAYMENT_EXPIRY_MINUTES = int(os.getenv("PAYMENT_EXPIRY_MINUTES", "30"))
 
 # Stripe (UK / GBP & International Cards)
 STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "pk_test_placeholder_key")

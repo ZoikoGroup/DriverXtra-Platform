@@ -53,14 +53,29 @@ export default function PlatformDashboardPage() {
   const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
   const { unreadCount, refreshUnreadCount } = useNotificationUnreadCount(isAuthenticated);
 
+  const activeRole = user?.activeRole || (user?.rawRoles && user?.rawRoles[0]) || "BUYER";
+
+  // Sync tab with URL search parameter if present (redirecting legacy dispute tabs to customer orders)
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      if (tabParam) {
+        if (tabParam === "seller_disputes" || tabParam === "admin_disputes_refunds") {
+          setSelectedTab({ role: activeRole, tab: "seller_orders", itemData: { type: "tab", id: "disputes" } });
+        } else {
+          setSelectedTab({ role: activeRole, tab: tabParam });
+        }
+      }
+    }
+  }, [activeRole]);
+
   // Protected route check
   useEffect(() => {
     if (isInitialized && !isAuthenticated) {
       router.replace("/login");
     }
   }, [isInitialized, isAuthenticated, router]);
-
-  const activeRole = user?.activeRole || (user?.rawRoles && user?.rawRoles[0]) || "BUYER";
 
   const currentTab = (selectedTab && selectedTab.role === activeRole)
     ? selectedTab.tab
@@ -77,7 +92,16 @@ export default function PlatformDashboardPage() {
     );
   }
 
+  const isSellerOnlyTab = (tab: string) =>
+    tab === "seller_orders" || tab === "seller_disputes" || tab === "admin_disputes_refunds";
+
   const getTabLabel = (tab: string) => {
+    if (isAdmin && isSellerOnlyTab(tab)) {
+      return "Admin Moderation — Listing Review Queue";
+    }
+    if (tab === "seller_disputes" || tab === "admin_disputes_refunds") {
+      return "Customer Orders — Customer Disputes";
+    }
     const map: Record<string, string> = {
       marketplace_browse: "Marketplace — Approved Vehicles & Spare Parts",
       my_orders: "My Orders — Order History & Status",
@@ -86,22 +110,21 @@ export default function PlatformDashboardPage() {
       my_enquiries: "My Enquiries — Vehicle Questions & Seller Replies",
       seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
       admin_marketplace_review: "Admin Moderation — Listing Review Queue",
-      admin_disputes_refunds: "Disputes & Refunds — Adjudication & Order Refunds",
       admin_staff_management: "Staff Administration & Access Control",
-      profile: "User Profile (Phase 1 Identity & RBAC)",
-      organisations: "Organisations & Teams (Phase 1 RBAC)",
-      garage: "My Garage (Phase 2 Vehicle Master)",
-      catalogue: "Vehicle & Parts Catalogue (Phase 2)",
-      parts_fitment: "Vehicle Parts & Confirmed Fitment (Phase 2)",
+      profile: "User Profile & Account Settings",
+      organisations: "Organisations & Teams",
+      garage: "My Garage — Vehicle Management",
+      catalogue: "Vehicle & Parts Catalogue",
+      parts_fitment: "Vehicle Parts & Fitment Verification",
       seller_onboarding: "Apply to sell / Apply as workshop (Seller Verification)",
-      seller_reviews: "Seller Applications Compliance Queue (Phase 2)",
+      seller_reviews: "Seller Applications Compliance Queue",
       workshop_landing: "Workshop Services — Workshop Partner Hub",
     };
     return map[tab] || "Dashboard Overview";
   };
 
   const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
-  const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP" || isAdmin;
+  const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP" || Boolean(user?.rawRoles?.includes("SELLER") || user?.rawRoles?.includes("WORKSHOP"));
 
   const activeItemData = selectedTab?.role === activeRole && selectedTab.tab === currentTab ? selectedTab.itemData : undefined;
 
@@ -132,10 +155,21 @@ export default function PlatformDashboardPage() {
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
               initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
             />
-          ) : currentTab === "seller_orders" ? (
-            <SellerOrdersView
-              initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
-            />
+          ) : currentTab === "seller_orders" || currentTab === "seller_disputes" || currentTab === "admin_disputes_refunds" ? (
+            isAdmin ? (
+              <AdminMarketplaceReviewView />
+            ) : (
+              <SellerOrdersView
+                initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
+                initialMainTab={
+                  currentTab === "seller_disputes" ||
+                  currentTab === "admin_disputes_refunds" ||
+                  (activeItemData?.type === "tab" && activeItemData.id === "disputes")
+                    ? "disputes"
+                    : "orders"
+                }
+              />
+            )
           ) : currentTab === "favourites" ? (
             <BuyerFavouritesView
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
@@ -163,12 +197,6 @@ export default function PlatformDashboardPage() {
                 initialVehicleId={activeItemData?.type === "admin_vehicle" ? activeItemData.id : undefined}
                 initialPartId={activeItemData?.type === "admin_part" ? activeItemData.id : undefined}
               />
-            ) : (
-              <MarketplaceBrowseView />
-            )
-          ) : currentTab === "admin_disputes_refunds" ? (
-            isAdmin ? (
-              <AdminDisputesRefundsView />
             ) : (
               <MarketplaceBrowseView />
             )

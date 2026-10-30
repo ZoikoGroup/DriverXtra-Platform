@@ -3914,7 +3914,7 @@ export default function SellerInventoryView() {
             </div>
 
             <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-              <span>Immutable Ledger · Rows locked with row-level mutex</span>
+              <span>Audit History · Complete verified record of inventory adjustments</span>
               <button
                 type="button"
                 onClick={() => setHistoryPart(null)}
@@ -4025,7 +4025,7 @@ export default function SellerInventoryView() {
             </div>
 
             <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-              <span>Append-Only Ledger · Row-level mutex protection</span>
+              <span>Audit History · Complete verified record of price changes</span>
               <button
                 type="button"
                 onClick={() => setPriceHistoryPart(null)}

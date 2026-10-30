@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Dict, Any, List, Tuple, Optional
 from django.conf import settings
 from django.utils import timezone
+import datetime
 from django.db import transaction
 from apps.marketplace.models import (
     Order,
@@ -41,16 +42,21 @@ class PaymentService:
         return c
 
     @classmethod
-    def get_provider_for_order(cls, order: Order):
-        """Resolves the authoritative payment provider based on order currency and country."""
-        country_code = cls.normalize_country_code(order.shipping_country)
-        if order.currency == 'INR' or country_code == 'IN':
+    def get_provider_for_currency_and_country(cls, currency: str, country: Optional[str] = None):
+        """Resolves the payment provider based on currency and country string."""
+        country_code = cls.normalize_country_code(country)
+        if currency == 'INR' or country_code == 'IN':
             return RazorpayPaymentProvider()
-        elif order.currency == 'GBP' or country_code == 'GB':
+        elif currency == 'GBP' or country_code == 'GB':
             return StripePaymentProvider()
         else:
             # Default to Stripe for international currency
             return StripePaymentProvider()
+
+    @classmethod
+    def get_provider_for_order(cls, order: Order):
+        """Resolves the authoritative payment provider based on order currency and country."""
+        return cls.get_provider_for_currency_and_country(order.currency, order.shipping_country)
 
     @classmethod
     def check_cod_eligibility(
@@ -86,6 +92,112 @@ class PaymentService:
         return True, None
 
     @classmethod
+    def cancel_unpaid_order(
+        cls,
+        order: Order,
+        actor: Optional[Any] = None,
+        reason: str = "Payment cancelled or abandoned",
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Safely cancels an unpaid online or pending order and immediately restores
+        the reserved stock to the catalogue inventory.
+        """
+        if order.payment_status == PaymentStatusChoices.PAID:
+            return False, "Cannot cancel an order that has already been paid.", {}
+
+        if order.status == OrderStatusChoices.CANCELLED:
+            return True, f"Order {order.order_number} is already cancelled.", {
+                "order_number": order.order_number,
+                "status": order.status,
+            }
+
+        with transaction.atomic():
+            locked_order = Order.objects.select_for_update().get(id=order.id)
+            if locked_order.payment_status == PaymentStatusChoices.PAID:
+                return False, "Cannot cancel an order that has already been paid.", {}
+
+            if locked_order.status == OrderStatusChoices.CANCELLED:
+                return True, f"Order {locked_order.order_number} is already cancelled.", {
+                    "order_number": locked_order.order_number,
+                    "status": locked_order.status,
+                }
+
+            locked_order.status = OrderStatusChoices.CANCELLED
+            locked_order.payment_status = PaymentStatusChoices.CANCELLED
+            locked_order.save(update_fields=['status', 'payment_status', 'updated_at'])
+
+            for item in locked_order.items.select_related('listing').all():
+                if item.listing:
+                    adjust_stock(
+                        listing=item.listing,
+                        delta=item.quantity,
+                        reason=StockMovementReasonChoices.RETURN,
+                        actor=actor,
+                        note=f"Stock restored for cancelled order {locked_order.order_number}: {reason}",
+                    )
+
+            provider = cls.get_provider_for_order(locked_order)
+            PaymentTransaction.objects.create(
+                order=locked_order,
+                transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
+                provider=provider.provider_name,
+                amount=locked_order.total_amount,
+                currency=locked_order.currency,
+                status=PaymentTransaction.StatusChoices.CANCELLED,
+                error_message=reason,
+            )
+
+            record_audit_entry(
+                event_type="marketplace.order.payment_cancelled",
+                action="marketplace:order.payment_cancel",
+                resource_type="Order",
+                resource_id=str(locked_order.id),
+                actor_id=getattr(actor, 'id', None) or locked_order.buyer_id,
+                metadata={
+                    "order_number": locked_order.order_number,
+                    "reason": reason,
+                    "total_amount": str(locked_order.total_amount),
+                    "currency": locked_order.currency,
+                },
+            )
+
+        return True, f"Order {order.order_number} has been cancelled and stock returned.", {
+            "order_number": order.order_number,
+            "status": OrderStatusChoices.CANCELLED,
+            "payment_status": PaymentStatusChoices.CANCELLED,
+        }
+
+    @classmethod
+    def expire_stale_pending_orders(cls, max_age_minutes: Optional[int] = None) -> int:
+        """
+        Finds and cancels online orders that have remained unpaid past the reservation timeout,
+        releasing the held stock back to seller inventory.
+        """
+        mins = max_age_minutes if max_age_minutes is not None else getattr(settings, 'PAYMENT_EXPIRY_MINUTES', 30)
+        cutoff = timezone.now() - datetime.timedelta(minutes=mins)
+
+        stale_orders = Order.objects.filter(
+            payment_method=PaymentMethodChoices.ONLINE,
+            payment_status=PaymentStatusChoices.PENDING,
+            status=OrderStatusChoices.PENDING_CONFIRMATION,
+            created_at__lt=cutoff,
+        )
+
+        expired_count = 0
+        for order in stale_orders:
+            try:
+                success, _, _ = cls.cancel_unpaid_order(
+                    order=order,
+                    reason=f"Auto-expired after {mins} minutes without payment confirmation.",
+                )
+                if success:
+                    expired_count += 1
+            except Exception as exc:
+                logger.warning("Failed to auto-expire stale order %s: %s", order.order_number, str(exc))
+
+        return expired_count
+
+    @classmethod
     def get_available_payment_methods(
         cls,
         country: str,
@@ -99,13 +211,17 @@ class PaymentService:
         methods = []
 
         # 1. Online Provider
+        online_provider = cls.get_provider_for_currency_and_country(currency=currency, country=country)
+        is_online_ready = bool(getattr(online_provider, 'is_configured', False) or getattr(online_provider, 'test_mode', False))
+
         if country_code == 'IN' or currency == 'INR':
             methods.append({
                 "code": PaymentMethodChoices.ONLINE,
                 "provider": "RAZORPAY",
                 "name": "Online Payment (UPI, Cards, NetBanking)",
                 "currency": "INR",
-                "is_available": True,
+                "is_available": is_online_ready,
+                "reason": None if is_online_ready else "Online payment via Razorpay is currently not configured on this server.",
                 "description": "Secure instant checkout via Razorpay supporting all Indian banks and UPI.",
             })
         else:
@@ -114,7 +230,8 @@ class PaymentService:
                 "provider": "STRIPE",
                 "name": "Card Payment (Stripe / Apple Pay / Google Pay)",
                 "currency": "GBP",
-                "is_available": True,
+                "is_available": is_online_ready,
+                "reason": None if is_online_ready else "Online card payment is currently not configured on this server.",
                 "description": "Secure card checkout via Stripe supporting UK debit/credit cards and digital wallets.",
             })
 
@@ -137,6 +254,18 @@ class PaymentService:
         """
         Initiates an authoritative payment session/order with the provider.
         """
+        if order.status == OrderStatusChoices.CANCELLED:
+            raise ValueError(f"Cannot initialize payment session for cancelled order '{order.order_number}'.")
+
+        expiry_minutes = getattr(settings, 'PAYMENT_EXPIRY_MINUTES', 30)
+        if (
+            order.payment_method == PaymentMethodChoices.ONLINE
+            and order.payment_status == PaymentStatusChoices.PENDING
+            and order.created_at
+            and order.created_at < timezone.now() - datetime.timedelta(minutes=expiry_minutes)
+        ):
+            cls.cancel_unpaid_order(order, reason=f"Order payment window ({expiry_minutes} mins) expired.")
+            raise ValueError(f"Order '{order.order_number}' payment window has expired. Please create a new order.")
         if order.payment_method == PaymentMethodChoices.COD:
             return {
                 "provider": "COD",
@@ -332,8 +461,10 @@ class PaymentService:
             if not order and pi_id:
                 order = Order.objects.filter(payment_reference=pi_id).first()
 
+        settled_this_request = False
+
         with transaction.atomic():
-            webhook_record, _ = PaymentWebhookEvent.objects.get_or_create(
+            webhook_record, created = PaymentWebhookEvent.objects.select_for_update().get_or_create(
                 provider=p_name,
                 event_id=event_id,
                 defaults={
@@ -343,6 +474,19 @@ class PaymentService:
                 },
             )
 
+            # Concurrent/retry defense inside transaction lock
+            if not created and webhook_record.processed:
+                return True, 200, {
+                    "status": "already_processed",
+                    "message": f"Webhook event '{event_id}' has already been processed.",
+                    "replayed": True,
+                }
+
+            # Lock order to guard against concurrent settlement races
+            locked_order = None
+            if order:
+                locked_order = Order.objects.select_for_update().filter(id=order.id).first()
+
             # Process Success Event
             if event_type in (
                 'payment_intent.succeeded',
@@ -350,24 +494,32 @@ class PaymentService:
                 'payment.captured',
                 'checkout.session.completed',
             ):
-                if order and order.payment_status != PaymentStatusChoices.PAID:
-                    order.payment_status = PaymentStatusChoices.PAID
-                    order.paid_at = timezone.now()
-                    if order.status == OrderStatusChoices.PENDING_CONFIRMATION:
-                        order.status = OrderStatusChoices.CONFIRMED
-                    order.save(update_fields=['payment_status', 'paid_at', 'status', 'updated_at'])
+                if locked_order and locked_order.payment_status != PaymentStatusChoices.PAID:
+                    locked_order.payment_status = PaymentStatusChoices.PAID
+                    locked_order.paid_at = timezone.now()
+                    if locked_order.status == OrderStatusChoices.PENDING_CONFIRMATION:
+                        locked_order.status = OrderStatusChoices.CONFIRMED
+                    locked_order.save(update_fields=['payment_status', 'paid_at', 'status', 'updated_at'])
 
-                    PaymentTransaction.objects.create(
-                        order=order,
-                        transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
-                        provider=p_name,
-                        amount=order.total_amount,
-                        currency=order.currency,
+                    # Avoid duplicate SUCCESS transactions if one already exists for this event_id
+                    existing_success = PaymentTransaction.objects.filter(
+                        order=locked_order,
                         status=PaymentTransaction.StatusChoices.SUCCESS,
                         provider_transaction_id=event_id,
-                        provider_order_id=order.payment_reference,
-                        raw_response=payload,
-                    )
+                    ).first()
+                    if not existing_success:
+                        PaymentTransaction.objects.create(
+                            order=locked_order,
+                            transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
+                            provider=p_name,
+                            amount=locked_order.total_amount,
+                            currency=locked_order.currency,
+                            status=PaymentTransaction.StatusChoices.SUCCESS,
+                            provider_transaction_id=event_id,
+                            provider_order_id=locked_order.payment_reference,
+                            raw_response=payload,
+                        )
+                    settled_this_request = True
 
             # Process Failure Event
             elif event_type in (
@@ -375,19 +527,19 @@ class PaymentService:
                 'payment.failed',
                 'charge.failed',
             ):
-                if order and order.payment_status != PaymentStatusChoices.PAID:
-                    order.payment_status = PaymentStatusChoices.FAILED
-                    order.save(update_fields=['payment_status', 'updated_at'])
+                if locked_order and locked_order.payment_status != PaymentStatusChoices.PAID:
+                    locked_order.payment_status = PaymentStatusChoices.FAILED
+                    locked_order.save(update_fields=['payment_status', 'updated_at'])
 
                     PaymentTransaction.objects.create(
-                        order=order,
+                        order=locked_order,
                         transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
                         provider=p_name,
-                        amount=order.total_amount,
-                        currency=order.currency,
+                        amount=locked_order.total_amount,
+                        currency=locked_order.currency,
                         status=PaymentTransaction.StatusChoices.FAILED,
                         provider_transaction_id=event_id,
-                        provider_order_id=order.payment_reference,
+                        provider_order_id=locked_order.payment_reference,
                         raw_response=payload,
                     )
 
@@ -395,11 +547,30 @@ class PaymentService:
             webhook_record.processed_at = timezone.now()
             webhook_record.save(update_fields=['processed', 'processed_at'])
 
+            # Trigger audit entry and buyer notification ONLY on genuine state settlement
+            if settled_this_request and locked_order:
+                record_audit_entry(
+                    event_type="marketplace.order.payment_verified",
+                    action="marketplace:order.payment_verify",
+                    resource_type="Order",
+                    resource_id=str(locked_order.id),
+                    actor_id=locked_order.buyer_id,
+                    metadata={
+                        "order_number": locked_order.order_number,
+                        "provider": p_name,
+                        "payment_reference": event_id,
+                        "amount": str(locked_order.total_amount),
+                        "currency": locked_order.currency,
+                        "settlement_source": "webhook",
+                    },
+                )
+
         return True, 200, {
             "status": "success",
             "event_id": event_id,
             "event_type": event_type,
             "order_number": order.order_number if order else None,
+            "settled": settled_this_request,
         }
 
     @classmethod

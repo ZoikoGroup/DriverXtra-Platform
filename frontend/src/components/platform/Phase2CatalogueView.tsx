@@ -328,7 +328,7 @@ export default function Phase2CatalogueView({ initialPartId }: Phase2CatalogueVi
         <div>
           <div className="flex items-center gap-2">
             <span className="p-1.5 rounded-lg bg-amber-400 text-slate-950 font-black text-xs">
-              Phase 2
+              OEM
             </span>
             <h1 className="text-xl font-black text-slate-950">Vehicle & Spare-Parts Catalogue</h1>
           </div>
@@ -545,7 +545,7 @@ export default function Phase2CatalogueView({ initialPartId }: Phase2CatalogueVi
             <div className="flex items-center justify-between text-xs font-bold text-slate-600 px-1">
               <span>{parts.length} Canonical Parts Found</span>
               <span className="text-[11px] font-normal text-slate-500">
-                Live DRF data via <code className="font-mono">/api/v1/catalogue/parts/</code>
+                Verified OEM & Aftermarket Directory
               </span>
             </div>
 
@@ -967,7 +967,7 @@ export default function Phase2CatalogueView({ initialPartId }: Phase2CatalogueVi
             <div className="flex items-center justify-between text-xs font-bold text-slate-600 px-1">
               <span>{marketplaceParts.length} Approved Seller Spare Parts Found</span>
               <span className="text-[11px] font-normal text-slate-500">
-                Live DRF data via <code className="font-mono">/api/v1/marketplace/browse/parts/</code>
+                Active Verified Marketplace Listings
               </span>
             </div>
 

@@ -595,25 +595,18 @@ export default function GlobalSearch({
               </div>
             )}
 
-            {/* Order # Backend Limitation Notice */}
+            {/* Order Search Notice */}
             {showOrderNotice && (
               <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 text-amber-950 text-xs m-2">
                 <div className="flex items-center gap-2 font-bold text-amber-900 mb-1">
                   <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>Order # Search Limitation</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded font-black bg-amber-200 text-amber-900 border border-amber-300">
-                    BACKEND UNSUPPORTED
-                  </span>
+                  <span>Order Search</span>
                 </div>
                 <p className="text-[11px] text-amber-800 leading-relaxed">
-                  The active DriverXtra backend implements real-time order creation and GST tax calculations (
-                  <code className="bg-amber-100 px-1 py-0.2 rounded font-mono text-[10px]">/orders/checkout/</code>
-                  ), but customer order tracking and order search endpoints are currently under active development.
+                  To view and manage your orders, navigate directly to <span className="font-semibold text-slate-800">My Orders</span> (for buyers) or <span className="font-semibold text-slate-800">Customer Orders</span> (for sellers).
                 </p>
                 <p className="text-[11px] text-slate-600 mt-1.5">
-                  <span className="font-semibold text-slate-800">Available search capabilities:</span> Full VIN lookup across
-                  personal garage and vehicle queues, plus instant Part MPN searches across the OEM parts catalogue and verified
-                  seller inventory.
+                  <span className="font-semibold text-slate-800">Quick search is available for:</span> Vehicle VIN and registration plate lookups across your garage and inventory, plus instant Part MPN searches across the catalogue and marketplace.
                 </p>
               </div>
             )}

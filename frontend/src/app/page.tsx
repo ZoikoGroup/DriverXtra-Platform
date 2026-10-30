@@ -25,7 +25,7 @@ export default function RootPage() {
         </div>
         <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
           <div className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-          <span>Routing to DriverXtra Platform Gateway...</span>
+          <span>Loading DriverXtra...</span>
         </div>
       </div>
     </div>

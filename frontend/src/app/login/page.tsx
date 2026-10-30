@@ -138,12 +138,12 @@ console.log("[Login] Auth error:", authError);
         </div>
 
         <h2 className="text-xl font-bold tracking-tight text-white mt-2">
-          {mfaChallenge ? "Two-Factor Authentication" : "Platform Sign In"}
+          {mfaChallenge ? "Two-Factor Authentication" : "Sign in to DriverXtra"}
         </h2>
         <p className="text-xs text-slate-400 mt-1">
           {mfaChallenge
             ? "Enter 6-digit TOTP code from your authenticator app"
-            : "Identity & RBAC Architecture (Doc 04 §7) • Enter Enterprise Portal"}
+            : "Sign in to access your DriverXtra commercial portal"}
         </p>
       </div>
 
@@ -154,9 +154,9 @@ console.log("[Login] Auth error:", authError);
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-3.5 mb-6 text-xs text-amber-300 flex items-start gap-2.5">
               <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
               <div>
-                <strong className="font-bold">Production Authentication Engine:</strong>
+                <strong className="font-bold">Enterprise Sign-In:</strong>
                 <div className="text-[11px] text-amber-200/80 mt-0.5">
-                  Connected to Django REST Framework backend. Session tokens and permissions are cryptographically verified server-side.
+                  Enter your registered DriverXtra credentials or business organisation account.
                 </div>
               </div>
             </div>
@@ -259,7 +259,7 @@ console.log("[Login] Auth error:", authError);
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                  Work Email / Username
+                  Work Email or Username
                 </label>
                 <div className="relative">
                   <input
@@ -316,7 +316,7 @@ console.log("[Login] Auth error:", authError);
                 disabled={isSubmitting}
                 className="w-full h-11 bg-amber-400 hover:bg-amber-500 text-slate-950 font-black rounded-xl text-sm flex items-center justify-center gap-2 shadow-md transition-all hover:shadow-amber-400/20 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <span>{isSubmitting ? "Authenticating via Real API..." : "Sign In to Platform"}</span>
+                <span>{isSubmitting ? "Signing in..." : "Sign In"}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
@@ -341,7 +341,7 @@ console.log("[Login] Auth error:", authError);
           {!mfaChallenge && showDevLogin && (
             <div className="mt-8 pt-6 border-t border-slate-800">
               <span className="block text-[11px] font-bold uppercase tracking-wider text-amber-400 mb-3 text-center">
-                Developer Autofill Presets (NEXT_PUBLIC_ENABLE_DEV_LOGIN=true):
+                Demonstration & Quick Access Accounts:
               </span>
 
               <div className="grid grid-cols-1 gap-2.5">

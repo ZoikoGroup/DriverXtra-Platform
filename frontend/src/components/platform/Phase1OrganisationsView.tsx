@@ -208,7 +208,7 @@ export default function Phase1OrganisationsView() {
                 <span>Organisations & Tenant Management</span>
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
-                Phase 1 Tenant RBAC • Connected to <code className="text-[11px] font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-800">GET/POST /api/v1/organisations/</code>
+                Organisation & Team Management • Manage your business entity and team member access
               </p>
             </div>
 
@@ -218,7 +218,7 @@ export default function Phase1OrganisationsView() {
                 onClick={fetchOrganisations}
                 disabled={isLoadingOrgs}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold transition-colors shadow-sm disabled:opacity-50"
-                title="Reload organisations from backend"
+                title="Reload organisations list"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isLoadingOrgs ? "animate-spin text-amber-500" : ""}`} />
                 <span>Refresh</span>
@@ -250,7 +250,7 @@ export default function Phase1OrganisationsView() {
           {isLoadingOrgs ? (
             <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center text-xs text-slate-500">
               <div className="w-6 h-6 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
-              <span>Loading organisations from backend...</span>
+              <span>Loading organisations...</span>
             </div>
           ) : organisations.length === 0 ? (
             /* Empty State */
@@ -419,7 +419,7 @@ export default function Phase1OrganisationsView() {
               {isLoadingMembers ? (
                 <div className="py-8 text-center text-xs text-slate-500">
                   <div className="w-5 h-5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                  <span>Loading members from backend...</span>
+                  <span>Loading members...</span>
                 </div>
               ) : members.length === 0 ? (
                 <div className="py-8 text-center text-xs text-slate-400">
@@ -473,7 +473,7 @@ export default function Phase1OrganisationsView() {
                   <span>Add Organisation Member</span>
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-0.5">
-                  Connects to <code className="font-mono text-[10px]">POST /api/v1/organisations/&lt;id&gt;/members/</code>
+                  Invite registered users and assign operational team permissions.
                 </p>
               </div>
 
@@ -512,7 +512,7 @@ export default function Phase1OrganisationsView() {
                     </select>
                     <div className="mt-1 flex items-center gap-1 text-[10px] text-slate-500">
                       <Lock className="w-3 h-3 text-slate-400" />
-                      <span>OWNER role cannot be assigned directly per backend rules.</span>
+                      <span>Owner role cannot be assigned via invitation.</span>
                     </div>
                   </div>
 
@@ -617,7 +617,7 @@ export default function Phase1OrganisationsView() {
                   className="w-full h-10 px-3 rounded-xl border border-slate-300 text-xs text-slate-900 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
                 />
                 <span className="text-[10px] text-slate-400 mt-1 block">
-                  Default: GB-ENG (Doc 18 multi-jurisdiction compliance)
+                  Default: GB-ENG (Operating Jurisdiction)
                 </span>
               </div>
 

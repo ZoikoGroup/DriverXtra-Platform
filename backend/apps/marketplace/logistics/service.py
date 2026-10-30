@@ -133,9 +133,7 @@ class ShipmentService:
                 # Enforce seller authorization: item must belong to seller or seller's organisation
                 listing = order_item.listing
                 is_authorized = False
-                if actor and (actor.is_staff or actor.is_superuser):
-                    is_authorized = True
-                elif listing and (listing.seller_id == seller.id or listing.organisation_id in seller_org_ids):
+                if listing and (listing.seller_id == seller.id or listing.organisation_id in seller_org_ids):
                     is_authorized = True
 
                 if not is_authorized:

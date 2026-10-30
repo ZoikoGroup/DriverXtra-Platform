@@ -80,7 +80,7 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
             Demo data
           </span>
           <span className="text-xs text-slate-500 font-medium">
-            Workshop Work Orders & Bay Capacity (Doc 15) • Simulated Prototype Data
+            Workshop Work Orders & Bay Capacity
           </span>
         </div>
       </div>
@@ -89,7 +89,7 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
         <div>
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-black uppercase tracking-wider text-purple-200 bg-purple-800 px-2 py-0.5 rounded">
-              Doc 13 Automotive Services Architecture
+              Automotive Services Architecture
             </span>
             <span className="text-xs text-purple-200">• State Machine: CREATED &rarr; IN_PROGRESS &rarr; COMPLETED</span>
           </div>
@@ -112,7 +112,7 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
         <div className="flex items-center justify-between pb-4 border-b border-slate-100">
           <div>
             <h3 className="text-base font-black text-slate-950">
-              Active Bay Work Orders (Doc 13 §16)
+              Active Bay Work Orders
             </h3>
             <p className="text-xs text-slate-500">
               Real-time work orders with labor tasks, diagnostic logs, and customer authorization status.
@@ -168,7 +168,7 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
 
                 {wo.changeOrders.length > 0 && (
                   <div className="mt-3 p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900">
-                    <strong className="font-bold">Pending ChangeOrder (Doc 13 §22):</strong> {wo.changeOrders[0].itemDescription} (+£{wo.changeOrders[0].additionalCost})
+                    <strong className="font-bold">Pending Change Order:</strong> {wo.changeOrders[0].itemDescription} (+£{wo.changeOrders[0].additionalCost})
                   </div>
                 )}
               </div>
@@ -219,7 +219,7 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 border border-slate-200 shadow-2xl">
             <h4 className="text-base font-black text-slate-950">
-              Raise ChangeOrder (Doc 13 §22)
+              Raise Change Order
             </h4>
             <p className="text-xs text-slate-500 mt-0.5">
               Work Order Ref: <strong className="font-mono text-slate-800">{changeOrderModal.id}</strong>
@@ -258,7 +258,7 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
                 </div>
 
                 <div className="p-3 bg-amber-50 rounded-xl text-amber-900 border border-amber-200">
-                  <strong className="font-bold">Doc 13 Invariant:</strong> The workshop cannot charge additional items without explicit, timestamped customer authorization.
+                  <strong className="font-bold">Authorisation Policy:</strong> The workshop cannot charge additional items without explicit, timestamped customer authorization.
                 </div>
 
                 <div className="flex justify-end gap-2 pt-2">
@@ -315,7 +315,7 @@ export default function WorkshopDashboardView({ activeTab }: { activeTab: string
                 </div>
 
                 <div className="p-3 bg-emerald-50 rounded-xl text-emerald-900 border border-emerald-200">
-                  <strong className="font-bold">Doc 05 Rule:</strong> This mileage observation and invoice will be permanently appended to the vehicle&apos;s immutable lifecycle record.
+                  <strong className="font-bold">Lifecycle History:</strong> This mileage observation and invoice will be permanently appended to the vehicle&apos;s service history record.
                 </div>
 
                 <div className="flex justify-end gap-2 pt-2">

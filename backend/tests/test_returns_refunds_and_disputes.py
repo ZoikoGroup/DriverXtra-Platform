@@ -862,3 +862,99 @@ def test_rest_api_buyer_seller_admin_return_and_dispute_lifecycle(
     # Order is now completely REFUNDED
     order.refresh_from_db()
     assert order.payment_status == PaymentStatusChoices.REFUNDED
+
+
+@pytest.mark.django_db
+def test_admin_cannot_access_seller_dispute_or_return_endpoints(
+    sample_delivered_order,
+    admin_auth_client,
+    seller_auth_client,
+    buyer_auth_client,
+):
+    """
+    Verifies that Admin users without seller roles are rejected with HTTP 403
+    from seller operational dispute and return management workflows, while sellers
+    can access their own disputes/returns, and Admin platform compliance reporting is preserved.
+    """
+    order, item, _ = sample_delivered_order
+
+    # 1. Buyer creates return request
+    ret_res = buyer_auth_client.post(
+        f"/api/v1/marketplace/buyer/orders/{order.id}/returns/",
+        {
+            "order_item_id": str(item.id),
+            "request_type": "RETURN",
+            "reason": "DEFECTIVE_ITEM",
+            "description": "Item cracked on arrival",
+            "requested_quantity": 1,
+        },
+        format="json",
+    )
+    assert ret_res.status_code == status.HTTP_201_CREATED
+    req_number = ret_res.data["return_request"]["request_number"]
+
+    # 2. Buyer creates dispute
+    disp_res = buyer_auth_client.post(
+        f"/api/v1/marketplace/buyer/orders/{order.id}/disputes/",
+        {
+            "category": "DAMAGED_OR_DEFECTIVE",
+            "description": "Item was damaged during packing",
+            "priority": "HIGH",
+        },
+        format="json",
+    )
+    assert disp_res.status_code == status.HTTP_201_CREATED
+    disp_number = disp_res.data["dispute"]["dispute_number"]
+
+    # 3. Admin attempts to access seller dispute list -> 403 Forbidden
+    admin_disp_res = admin_auth_client.get("/api/v1/marketplace/seller/disputes/")
+    assert admin_disp_res.status_code == status.HTTP_403_FORBIDDEN
+
+    # 4. Admin attempts to access seller return list -> 403 Forbidden
+    admin_ret_res = admin_auth_client.get("/api/v1/marketplace/seller/returns/")
+    assert admin_ret_res.status_code == status.HTTP_403_FORBIDDEN
+
+    # 5. Admin attempts to review seller return request -> 403 Forbidden
+    admin_review_res = admin_auth_client.post(
+        f"/api/v1/marketplace/seller/returns/{req_number}/review/",
+        {"action": "APPROVE", "seller_notes": "Admin trying to approve seller return"},
+        format="json",
+    )
+    assert admin_review_res.status_code == status.HTTP_403_FORBIDDEN
+
+    # 6. Admin attempts to complete seller return request -> 403 Forbidden
+    admin_comp_res = admin_auth_client.post(
+        f"/api/v1/marketplace/seller/returns/{req_number}/complete/",
+        {"notes": "Admin trying to complete return"},
+        format="json",
+    )
+    assert admin_comp_res.status_code == status.HTTP_403_FORBIDDEN
+
+    # 7. Seller CAN access their own seller dispute and return endpoints
+    seller_disp_res = seller_auth_client.get("/api/v1/marketplace/seller/disputes/")
+    assert seller_disp_res.status_code == status.HTTP_200_OK
+    disp_results = seller_disp_res.data.get("results", seller_disp_res.data)
+    assert len(disp_results) >= 1
+
+    seller_ret_res = seller_auth_client.get("/api/v1/marketplace/seller/returns/")
+    assert seller_ret_res.status_code == status.HTTP_200_OK
+    ret_results = seller_ret_res.data.get("results", seller_ret_res.data)
+    assert len(ret_results) >= 1
+
+    # 8. Seller can post message to their dispute thread
+    seller_msg_res = seller_auth_client.post(
+        f"/api/v1/marketplace/disputes/{disp_number}/messages/",
+        {"message": "Seller responding to buyer inquiry."},
+        format="json",
+    )
+    assert seller_msg_res.status_code == status.HTTP_201_CREATED
+
+    # 9. Admin still preserves access to platform administrative compliance/reporting views
+    admin_platform_disp = admin_auth_client.get("/api/v1/marketplace/admin/disputes/")
+    assert admin_platform_disp.status_code == status.HTTP_200_OK
+
+    admin_platform_ref = admin_auth_client.get("/api/v1/marketplace/admin/refunds/")
+    assert admin_platform_ref.status_code == status.HTTP_200_OK
+
+    admin_refund_sum = admin_auth_client.get(f"/api/v1/marketplace/orders/{order.id}/refund-summary/")
+    assert admin_refund_sum.status_code == status.HTTP_200_OK

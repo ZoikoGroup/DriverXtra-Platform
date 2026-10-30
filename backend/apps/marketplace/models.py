@@ -32,7 +32,7 @@ class VehicleConditionChoices(models.TextChoices):
     FAIR = 'FAIR', 'Fair'
 
 
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 
 
 class StockMovementReasonChoices(models.TextChoices):
@@ -1391,6 +1391,346 @@ class DisputeEvent(BaseUUIDModel):
     def __str__(self):
         actor_name = self.actor.email if self.actor else 'System'
         return f"{self.dispute.dispute_number} @ {self.created_at}: {actor_name} - {self.event_type}"
+
+
+# =============================================================================
+# Phase 5 Task 4: Reviews, Ratings & Seller Reputation Models
+# =============================================================================
+
+class ReviewStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Moderation'
+    APPROVED = 'APPROVED', 'Approved / Published'
+    FLAGGED = 'FLAGGED', 'Flagged for Review'
+    REJECTED = 'REJECTED', 'Rejected / Hidden'
+
+
+class ProductReview(BaseUUIDModel):
+    """
+    Verified purchaser review and rating for a purchased spare part listing.
+    Ensures 1:1 linkage to OrderItem preventing duplicate submissions.
+    """
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='product_reviews',
+        help_text="Order containing the purchased item.",
+    )
+    order_item = models.OneToOneField(
+        OrderItem,
+        on_delete=models.CASCADE,
+        related_name='product_review',
+        help_text="Line item representing the specific eligible purchase.",
+    )
+    listing = models.ForeignKey(
+        SparePartListing,
+        on_delete=models.CASCADE,
+        related_name='reviews',
+        help_text="The reviewed spare part listing.",
+    )
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='product_reviews',
+        help_text="The verified buyer who submitted the review.",
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='received_product_reviews',
+        help_text="The seller whose item was purchased.",
+    )
+    organisation = models.ForeignKey(
+        Organisation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='received_product_reviews',
+    )
+    rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="Product rating score between 1 and 5 stars.",
+    )
+    title = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Short headline summary of the review.",
+    )
+    comment = models.TextField(
+        help_text="Detailed written feedback about the item.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ReviewStatusChoices.choices,
+        default=ReviewStatusChoices.APPROVED,
+        db_index=True,
+    )
+    is_verified_purchase = models.BooleanField(
+        default=True,
+        help_text="Affirms review was submitted by a verified customer.",
+    )
+    seller_reply = models.TextField(
+        blank=True,
+        default='',
+        help_text="Public merchant response to the buyer's review.",
+    )
+    seller_reply_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the seller posted their response.",
+    )
+    seller_replied_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='replied_product_reviews',
+    )
+    helpful_votes = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of community members who found this review helpful.",
+    )
+
+    class Meta:
+        verbose_name = 'Product Review'
+        verbose_name_plural = 'Product Reviews'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['listing', 'status', '-created_at']),
+            models.Index(fields=['seller', 'status', '-created_at']),
+            models.Index(fields=['buyer', '-created_at']),
+            models.Index(fields=['order', 'buyer']),
+        ]
+
+    def __str__(self):
+        return f"Review ({self.rating}★) on {self.listing.name} by {self.buyer.email}"
+
+
+class SellerReview(BaseUUIDModel):
+    """
+    Seller rating and reputation review submitted by a verified customer for an order.
+    Constrained to one seller review per order per seller.
+    """
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='seller_reviews',
+        help_text="Order during which the buyer interacted with this seller.",
+    )
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='given_seller_reviews',
+        help_text="Buyer submitting the rating.",
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='received_seller_reviews',
+        help_text="Seller receiving the rating.",
+    )
+    organisation = models.ForeignKey(
+        Organisation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='received_seller_reviews',
+    )
+    rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="Overall seller performance rating (1 to 5 stars).",
+    )
+    communication_rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        null=True,
+        blank=True,
+        help_text="Optional rating for seller communication (1 to 5).",
+    )
+    delivery_rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        null=True,
+        blank=True,
+        help_text="Optional rating for dispatch speed and packaging (1 to 5).",
+    )
+    item_description_rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        null=True,
+        blank=True,
+        help_text="Optional rating for item matching description accurately (1 to 5).",
+    )
+    comment = models.TextField(
+        blank=True,
+        default='',
+        help_text="Written feedback regarding the seller's service and reliability.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ReviewStatusChoices.choices,
+        default=ReviewStatusChoices.APPROVED,
+        db_index=True,
+    )
+    is_verified_purchase = models.BooleanField(
+        default=True,
+        help_text="Indicates rating originates from a validated customer order.",
+    )
+    seller_reply = models.TextField(
+        blank=True,
+        default='',
+        help_text="Seller's public response to customer feedback.",
+    )
+    seller_reply_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+    seller_replied_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='replied_seller_reviews',
+    )
+
+    class Meta:
+        verbose_name = 'Seller Review'
+        verbose_name_plural = 'Seller Reviews'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['order', 'seller'],
+                name='unique_order_seller_review',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['seller', 'status', '-created_at']),
+            models.Index(fields=['buyer', '-created_at']),
+            models.Index(fields=['order', 'seller']),
+        ]
+
+    def __str__(self):
+        return f"Seller Rating ({self.rating}★) for {self.seller.email} by {self.buyer.email}"
+
+
+class ReviewReportReasonChoices(models.TextChoices):
+    SPAM = 'SPAM', 'Spam, promotional, or advertising content'
+    OFFENSIVE = 'OFFENSIVE', 'Profanity, harassment, or hate speech'
+    INAPPROPRIATE = 'INAPPROPRIATE', 'Inappropriate or sexually explicit content'
+    MISLEADING = 'MISLEADING', 'Fake, misleading, or deceptive review'
+    DEFAMATORY = 'DEFAMATORY', 'Defamatory or personal attack'
+    OTHER = 'OTHER', 'Other policy violation'
+
+
+class ReviewReportStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Moderation'
+    RESOLVED = 'RESOLVED', 'Resolved'
+    DISMISSED = 'DISMISSED', 'Dismissed'
+
+
+class ReviewReportActionChoices(models.TextChoices):
+    NO_ACTION = 'NO_ACTION', 'No Action Taken'
+    REVIEW_HIDDEN = 'REVIEW_HIDDEN', 'Review Hidden / Rejected'
+    REVIEW_DELETED = 'REVIEW_DELETED', 'Review Deleted'
+    DISMISSED = 'DISMISSED', 'Report Dismissed'
+
+
+class ReviewReport(BaseUUIDModel):
+    """
+    Community flag or seller report on a product or seller review requiring administrator moderation.
+    """
+    product_review = models.ForeignKey(
+        ProductReview,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name='reports',
+    )
+    seller_review = models.ForeignKey(
+        SellerReview,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name='reports',
+    )
+    reporter = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='submitted_review_reports',
+    )
+    reason = models.CharField(
+        max_length=30,
+        choices=ReviewReportReasonChoices.choices,
+        default=ReviewReportReasonChoices.OTHER,
+        db_index=True,
+    )
+    details = models.TextField(
+        blank=True,
+        default='',
+        help_text="Detailed explanation of the policy violation.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ReviewReportStatusChoices.choices,
+        default=ReviewReportStatusChoices.PENDING,
+        db_index=True,
+    )
+    action_taken = models.CharField(
+        max_length=30,
+        choices=ReviewReportActionChoices.choices,
+        default=ReviewReportActionChoices.NO_ACTION,
+    )
+    admin_notes = models.TextField(
+        blank=True,
+        default='',
+    )
+    resolved_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='resolved_review_reports',
+    )
+    resolved_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        verbose_name = 'Review Report'
+        verbose_name_plural = 'Review Reports'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=['reporter', '-created_at']),
+        ]
+
+    def __str__(self):
+        target = f"ProductReview {self.product_review_id}" if self.product_review_id else f"SellerReview {self.seller_review_id}"
+        return f"Report on {target} by {self.reporter.email} ({self.status})"
+
+
+class ProductReviewHelpfulVote(BaseUUIDModel):
+    """
+    Tracks community votes marking a product review as helpful.
+    """
+    review = models.ForeignKey(
+        ProductReview,
+        on_delete=models.CASCADE,
+        related_name='votes',
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='review_helpful_votes',
+    )
+
+    class Meta:
+        verbose_name = 'Product Review Helpful Vote'
+        verbose_name_plural = 'Product Review Helpful Votes'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['review', 'user'],
+                name='unique_review_helpful_vote',
+            )
+        ]
 
 
 

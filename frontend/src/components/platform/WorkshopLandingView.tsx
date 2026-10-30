@@ -68,21 +68,21 @@ export default function WorkshopLandingView() {
             <CalendarX className="w-4 h-4 text-amber-700 shrink-0" />
             <div>
               <span className="font-bold block">Service Bookings</span>
-              <span className="text-[11px] text-amber-800">Pending phase release</span>
+              <span className="text-[11px] text-amber-800 font-semibold">Coming Soon</span>
             </div>
           </div>
           <div className="bg-white/80 rounded-xl p-3 border border-amber-200/80 flex items-center gap-3 text-xs text-amber-950">
             <Wrench className="w-4 h-4 text-amber-700 shrink-0" />
             <div>
               <span className="font-bold block">Work Orders & Diagnostics</span>
-              <span className="text-[11px] text-amber-800">Pending phase release</span>
+              <span className="text-[11px] text-amber-800 font-semibold">Coming Soon</span>
             </div>
           </div>
           <div className="bg-white/80 rounded-xl p-3 border border-amber-200/80 flex items-center gap-3 text-xs text-amber-950">
             <FileSpreadsheet className="w-4 h-4 text-amber-700 shrink-0" />
             <div>
               <span className="font-bold block">Quotes & Labour Billing</span>
-              <span className="text-[11px] text-amber-800">Pending phase release</span>
+              <span className="text-[11px] text-amber-800 font-semibold">Coming Soon</span>
             </div>
           </div>
         </div>

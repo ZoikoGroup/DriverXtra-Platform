@@ -32,7 +32,7 @@ export default function FleetDashboardView({ activeTab }: { activeTab: string })
             Demo data
           </span>
           <span className="text-xs text-slate-500 font-medium">
-            Commercial Fleet Management (Doc 16) • Simulated Prototype Data
+            Commercial Fleet Management
           </span>
         </div>
       </div>
@@ -41,7 +41,7 @@ export default function FleetDashboardView({ activeTab }: { activeTab: string })
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
           <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            Active Fleet Units (Doc 16)
+            Active Fleet Units
           </span>
           <div className="text-2xl font-black text-slate-950 mt-1 flex items-baseline justify-between">
             <span>{fleet.length} Commercial Units</span>
@@ -86,7 +86,7 @@ export default function FleetDashboardView({ activeTab }: { activeTab: string })
           <div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">
-                Doc 16 Fleet Operations
+                Fleet Operations
               </span>
               <span className="text-xs text-slate-500">• Vehicle Master Operational Extensions</span>
             </div>

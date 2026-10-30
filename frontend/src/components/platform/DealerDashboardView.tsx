@@ -81,7 +81,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
             Demo data
           </span>
           <span className="text-xs text-slate-500 font-medium">
-            Dealership Inventory & DMS Feeds (Doc 07) • Simulated Prototype Data
+            Dealership Inventory & DMS Feeds
           </span>
         </div>
       </div>
@@ -90,7 +90,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
           <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            Active Stock (Doc 07)
+            Active Stock
           </span>
           <div className="text-2xl font-black text-slate-950 mt-1 flex items-baseline justify-between">
             <span>{inventory.length} Vehicles</span>
@@ -100,7 +100,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
 
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
           <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            Held in Escrow (Doc 10)
+            Held in Escrow
           </span>
           <div className="text-2xl font-black text-amber-600 mt-1 flex items-baseline justify-between">
             <span>£84,200</span>
@@ -122,7 +122,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
 
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
           <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            DMS Feed Status (Doc 20)
+            DMS Feed Status
           </span>
           <div className="text-base font-black text-slate-950 mt-2 flex items-center justify-between">
             <span className="flex items-center gap-1.5 text-emerald-600 text-sm">
@@ -140,7 +140,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] font-black uppercase tracking-wider text-amber-700 bg-amber-100 px-2 py-0.5 rounded">
-                  Doc 07 Marketplace & Offers
+                  Marketplace Inventory
                 </span>
                 <span className="text-xs text-slate-500">• Canonical Product & Offer Separation</span>
               </div>
@@ -156,7 +156,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
                 className="px-4 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-all"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${syncingFeed ? "animate-spin text-amber-500" : ""}`} />
-                <span>{syncingFeed ? "Polling DMS Feed..." : "Poll DMS (Doc 20)"}</span>
+                <span>{syncingFeed ? "Syncing DMS..." : "Sync DMS Feed"}</span>
               </button>
 
               <button
@@ -249,7 +249,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
           <div className="flex items-center justify-between pb-4 border-b border-slate-100">
             <div>
               <h3 className="text-base font-black text-slate-950">
-                Dealer Management System (DMS) Feeds (Doc 16 & Doc 20)
+                Dealer Management System (DMS) Feeds
               </h3>
               <p className="text-xs text-slate-500">
                 Automated inventory sync feeds mapping external dealer inventory into Canonical Vehicle Master schema.
@@ -292,7 +292,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
         <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
           <div className="pb-4 border-b border-slate-100">
             <h3 className="text-base font-black text-slate-950">
-              Escrow Custody & Double-Entry Ledger (Doc 10)
+              Escrow Custody & Settlement Ledger
             </h3>
             <p className="text-xs text-slate-500">
               Authoritative financial state of dealer balances. Payout release is triggered atomically upon vehicle collection pass scan.
@@ -309,7 +309,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
             </div>
 
             <button
-              onClick={() => alert("Payout request dispatched via Doc 10 Payout Orchestrator (Idempotent command).")}
+              onClick={() => alert("Payout request submitted successfully.")}
               className="px-5 py-3 bg-amber-400 hover:bg-amber-500 text-slate-950 font-black text-xs rounded-xl shadow transition-all"
             >
               Request Bank Payout (£142,650)
@@ -326,7 +326,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
               Adjust Price for {editPriceItem.title}
             </h4>
             <p className="text-xs text-slate-500 mt-0.5">
-              Endpoint Blueprint: <span className="font-mono text-slate-800">PATCH /api/v1/offers/{editPriceItem.id}/price</span>
+              Listing ID: <span className="font-mono text-slate-800">{editPriceItem.id}</span>
             </p>
 
             <form onSubmit={handleSavePrice} className="space-y-4 mt-4">
@@ -369,7 +369,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h4 className="text-base font-black text-slate-950 flex items-center gap-2">
                 <Plus className="w-4 h-4 text-amber-500" />
-                Create Vehicle Listing (Doc 07 Wizard)
+                Create Vehicle Listing
               </h4>
               <button onClick={() => setCreateListingOpen(false)} className="text-slate-400">✕</button>
             </div>
@@ -417,7 +417,7 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
               </div>
 
               <div className="p-3 bg-amber-50 rounded-xl text-amber-900 border border-amber-200">
-                <strong className="font-bold">Doc 07 Rule:</strong> Listing will immediately evaluate mandatory legal disclosures and vehicle title verification before publication.
+                <strong className="font-bold">Listing Policy:</strong> Listing will evaluate mandatory legal disclosures and vehicle title verification before publication.
               </div>
 
               <div className="flex justify-end gap-2 pt-2">

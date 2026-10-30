@@ -495,7 +495,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         setLastValidationResult(result);
         return result;
       } catch (err: unknown) {
-        let errorMessage = "Unable to validate cart with backend.";
+        let errorMessage = "Unable to validate cart items. Please refresh and try again.";
         if (err instanceof ApiError) {
           errorMessage = err.message;
         } else if (err instanceof Error) {

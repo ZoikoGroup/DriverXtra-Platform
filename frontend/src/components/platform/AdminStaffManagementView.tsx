@@ -84,13 +84,13 @@ export default function AdminStaffManagementView() {
             <span>Staff Administration & Access Control</span>
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Doc 04 §7 Identity & RBAC • Invite operations officers, dispute managers, and verification specialists
+            Staff Invitations & Roles • Manage team access and administrative permissions
           </p>
         </div>
 
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-900 text-amber-400 border border-slate-800">
-            Admin Only Endpoint
+            Restricted Platform Access
           </span>
         </div>
       </div>
@@ -291,7 +291,7 @@ export default function AdminStaffManagementView() {
               Staff Sub-Role Permission Matrix
             </h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              Seeded permissions enforced by DRF HasPermission class.
+              Platform staff roles and enforced operational privileges.
             </p>
           </div>
 

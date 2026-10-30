@@ -75,7 +75,7 @@ export const MOCK_GARAGE_VEHICLES: VehicleInstance[] = [
         workshopId: "org_wksh_0419",
         invoiceRef: "WO-94102",
         verifiedWriteBack: true,
-        notes: "Brembo Prime pads installed. Guaranteed Fitment verified via Doc 06 compatibility.",
+        notes: "Brembo Prime pads installed. Guaranteed fitment verified via catalogue compatibility.",
         cost: 215
       },
       {
