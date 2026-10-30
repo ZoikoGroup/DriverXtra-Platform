@@ -14,9 +14,11 @@ import Phase2SellerOnboardingView from "@/components/platform/Phase2SellerOnboar
 import MarketplaceBrowseView from "@/components/platform/MarketplaceBrowseView";
 import SellerInventoryView from "@/components/platform/SellerInventoryView";
 import WorkshopLandingView from "@/components/platform/WorkshopLandingView";
+import BuyerWorkshopsView from "@/components/platform/BuyerWorkshopsView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
 import AdminDisputesRefundsView from "@/components/platform/AdminDisputesRefundsView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
+import AdminWorkshopOversightView from "@/components/platform/AdminWorkshopOversightView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
 import BuyerOrdersView from "@/components/platform/BuyerOrdersView";
@@ -111,6 +113,7 @@ export default function PlatformDashboardPage() {
       seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
       admin_marketplace_review: "Admin Moderation — Listing Review Queue",
       admin_staff_management: "Staff Administration & Access Control",
+      admin_workshop_oversight: "Workshop Operations Oversight (Platform Administration)",
       profile: "User Profile & Account Settings",
       organisations: "Organisations & Teams",
       garage: "My Garage — Vehicle Management",
@@ -119,11 +122,13 @@ export default function PlatformDashboardPage() {
       seller_onboarding: "Apply to sell / Apply as workshop (Seller Verification)",
       seller_reviews: "Seller Applications Compliance Queue",
       workshop_landing: "Workshop Services — Workshop Partner Hub",
+      workshops_browse: "Workshop Services & Bookings",
     };
     return map[tab] || "Dashboard Overview";
   };
 
-  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
+  const isPlatformAdmin = activeRole === "ADMIN" || Boolean(user?.is_superuser || user?.rawRoles?.includes("ADMIN"));
+  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF" || Boolean(user?.is_staff || user?.is_superuser);
   const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP" || Boolean(user?.rawRoles?.includes("SELLER") || user?.rawRoles?.includes("WORKSHOP"));
 
   const activeItemData = selectedTab?.role === activeRole && selectedTab.tab === currentTab ? selectedTab.itemData : undefined;
@@ -185,6 +190,10 @@ export default function PlatformDashboardPage() {
             />
           ) : currentTab === "workshop_landing" ? (
             <WorkshopLandingView />
+          ) : currentTab === "workshops_browse" ? (
+            <BuyerWorkshopsView
+              onNavigateToGarage={() => setSelectedTab({ role: activeRole, tab: "garage" })}
+            />
           ) : currentTab === "seller_inventory" ? (
             isSellerOrWorkshop ? (
               <SellerInventoryView />
@@ -200,8 +209,14 @@ export default function PlatformDashboardPage() {
             ) : (
               <MarketplaceBrowseView />
             )
-          ) : currentTab === "admin_staff_management" ? (
+          ) : currentTab === "admin_workshop_oversight" ? (
             isAdmin ? (
+              <AdminWorkshopOversightView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_staff_management" ? (
+            isPlatformAdmin ? (
               <AdminStaffManagementView />
             ) : (
               <MarketplaceBrowseView />

@@ -92,6 +92,64 @@ class PaymentService:
         return True, None
 
     @classmethod
+    def record_payment_failure(
+        cls,
+        order: Order,
+        actor: Optional[Any] = None,
+        reason: str = "Payment failed or declined",
+        provider_transaction_id: Optional[str] = None,
+        extra_details: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Records a failed payment attempt without cancelling the order,
+        allowing the buyer to retry payment or choose another payment method.
+        """
+        if order.payment_status == PaymentStatusChoices.PAID:
+            return False, "Cannot record payment failure for an order that is already paid.", {}
+
+        provider = cls.get_provider_for_order(order)
+        with transaction.atomic():
+            locked_order = Order.objects.select_for_update().get(id=order.id)
+            if locked_order.payment_status == PaymentStatusChoices.PAID:
+                return False, "Cannot record payment failure for an order that is already paid.", {}
+
+            locked_order.payment_status = PaymentStatusChoices.FAILED
+            locked_order.save(update_fields=['payment_status', 'updated_at'])
+
+            PaymentTransaction.objects.create(
+                order=locked_order,
+                transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
+                provider=provider.provider_name,
+                amount=locked_order.total_amount,
+                currency=locked_order.currency,
+                status=PaymentTransaction.StatusChoices.FAILED,
+                error_message=reason,
+                provider_transaction_id=provider_transaction_id or '',
+                provider_order_id=locked_order.payment_reference or '',
+                raw_response=extra_details or {},
+            )
+
+            record_audit_entry(
+                event_type="marketplace.order.payment_failed",
+                action="marketplace:order.payment_fail",
+                resource_type="Order",
+                resource_id=str(locked_order.id),
+                actor_id=getattr(actor, 'id', None) or locked_order.buyer_id,
+                metadata={
+                    "order_number": locked_order.order_number,
+                    "reason": reason,
+                    "provider": provider.provider_name,
+                    "total_amount": str(locked_order.total_amount),
+                    "currency": locked_order.currency,
+                },
+            )
+
+        return True, f"Payment failure recorded for order {order.order_number}.", {
+            "order_number": order.order_number,
+            "payment_status": PaymentStatusChoices.FAILED,
+        }
+
+    @classmethod
     def cancel_unpaid_order(
         cls,
         order: Order,
@@ -215,6 +273,7 @@ class PaymentService:
         is_online_ready = bool(getattr(online_provider, 'is_configured', False) or getattr(online_provider, 'test_mode', False))
 
         if country_code == 'IN' or currency == 'INR':
+            methods_info = online_provider.get_account_methods() if hasattr(online_provider, 'get_account_methods') else {}
             methods.append({
                 "code": PaymentMethodChoices.ONLINE,
                 "provider": "RAZORPAY",
@@ -223,6 +282,7 @@ class PaymentService:
                 "is_available": is_online_ready,
                 "reason": None if is_online_ready else "Online payment via Razorpay is currently not configured on this server.",
                 "description": "Secure instant checkout via Razorpay supporting all Indian banks and UPI.",
+                "methods_info": methods_info,
             })
         else:
             methods.append({
@@ -318,6 +378,24 @@ class PaymentService:
                 "message": "Order is already marked as paid.",
                 "already_paid": True,
             }
+
+        # Amount validation if supplied in verification payload
+        req_amount = payload.get('amount')
+        if req_amount is not None:
+            try:
+                dec_amount = Decimal(str(req_amount))
+                if dec_amount != Decimal(str(order.total_amount)):
+                    return False, f"Payment amount mismatch: expected {order.total_amount} {order.currency}, received {dec_amount} {order.currency}.", {
+                        "expected_amount": str(order.total_amount),
+                        "received_amount": str(dec_amount),
+                    }
+            except (ValueError, ArithmeticError):
+                return False, f"Invalid payment amount '{req_amount}'.", {}
+
+        # Currency validation if supplied in verification payload
+        req_currency = str(payload.get('currency', '')).strip().upper()
+        if req_currency and req_currency != order.currency.upper():
+            return False, f"Payment currency mismatch: expected {order.currency}, received {req_currency}.", {}
 
         provider = cls.get_provider_for_order(order)
         is_valid, payment_id_or_error, extra = provider.verify_payment(order, payload)
@@ -444,9 +522,15 @@ class PaymentService:
             razorpay_order_id = order_entity.get('id') or payment_entity.get('order_id')
             notes = order_entity.get('notes') or payment_entity.get('notes') or {}
             order_number = notes.get('order_number')
+            order_id = notes.get('order_id')
 
             if order_number:
                 order = Order.objects.filter(order_number=order_number).first()
+            if not order and order_id:
+                try:
+                    order = Order.objects.filter(id=order_id).first()
+                except Exception:
+                    pass
             if not order and razorpay_order_id:
                 order = Order.objects.filter(payment_reference=razorpay_order_id).first()
 
@@ -492,8 +576,34 @@ class PaymentService:
                 'payment_intent.succeeded',
                 'order.paid',
                 'payment.captured',
+                'payment.authorized',
                 'checkout.session.completed',
             ):
+                if locked_order and p_name == 'RAZORPAY':
+                    # Webhook amount and currency integrity check
+                    payment_entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
+                    wb_amount_paise = payment_entity.get('amount')
+                    wb_currency = payment_entity.get('currency')
+                    if wb_amount_paise is not None:
+                        expected_paise = int(round(locked_order.total_amount * 100))
+                        if wb_amount_paise != expected_paise:
+                            logger.error(
+                                "Razorpay webhook amount mismatch for %s: expected %s, got %s",
+                                locked_order.order_number, expected_paise, wb_amount_paise
+                            )
+                            return False, 400, {
+                                "status": "failed",
+                                "error": f"Webhook payment amount mismatch for order {locked_order.order_number}."
+                            }
+                    if wb_currency and wb_currency.upper() != locked_order.currency.upper():
+                        logger.error(
+                            "Razorpay webhook currency mismatch for %s: expected %s, got %s",
+                            locked_order.order_number, locked_order.currency, wb_currency
+                        )
+                        return False, 400, {
+                            "status": "failed",
+                            "error": f"Webhook payment currency mismatch for order {locked_order.order_number}."
+                        }
                 if locked_order and locked_order.payment_status != PaymentStatusChoices.PAID:
                     locked_order.payment_status = PaymentStatusChoices.PAID
                     locked_order.paid_at = timezone.now()

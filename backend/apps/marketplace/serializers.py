@@ -1623,6 +1623,8 @@ class PaymentVerifyPayloadSerializer(serializers.Serializer):
     payment_intent_id = serializers.CharField(required=False, allow_blank=True, default='')
     stripe_payment_intent_id = serializers.CharField(required=False, allow_blank=True, default='')
     client_secret = serializers.CharField(required=False, allow_blank=True, default='')
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    currency = serializers.CharField(max_length=10, required=False, allow_blank=True, default='')
 
     def validate(self, attrs):
         # Normalize Stripe payment intent ID across naming variants

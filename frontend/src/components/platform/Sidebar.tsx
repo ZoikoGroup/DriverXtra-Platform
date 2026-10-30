@@ -17,7 +17,7 @@ import {
   MessageSquare,
   Package,
   Boxes,
-  Scale,
+  ClipboardCheck,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -31,17 +31,53 @@ export default function Sidebar({
   currentTab,
   onTabChange,
   collapsed,
-  onToggleCollapse
+  onToggleCollapse,
 }: SidebarProps) {
   const { user, logout } = useAuth();
 
   if (!user) return null;
 
-  // Render navigation strictly according to active_role and granted roles
+  // Render navigation strictly according to active_role, granted roles, and organisation memberships
   const activeRole = user.activeRole || (user.rawRoles && user.rawRoles[0]) || "BUYER";
-  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
-  const hasSeller = Boolean(user.rawRoles?.includes("SELLER") || activeRole === "SELLER");
-  const hasWorkshop = Boolean(user.rawRoles?.includes("WORKSHOP") || activeRole === "WORKSHOP");
+  const orgs = user.organisations || [];
+
+  // Platform Admin: superuser, backend role ADMIN, activeRole === 'ADMIN', or INTERNAL_OPS OWNER/ADMIN
+  const isPlatformAdmin =
+    Boolean(user.is_superuser) ||
+    activeRole === "ADMIN" ||
+    Boolean(user.rawRoles?.includes("ADMIN")) ||
+    orgs.some((o) => o.organisation_type === "INTERNAL_OPS" && (o.role === "OWNER" || o.role === "ADMIN"));
+
+  // Platform Staff: backend is_staff, role STAFF, activeRole === 'STAFF', or INTERNAL_OPS member (and not platform admin)
+  const isPlatformStaff =
+    !isPlatformAdmin &&
+    (Boolean(user.is_staff) ||
+      activeRole === "STAFF" ||
+      Boolean(user.rawRoles?.includes("STAFF")) ||
+      orgs.some((o) => o.organisation_type === "INTERNAL_OPS"));
+
+  // Check workshop membership across all organisations in user.organisations
+  const hasWorkshopOrg = orgs.some((o) => o.organisation_type === "WORKSHOP");
+  const isWorkshopOwnerOrAdmin = orgs.some(
+    (o) => o.organisation_type === "WORKSHOP" && (o.role === "OWNER" || o.role === "ADMIN")
+  );
+  const isWorkshopStaffOnly =
+    (hasWorkshopOrg && !isWorkshopOwnerOrAdmin) ||
+    (!isWorkshopOwnerOrAdmin && (activeRole === "TECHNICIAN" || user.staff_role?.code === "TECHNICIAN"));
+
+  const hasWorkshop = Boolean(
+    user.rawRoles?.includes("WORKSHOP") ||
+      activeRole === "WORKSHOP" ||
+      hasWorkshopOrg
+  );
+
+  // Check seller / dealership membership across all organisations
+  const hasSellerOrg = orgs.some((o) => o.organisation_type === "DEALER_GROUP");
+  const hasSeller = Boolean(
+    user.rawRoles?.includes("SELLER") ||
+      activeRole === "SELLER" ||
+      hasSellerOrg
+  );
 
   let roleNavItems: {
     id: string;
@@ -50,16 +86,33 @@ export default function Sidebar({
     badge?: string;
   }[] = [];
 
-  if (isAdmin) {
+  if (isPlatformAdmin) {
     roleNavItems = [
       { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
+      { id: "admin_workshop_oversight", label: "Workshop Oversight", icon: ClipboardCheck, badge: "Audit" },
       { id: "admin_staff_management", label: "Staff Invitations & Roles", icon: UserPlus, badge: "Admin" },
+      { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
       { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Management" },
+      { id: "profile", label: "My Profile", icon: User },
+    ];
+  } else if (isPlatformStaff) {
+    roleNavItems = [
+      { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
+      { id: "admin_workshop_oversight", label: "Workshop Oversight", icon: ClipboardCheck, badge: "Audit" },
+      { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
+      { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
+      { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
+      { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
+      { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
+      { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
+      { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Operations" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else if (hasSeller && hasWorkshop) {
@@ -68,20 +121,22 @@ export default function Sidebar({
       { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
       { id: "seller_orders", label: "Customer Orders", icon: Boxes, badge: "Orders" },
       { id: "workshop_landing", label: "Workshop Services", icon: Wrench, badge: "Workshop" },
+      { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "seller_onboarding", label: "Partner & Seller Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Workshop Teams", icon: Building2, badge: "Organisation" },
-      { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else if (hasSeller) {
-    // Seller-only: retain existing seller dashboard and features
+    // Seller-only: retain existing seller dashboard and features (plus buyer workshop booking)
     roleNavItems = [
       { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
       { id: "seller_orders", label: "Customer Orders", icon: Boxes, badge: "Orders" },
+      { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
@@ -91,11 +146,23 @@ export default function Sidebar({
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "profile", label: "My Profile", icon: User },
     ];
-  } else if (hasWorkshop) {
-    // Workshop-only: workshop-oriented navigation and landing view, not seller inventory
+  } else if (hasWorkshop && isWorkshopStaffOnly) {
+    // Workshop Staff / Technician: can work bookings and services; no catalogue orders or owner org admin
     roleNavItems = [
       { id: "workshop_landing", label: "Workshop Services", icon: Wrench, badge: "Workshop" },
-      { id: "seller_orders", label: "Customer Orders", icon: Boxes, badge: "Orders" },
+      { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
+      { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
+      { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
+      { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
+      { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
+      { id: "profile", label: "My Profile", icon: User },
+    ];
+  } else if (hasWorkshop) {
+    // Workshop Owner / Manager: workshop management without seller catalogue customer orders
+    roleNavItems = [
+      { id: "workshop_landing", label: "Workshop Services", icon: Wrench, badge: "Workshop" },
+      { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
@@ -109,15 +176,25 @@ export default function Sidebar({
     // Default: Buyer / Consumer (Search & Browse only)
     roleNavItems = [
       { id: "marketplace_browse", label: "Marketplace (Vehicles & Parts)", icon: ShoppingBag, badge: "Browse" },
+      { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "seller_onboarding", label: "Apply to sell / Apply as workshop", icon: FileCheck2, badge: "Apply" },
-      { id: "profile", label: "My Profile", icon: User },
       { id: "organisations", label: "Organisations & Teams", icon: Building2 },
+      { id: "profile", label: "My Profile", icon: User },
     ];
   }
+
+  // Active Context Label: supports multiple organisations
+  const contextName =
+    user.organizationName ||
+    (orgs.length > 0
+      ? orgs.length > 1
+        ? `${orgs[0].organisation_name} (+${orgs.length - 1} more)`
+        : orgs[0].organisation_name
+      : "Personal Garage");
 
   return (
     <aside
@@ -159,8 +236,8 @@ export default function Sidebar({
             <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
               Active Context
             </div>
-            <div className="text-xs font-bold text-white truncate mt-0.5">
-              {user.organizationName || "Personal Garage"}
+            <div className="text-xs font-bold text-white truncate mt-0.5" title={contextName}>
+              {contextName}
             </div>
             <div className="mt-1 flex items-center gap-1.5 text-[10px] text-amber-400 font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
