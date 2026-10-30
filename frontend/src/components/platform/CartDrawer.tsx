@@ -30,6 +30,7 @@ import {
   Package,
   CreditCard,
   Banknote,
+  Clock,
 } from "lucide-react";
 import { useCart, CartItem } from "@/context/CartContext";
 import {
@@ -128,6 +129,32 @@ const UK_REGIONS = [
   { code: "South West", name: "South West England" },
 ];
 
+function loadRazorpayScript(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined") {
+      resolve(false);
+      return;
+    }
+    if ((window as any).Razorpay) {
+      resolve(true);
+      return;
+    }
+    const existing = document.getElementById("razorpay-checkout-js");
+    if (existing) {
+      existing.addEventListener("load", () => resolve(true));
+      existing.addEventListener("error", () => resolve(false));
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "razorpay-checkout-js";
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
+
 export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerProps) {
   const { user } = useAuth();
   const {
@@ -164,6 +191,8 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
   // Authoritative calculation & order confirmation data
   const [calculation, setCalculation] = useState<AuthoritativeCalculation | null>(null);
   const [confirmedOrder, setConfirmedOrder] = useState<PlatformOrder | null>(null);
+  const [pendingSession, setPendingSession] = useState<any>(null);
+  const [isCancellingOrder, setIsCancellingOrder] = useState<boolean>(false);
 
   // Shipping Form State
   const [shippingForm, setShippingForm] = useState<ShippingFormData>({
@@ -226,6 +255,143 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       currency: newCurrency,
       place_of_supply: validRegion,
     });
+  };
+
+
+  const openRazorpayCheckout = async (order: PlatformOrder, session: any) => {
+    setIsVerifyingPayment(true);
+    setCheckoutError(null);
+
+    let activeSession = session;
+    if (activeSession && activeSession.is_available === false) {
+      setIsVerifyingPayment(false);
+      setIsSubmitting(false);
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError(activeSession.error || "Online payments are currently unavailable on this server.");
+      return;
+    }
+    if (!activeSession || !activeSession.provider_order_id) {
+      try {
+        const sessionRes = await api.marketplace.createPaymentSession(order.id);
+        if (sessionRes && sessionRes.payment_session) {
+          activeSession = sessionRes.payment_session;
+          setPendingSession(activeSession);
+        }
+      } catch (err: unknown) {
+        console.warn("Could not retrieve fresh payment session:", err);
+      }
+    }
+
+    const loaded = await loadRazorpayScript();
+    if (!loaded || !(window as any).Razorpay) {
+      setIsVerifyingPayment(false);
+      setIsSubmitting(false);
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError("Razorpay Checkout SDK could not be loaded directly. You can complete verification in test mode or retry.");
+      return;
+    }
+
+    try {
+      const options: any = {
+        key: activeSession?.key_id || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "rzp_test_placeholder_key",
+        amount: activeSession?.amount_minor || Math.round(Number(order.total_amount) * 100),
+        currency: activeSession?.currency || order.currency || "INR",
+        name: "DriverXtra Platform",
+        description: `Order ${order.order_number}`,
+        order_id: activeSession?.provider_order_id || order.payment_reference,
+        prefill: {
+          name: shippingForm.shipping_name || user?.fullName || "",
+          email: user?.email || "",
+          contact: shippingForm.shipping_phone || "",
+        },
+        notes: {
+          order_number: order.order_number,
+          order_id: order.id,
+        },
+        theme: {
+          color: "#f59e0b",
+        },
+        handler: async function (response: {
+          razorpay_payment_id: string;
+          razorpay_order_id: string;
+          razorpay_signature: string;
+        }) {
+          setIsVerifyingPayment(true);
+          setCheckoutError(null);
+          try {
+            const verifyRes = await api.marketplace.verifyPayment(order.id, {
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_signature: response.razorpay_signature,
+            });
+            if (verifyRes.status === "success" && verifyRes.order) {
+              clearCart(); // Cart cleared ONLY on verified success!
+              setIdempotencyKey("");
+              setConfirmedOrder(verifyRes.order);
+              setStep("confirmed");
+              setPaymentVerifiedSuccess("Online payment verified and confirmed via Razorpay!");
+            } else {
+              setCheckoutError(verifyRes.error || "Payment verification failed.");
+            }
+          } catch (err: unknown) {
+            setCheckoutError(err instanceof Error ? err.message : "Payment verification failed.");
+          } finally {
+            setIsVerifyingPayment(false);
+            setIsSubmitting(false);
+          }
+        },
+        modal: {
+          ondismiss: function () {
+            setIsSubmitting(false);
+            setIsVerifyingPayment(false);
+            setConfirmedOrder(order);
+            setStep("confirmed");
+            setCheckoutError("Payment was dismissed. Your items are safe in your cart. You can complete payment below or cancel.");
+          },
+        },
+      };
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.on("payment.failed", function (resp: any) {
+        setIsSubmitting(false);
+        setIsVerifyingPayment(false);
+        const desc = resp?.error?.description || "Payment failed or was declined.";
+        setConfirmedOrder(order);
+        setStep("confirmed");
+        setCheckoutError(`Payment failed: ${desc}. Please retry or choose another payment method.`);
+      });
+      rzp.open();
+    } catch (e: any) {
+      setIsSubmitting(false);
+      setIsVerifyingPayment(false);
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError(e?.message || "Failed to launch Razorpay modal. You can verify using test mode or retry.");
+    }
+  };
+
+  const handleCancelUnpaidOrder = async () => {
+    if (!confirmedOrder || isCancellingOrder) return;
+    setIsCancellingOrder(true);
+    setCheckoutError(null);
+    try {
+      const res = await api.marketplace.cancelPayment(confirmedOrder.id, "Payment cancelled by buyer.");
+      if (res.status === "success") {
+        setConfirmedOrder(null);
+        setPendingSession(null);
+        setIdempotencyKey("");
+        setStep("cart");
+        setPaymentVerifiedSuccess(null);
+      } else {
+        setCheckoutError(res.error || "Failed to cancel order.");
+      }
+    } catch (err: unknown) {
+      setCheckoutError(err instanceof Error ? err.message : "Failed to cancel order.");
+    } finally {
+      setIsCancellingOrder(false);
+    }
   };
 
   const handleSimulatePayment = async () => {
@@ -436,8 +602,11 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         const methods = res.available_payment_methods as PaymentMethodOption[];
         setAvailableMethods(methods);
         const cod = methods.find((m) => m.code === "COD");
+        const online = methods.find((m) => m.code === "ONLINE");
         if (cod && !cod.is_available && paymentMethod === "COD") {
           setPaymentMethod("ONLINE");
+        } else if (online && !online.is_available && paymentMethod === "ONLINE" && cod && cod.is_available) {
+          setPaymentMethod("COD");
         }
       }
 
@@ -503,11 +672,17 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       const res = await api.marketplace.checkout(payload);
 
       if (res.status === "success" && res.order) {
-        // Authoritative success confirmed by backend!
-        // Clear cart ONLY now!
-        clearCart();
-        setConfirmedOrder(res.order);
-        setStep("confirmed");
+        setPendingSession(res.payment_session);
+        if (paymentMethod === "COD") {
+          // COD order is immediately confirmed without online payment
+          clearCart();
+          setConfirmedOrder(res.order);
+          setStep("confirmed");
+        } else {
+          // ONLINE payment: keep cart until verified! Launch Razorpay checkout
+          setConfirmedOrder(res.order);
+          await openRazorpayCheckout(res.order, res.payment_session);
+        }
       } else {
         throw new Error(res.message || "Failed to create order.");
       }
@@ -1276,40 +1451,60 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
 
                 <div className="space-y-2">
                   {/* Online Payment */}
-                  <label
-                    className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
-                      paymentMethod === "ONLINE"
-                        ? "border-amber-500 bg-amber-50/50 shadow-xs ring-1 ring-amber-500"
-                        : "border-slate-200 hover:border-slate-300 bg-white"
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="checkoutPaymentMethod"
-                      value="ONLINE"
-                      checked={paymentMethod === "ONLINE"}
-                      onChange={() => setPaymentMethod("ONLINE")}
-                      className="mt-0.5 text-amber-600 focus:ring-amber-500"
-                    />
-                    <div className="flex-1 space-y-0.5 text-left">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                          <CreditCard className="w-3.5 h-3.5 text-slate-600" />
-                          {calculation.currency === "GBP"
-                            ? "Online Card Payment (Stripe)"
-                            : "Online Payment (Razorpay / UPI / NetBanking)"}
-                        </span>
-                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
-                          Instant
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-500">
-                        {calculation.currency === "GBP"
-                          ? "Secure card checkout via Stripe supporting UK debit/credit cards, Apple Pay, and Google Pay."
-                          : "Instant checkout via Razorpay supporting UPI, RuPay, Indian cards, and NetBanking."}
-                      </p>
-                    </div>
-                  </label>
+                  {(() => {
+                    const onlineOption = availableMethods.find((m) => m.code === "ONLINE");
+                    const isOnlineAvailable = onlineOption ? onlineOption.is_available : true;
+                    const onlineReason = onlineOption?.reason;
+
+                    return (
+                      <label
+                        className={`flex items-start gap-3 p-3 rounded-xl border transition-all ${
+                          !isOnlineAvailable
+                            ? "opacity-60 bg-slate-50 border-slate-200 cursor-not-allowed"
+                            : paymentMethod === "ONLINE"
+                            ? "border-amber-500 bg-amber-50/50 shadow-xs ring-1 ring-amber-500 cursor-pointer"
+                            : "border-slate-200 hover:border-slate-300 bg-white cursor-pointer"
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="checkoutPaymentMethod"
+                          value="ONLINE"
+                          disabled={!isOnlineAvailable}
+                          checked={paymentMethod === "ONLINE"}
+                          onChange={() => isOnlineAvailable && setPaymentMethod("ONLINE")}
+                          className="mt-0.5 text-amber-600 focus:ring-amber-500 disabled:cursor-not-allowed"
+                        />
+                        <div className="flex-1 space-y-0.5 text-left">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                              <CreditCard className="w-3.5 h-3.5 text-slate-600" />
+                              {calculation.currency === "GBP"
+                                ? "Online Card Payment (Stripe)"
+                                : "Online Payment (Razorpay / UPI / NetBanking)"}
+                            </span>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                isOnlineAvailable
+                                  ? "text-emerald-700 bg-emerald-100"
+                                  : "text-rose-700 bg-rose-100"
+                              }`}
+                            >
+                              {isOnlineAvailable ? "Instant" : "Unavailable"}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-500">
+                            {calculation.currency === "GBP"
+                              ? "Secure card checkout via Stripe supporting UK debit/credit cards, Apple Pay, and Google Pay."
+                              : "Instant checkout via Razorpay supporting UPI, RuPay, Indian cards, and NetBanking."}
+                          </p>
+                          {!isOnlineAvailable && onlineReason && (
+                            <p className="text-[10px] text-rose-600 font-semibold pt-0.5">{onlineReason}</p>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })()}
 
                   {/* Cash on Delivery (COD) */}
                   {(() => {
@@ -1371,15 +1566,29 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
           {step === "confirmed" && confirmedOrder && (
             <div className="space-y-5 text-center animate-in fade-in duration-300">
               <div className="py-6 flex flex-col items-center justify-center space-y-3">
-                <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shadow-inner">
-                  <CheckCircle2 className="w-10 h-10" />
+                <div
+                  className={`w-16 h-16 rounded-full flex items-center justify-center shadow-inner ${
+                    confirmedOrder.payment_status === "PAID" || confirmedOrder.payment_method === "COD"
+                      ? "bg-emerald-100 text-emerald-600"
+                      : "bg-amber-100 text-amber-600"
+                  }`}
+                >
+                  {confirmedOrder.payment_status === "PAID" || confirmedOrder.payment_method === "COD" ? (
+                    <CheckCircle2 className="w-10 h-10" />
+                  ) : (
+                    <Clock className="w-10 h-10" />
+                  )}
                 </div>
                 <div className="space-y-1 max-w-sm">
                   <h4 className="text-xl font-black text-slate-900 tracking-tight">
-                    Order Placed Successfully!
+                    {confirmedOrder.payment_status === "PAID" || confirmedOrder.payment_method === "COD"
+                      ? "Order Placed Successfully!"
+                      : "Payment Pending Confirmation"}
                   </h4>
                   <p className="text-xs text-slate-500">
-                    Your order has been recorded with DriverXtra. Authoritative inventory and transaction records have been generated.
+                    {confirmedOrder.payment_status === "PAID" || confirmedOrder.payment_method === "COD"
+                      ? "Your order has been recorded with DriverXtra. Authoritative inventory and transaction records have been generated."
+                      : "Your order has been created and stock is reserved. Please complete online payment to confirm your purchase."}
                   </p>
                 </div>
               </div>
@@ -1497,24 +1706,59 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
 
                 {confirmedOrder.payment_method === "ONLINE" && confirmedOrder.payment_status !== "PAID" && (
                   <div className="pt-2 border-t border-slate-200 space-y-2">
+                    {/* Primary Pay Now button (Razorpay / UPI) */}
                     <button
                       type="button"
-                      onClick={handleSimulatePayment}
-                      disabled={isVerifyingPayment}
-                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
+                      onClick={() => openRazorpayCheckout(confirmedOrder, pendingSession)}
+                      disabled={isVerifyingPayment || isCancellingOrder}
+                      className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
                     >
                       {isVerifyingPayment ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          <span>Verifying Payment with Provider...</span>
+                          <span>Launching Gateway / Verifying...</span>
                         </>
                       ) : (
                         <>
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>Complete Online Payment (Test Mode)</span>
+                          <CreditCard className="w-4 h-4" />
+                          <span>Pay Now via Razorpay / UPI</span>
                         </>
                       )}
                     </button>
+
+                    {/* Test Mode Simulation button (visible in test mode / development) */}
+                    {(pendingSession?.is_test_mode !== false) && (
+                      <button
+                        type="button"
+                        onClick={handleSimulatePayment}
+                        disabled={isVerifyingPayment || isCancellingOrder}
+                        className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-xs cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Complete Online Payment (Test Mode)</span>
+                      </button>
+                    )}
+
+                    {/* Cancel Unpaid Order button (Restores inventory & keeps cart) */}
+                    <button
+                      type="button"
+                      onClick={handleCancelUnpaidOrder}
+                      disabled={isVerifyingPayment || isCancellingOrder}
+                      className="w-full py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isCancellingOrder ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Cancelling & Restoring Items...</span>
+                        </>
+                      ) : (
+                        <>
+                          <X className="w-3.5 h-3.5" />
+                          <span>Cancel Order & Restore Items</span>
+                        </>
+                      )}
+                    </button>
+
                     {paymentVerifiedSuccess && (
                       <p className="text-[11px] text-emerald-700 font-bold text-center">
                         ✓ {paymentVerifiedSuccess}

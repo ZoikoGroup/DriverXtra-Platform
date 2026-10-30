@@ -1,17 +1,24 @@
-import hmac
+import base64
 import hashlib
+import hmac
 import json
+import logging
+import urllib.error
+import urllib.request
 import uuid
 from decimal import Decimal
-from typing import Dict, Any, Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
 from django.conf import settings
 from apps.marketplace.payments.base import BasePaymentProvider
+
+logger = logging.getLogger(__name__)
 
 
 class RazorpayPaymentProvider(BasePaymentProvider):
     """
     Razorpay integration tailored for India (INR) domestic payments:
-    Supports UPI, RuPay/Visa/MasterCard domestic cards, NetBanking, and Wallets.
+    Supports UPI (Google Pay, PhonePe, Paytm, BHIM, QR, VPA),
+    RuPay/Visa/MasterCard domestic and international cards, NetBanking, and Wallets.
     All monetary amounts are strictly represented in integer paise.
     """
     provider_name = 'RAZORPAY'
@@ -20,7 +27,32 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         self.key_id = getattr(settings, 'RAZORPAY_KEY_ID', 'rzp_test_placeholder_key')
         self.key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', 'rzp_test_placeholder_secret')
         self.webhook_secret = getattr(settings, 'RAZORPAY_WEBHOOK_SECRET', 'rzp_test_webhook_secret')
+        self.api_url = getattr(settings, 'RAZORPAY_API_URL', 'https://api.razorpay.com/v1').rstrip('/')
         self.test_mode = self._is_test_mode_allowed()
+
+    @property
+    def is_configured(self) -> bool:
+        """Indicates whether genuine (non-placeholder) Razorpay API credentials are configured."""
+        if not self.key_id or not self.key_secret:
+            return False
+        clean_key = self.key_id.strip().lower()
+        clean_secret = self.key_secret.strip().lower()
+        placeholder_keys = {
+            'rzp_test_placeholder_key',
+            'rzp_test_placeholder',
+            'rzp_test_mock_key',
+            'placeholder',
+        }
+        placeholder_secrets = {
+            'rzp_test_placeholder_secret',
+            'rzp_test_placeholder',
+            'rzp_test_mock_secret',
+            'test_secret',
+            'placeholder',
+        }
+        if clean_key in placeholder_keys or clean_secret in placeholder_secrets:
+            return False
+        return len(clean_key) >= 10 and len(clean_secret) >= 10
 
     @staticmethod
     def _is_test_mode_allowed() -> bool:
@@ -46,18 +78,92 @@ class RazorpayPaymentProvider(BasePaymentProvider):
     ) -> Dict[str, Any]:
         """
         Creates an authoritative Razorpay order session.
-        In test mode or mock settings, creates a deterministic test order ID.
-        In production, live Razorpay payments remain disabled until live gateway credentials
-        and server-to-server order creation are configured.
+        If live or test Razorpay credentials are configured, makes an authentic HTTP API call
+        to https://api.razorpay.com/v1/orders to register the order with Razorpay.
+        In isolated test mode with placeholder keys, generates a deterministic test order ID.
+        In production without configured credentials, raises a descriptive RuntimeError.
         """
         if order.currency != 'INR':
             raise ValueError(f"Razorpay provider only supports INR transactions; received '{order.currency}'.")
 
         amount_paise = self._to_paise(order.total_amount)
         receipt_id = f"rcpt_{order.order_number}"
+        buyer = order.buyer
+        customer_name = (
+            getattr(order, 'shipping_name', '').strip()
+            or (buyer.get_full_name() if hasattr(buyer, 'get_full_name') else '')
+            or getattr(buyer, 'username', '')
+            or 'Valued Customer'
+        )
+        customer_email = getattr(buyer, 'email', '')
+        customer_contact = getattr(order, 'shipping_phone', '').strip() or getattr(buyer, 'phone_number', '') or ''
 
+        notes_dict = {
+            "order_number": order.order_number,
+            "order_id": str(order.id),
+            "buyer_email": customer_email,
+            "currency": "INR",
+        }
+
+        # Attempt live/sandbox Razorpay Orders API call if credentials are configured
+        if self.is_configured:
+            create_order_url = f"{self.api_url}/orders"
+            payload_data = {
+                "amount": amount_paise,
+                "currency": "INR",
+                "receipt": receipt_id,
+                "notes": notes_dict,
+                "payment_capture": 1,
+            }
+            body_bytes = json.dumps(payload_data).encode('utf-8')
+            auth_str = f"{self.key_id}:{self.key_secret}"
+            auth_header = base64.b64encode(auth_str.encode('utf-8')).decode('ascii')
+
+            req = urllib.request.Request(
+                create_order_url,
+                data=body_bytes,
+                headers={
+                    "Authorization": f"Basic {auth_header}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "DriverXtra-Platform/1.0",
+                },
+                method="POST",
+            )
+
+            try:
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    raw_json = json.loads(response.read().decode('utf-8'))
+                    provider_order_id = raw_json.get('id')
+                    logger.info("Successfully created Razorpay order %s for DriverXtra order %s", provider_order_id, order.order_number)
+                    return {
+                        "provider": self.provider_name,
+                        "provider_order_id": provider_order_id,
+                        "amount": str(order.total_amount),
+                        "amount_minor": amount_paise,
+                        "currency": "INR",
+                        "key_id": self.key_id,
+                        "receipt": receipt_id,
+                        "customer_name": customer_name,
+                        "customer_email": customer_email,
+                        "customer_contact": customer_contact,
+                        "notes": notes_dict,
+                        "is_test_mode": self.test_mode,
+                        "raw_order": raw_json,
+                    }
+            except urllib.error.HTTPError as http_err:
+                err_text = http_err.read().decode('utf-8', errors='replace')
+                logger.error("Razorpay Orders API error HTTP %s: %s", http_err.code, err_text)
+                if not self.test_mode:
+                    raise RuntimeError(f"Razorpay Orders API rejected order creation (HTTP {http_err.code}): {err_text}")
+                logger.warning("Falling back to deterministic test session in test mode due to Razorpay HTTP error.")
+            except Exception as exc:
+                logger.error("Failed to connect to Razorpay API: %s", str(exc))
+                if not self.test_mode:
+                    raise RuntimeError(f"Failed to communicate with Razorpay API: {str(exc)}")
+                logger.warning("Falling back to deterministic test session in test mode due to connection error.")
+
+        # Test mode fallback for offline development or automated tests without live network
         if self.test_mode:
-            # Standard simulated / test-mode order generation
             order_id = f"order_rzp_{uuid.uuid4().hex[:14]}"
             return {
                 "provider": self.provider_name,
@@ -67,19 +173,17 @@ class RazorpayPaymentProvider(BasePaymentProvider):
                 "currency": "INR",
                 "key_id": self.key_id,
                 "receipt": receipt_id,
-                "notes": {
-                    "order_number": order.order_number,
-                    "order_id": str(order.id),
-                    "buyer_email": order.buyer.email,
-                },
+                "customer_name": customer_name,
+                "customer_email": customer_email,
+                "customer_contact": customer_contact,
+                "notes": notes_dict,
                 "is_test_mode": True,
             }
 
-        # Real gateway integration check:
-        # Live Razorpay payments are disabled until genuine API credentials and SDK integration are configured.
+        # Production error when credentials are not configured
         raise RuntimeError(
-            "Live Razorpay online payments are currently disabled. Real gateway order creation "
-            "requires live Razorpay credentials (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET) and official API integration."
+            "Live Razorpay online payments require configured credentials. "
+            "Please configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in the server environment."
         )
 
     def verify_payment(

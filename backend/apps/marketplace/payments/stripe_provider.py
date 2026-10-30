@@ -22,6 +22,16 @@ class StripePaymentProvider(BasePaymentProvider):
         self.webhook_secret = getattr(settings, 'STRIPE_WEBHOOK_SECRET', 'whsec_test_placeholder_secret')
         self.test_mode = self._is_test_mode_allowed()
 
+    @property
+    def is_configured(self) -> bool:
+        """Indicates whether genuine (non-placeholder) Stripe credentials are configured."""
+        if not self.secret_key or not self.publishable_key:
+            return False
+        clean_secret = self.secret_key.strip().lower()
+        if 'placeholder' in clean_secret or 'sk_test_mock' in clean_secret:
+            return False
+        return len(clean_secret) >= 10 and clean_secret.startswith(('sk_live_', 'sk_test_'))
+
     @staticmethod
     def _is_test_mode_allowed() -> bool:
         """

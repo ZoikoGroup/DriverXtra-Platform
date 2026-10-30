@@ -1,4 +1,5 @@
 import os
+import datetime
 import uuid
 import logging
 from django.conf import settings
@@ -1828,6 +1829,12 @@ class OrderCheckoutView(views.APIView):
 
         buyer = request.user
 
+        # Auto-expire stale abandoned online orders to release held stock
+        try:
+            PaymentService.expire_stale_pending_orders()
+        except Exception as exc:
+            logger.warning("Could not auto-expire stale orders: %s", str(exc))
+
         # 1. Idempotency Guard (early replay check)
         idempotency_key = (
             request.headers.get('Idempotency-Key')
@@ -1840,7 +1847,11 @@ class OrderCheckoutView(views.APIView):
             if existing_order:
                 payment_session = None
                 if existing_order.payment_method == PaymentMethodChoices.ONLINE and existing_order.payment_status != PaymentStatusChoices.PAID:
-                    payment_session = PaymentService.create_payment_session(existing_order)
+                    try:
+                        payment_session = PaymentService.create_payment_session(existing_order)
+                    except Exception as exc:
+                        logger.warning("Could not create payment session during idempotency replay: %s", str(exc))
+                        payment_session = {"error": str(exc), "is_available": False}
                 return Response(
                     {
                         "status": "success",
@@ -2098,6 +2109,8 @@ class OrderCheckoutView(views.APIView):
                             status=status.HTTP_400_BAD_REQUEST,
                         )
 
+
+
                 # 5. Authoritative Price / Tax Change Guard
                 expected_total = data.get('expected_total_amount')
                 if expected_total is not None:
@@ -2249,6 +2262,10 @@ class BuyerOrderListView(generics.ListAPIView):
 
     def get_queryset(self):
         from apps.marketplace.models import Order
+        try:
+            PaymentService.expire_stale_pending_orders()
+        except Exception as exc:
+            logger.warning("Could not auto-expire stale orders on order list: %s", str(exc))
         return Order.objects.filter(buyer=self.request.user).prefetch_related('items__listing__seller').order_by('-created_at')
 
 
@@ -2871,6 +2888,10 @@ class OrderPaymentSessionCreateView(views.APIView):
                 "order_number": order.order_number,
                 "payment_session": session_data,
             }, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except RuntimeError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except Exception as exc:
             return Response({"error": f"Failed to initialize payment session: {str(exc)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -3011,6 +3032,47 @@ class OrderPaymentSimulateTestView(views.APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
 
+
+
+class OrderPaymentCancelView(views.APIView):
+    """
+    Cancels an unpaid online order, halts payment collection, and restores
+    held items back to seller stock immediately.
+    POST /api/v1/marketplace/orders/<identifier>/payment/cancel/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        from apps.marketplace.serializers import OrderSerializer
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_staff = request.user.is_staff or request.user.is_superuser or request.user.has_role('STAFF') or request.user.has_role('ADMIN')
+        if order.buyer_id != request.user.id and not is_staff:
+            return Response({"error": "You do not have permission to cancel payment for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        reason = str(request.data.get('reason', 'Payment cancelled by buyer')).strip()
+        success, message, extra = PaymentService.cancel_unpaid_order(
+            order=order,
+            actor=request.user,
+            reason=reason,
+        )
+
+        if success:
+            order.refresh_from_db()
+            return Response({
+                "status": "success",
+                "message": message,
+                "order": OrderSerializer(order).data,
+                "extra": extra,
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "status": "failed",
+                "error": message,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
 class PaymentWebhookView(views.APIView):
     """
     Ingests and validates webhooks from payment gateways (Razorpay / Stripe)
@@ -3095,6 +3157,12 @@ class OrderPaymentDetailView(views.APIView):
 
         if not (is_staff or is_buyer or is_seller):
             return Response({"error": "You do not have permission to view payment details for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        if order.payment_method == PaymentMethodChoices.ONLINE and order.payment_status == PaymentStatusChoices.PENDING:
+            expiry_minutes = getattr(settings, 'PAYMENT_EXPIRY_MINUTES', 30)
+            if order.created_at and order.created_at < timezone.now() - datetime.timedelta(minutes=expiry_minutes):
+                PaymentService.cancel_unpaid_order(order, reason=f"Order payment window ({expiry_minutes} mins) expired.")
+                order.refresh_from_db()
 
         transactions = PaymentTransaction.objects.filter(order=order).order_by('-created_at')
         tx_data = [

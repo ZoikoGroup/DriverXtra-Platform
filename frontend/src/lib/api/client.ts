@@ -276,7 +276,34 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
         message = fieldErrors.join("; ");
       }
     } else if (typeof data === "string") {
-      message = data;
+      const trimmed = data.trim();
+      if (
+        trimmed.startsWith("<!DOCTYPE") ||
+        trimmed.startsWith("<html") ||
+        trimmed.includes("<body") ||
+        trimmed.includes("Traceback (most recent call last):")
+      ) {
+        // Sanitize raw Django HTML error tracebacks
+        const excMatch = trimmed.match(/<pre class="exception_value">([^<]+)<\/pre>/i);
+        const titleMatch = trimmed.match(/<title>([^<]+)<\/title>/i);
+        if (excMatch && excMatch[1]) {
+          message = `Server Error: ${excMatch[1].replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim()}`;
+        } else if (titleMatch && titleMatch[1]) {
+          message = `Server Error: ${titleMatch[1].trim()}`;
+        } else {
+          message = `Server error (${response.status}). The requested operation could not be completed.`;
+        }
+      } else {
+        message = data;
+      }
+    }
+
+    // Guard against any lingering HTML markup in error messages
+    if (typeof message === "string" && message.includes("<")) {
+      message = message.replace(/<[^>]*>/g, "").trim();
+    }
+    if (!message) {
+      message = `Server error (${response.status}).`;
     }
 
     throw new ApiError(message, response.status, details);
@@ -1378,6 +1405,27 @@ export const api = {
       }>(`/marketplace/orders/${identifier}/payment/simulate/`, {
         method: "POST",
         requiresAuth: true,
+      });
+    },
+
+    async cancelPayment(
+      identifier: string,
+      reason?: string
+    ): Promise<{
+      status: string;
+      message: string;
+      order?: PlatformOrder;
+      error?: string;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        order?: PlatformOrder;
+        error?: string;
+      }>(`/marketplace/orders/${identifier}/payment/cancel/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
       });
     },
 

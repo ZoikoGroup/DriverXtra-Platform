@@ -1137,3 +1137,233 @@ class TestPaymentSecurityHardeningAndWebhookSettlement:
         ).count()
         assert notifs_after_third == 1, "Subsequent webhook event on settled order must not duplicate notifications!"
 
+
+
+# =============================================================================
+# Phase 5: Complete Payment System Verification Suite
+# =============================================================================
+
+@pytest.mark.django_db
+class TestCompletePaymentSystemImplementation:
+    from apps.marketplace.models import StockMovementReasonChoices
+    from django.utils import timezone
+    import datetime
+    """
+    Validates the end-to-end payment workflow:
+    - Stock reservation & restoration upon cancellation or timeout
+    - Expiration of abandoned orders
+    - Duplicate request & double-deduction prevention
+    - Real Razorpay order creation integration
+    - UPI availability through Razorpay
+    - Strict payment verification & security checks
+    """
+
+    def test_online_order_cancellation_restores_stock(self, buyer_auth_client, in_part):
+        from apps.marketplace.models import StockMovementReasonChoices
+        initial_stock = in_part.stock_quantity
+        assert initial_stock >= 5
+
+        # 1. Place online order for 2 units
+        payload = valid_india_shipping_payload(in_part.id, quantity=2)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        assert res.status_code == status.HTTP_201_CREATED
+        order_data = res.json()["order"]
+        order_id = order_data["id"]
+
+        in_part.refresh_from_db()
+        assert in_part.stock_quantity == initial_stock - 2
+
+        # 2. Cancel unpaid order via new cancellation endpoint
+        cancel_res = buyer_auth_client.post(
+            f"/api/v1/marketplace/orders/{order_id}/payment/cancel/",
+            {"reason": "Buyer changed mind before payment"},
+            format="json",
+        )
+        assert cancel_res.status_code == status.HTTP_200_OK
+        assert cancel_res.json()["status"] == "success"
+
+        # 3. Verify order and payment status
+        order = Order.objects.get(id=order_id)
+        assert order.status == OrderStatusChoices.CANCELLED
+        assert order.payment_status == PaymentStatusChoices.CANCELLED
+
+        # 4. Verify stock is restored
+        in_part.refresh_from_db()
+        assert in_part.stock_quantity == initial_stock
+
+        # 5. Verify StockMovement ledger
+        last_movement = in_part.stock_movements.order_by("-created_at").first()
+        assert last_movement.reason == StockMovementReasonChoices.RETURN
+        assert last_movement.delta == 2
+
+    def test_cannot_cancel_already_paid_order_via_payment_cancel(self, buyer_auth_client, in_part):
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_id = res.json()["order"]["id"]
+
+        # Mark order as PAID
+        order = Order.objects.get(id=order_id)
+        order.payment_status = PaymentStatusChoices.PAID
+        order.save(update_fields=["payment_status"])
+
+        # Attempt to cancel unpaid payment
+        cancel_res = buyer_auth_client.post(
+            f"/api/v1/marketplace/orders/{order_id}/payment/cancel/",
+            {"reason": "Should not be allowed"},
+            format="json",
+        )
+        assert cancel_res.status_code == status.HTTP_400_BAD_REQUEST
+        assert "already been paid" in cancel_res.json()["error"]
+
+    def test_auto_expire_stale_pending_online_orders(self, buyer_auth_client, in_part):
+        from django.utils import timezone
+        import datetime
+        from apps.marketplace.payments.service import PaymentService
+        initial_stock = in_part.stock_quantity
+        payload = valid_india_shipping_payload(in_part.id, quantity=2)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_id = res.json()["order"]["id"]
+
+        in_part.refresh_from_db()
+        assert in_part.stock_quantity == initial_stock - 2
+
+        # Simulate order being created 45 minutes ago
+        order = Order.objects.get(id=order_id)
+        past_time = timezone.now() - datetime.timedelta(minutes=45)
+        Order.objects.filter(id=order_id).update(created_at=past_time)
+
+        # Run expiration worker
+        expired_count = PaymentService.expire_stale_pending_orders(max_age_minutes=30)
+        assert expired_count >= 1
+
+        order.refresh_from_db()
+        assert order.status == OrderStatusChoices.CANCELLED
+        assert order.payment_status == PaymentStatusChoices.CANCELLED
+
+        in_part.refresh_from_db()
+        assert in_part.stock_quantity == initial_stock
+
+    def test_expired_order_rejects_payment_session_creation(self, buyer_auth_client, in_part):
+        from django.utils import timezone
+        import datetime
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_id = res.json()["order"]["id"]
+
+        # Simulate order being older than 30 mins
+        past_time = timezone.now() - datetime.timedelta(minutes=45)
+        Order.objects.filter(id=order_id).update(created_at=past_time)
+
+        session_res = buyer_auth_client.post(f"/api/v1/marketplace/orders/{order_id}/payment/create/")
+        assert session_res.status_code == status.HTTP_400_BAD_REQUEST
+        assert "expired" in session_res.json()["error"].lower()
+
+    def test_idempotency_key_prevents_duplicate_orders_and_stock_deduction(self, buyer_auth_client, in_part):
+        initial_stock = in_part.stock_quantity
+        idem_key = f"idem-key-{uuid.uuid4().hex[:12]}"
+        payload = valid_india_shipping_payload(in_part.id, quantity=2)
+        payload["idempotency_key"] = idem_key
+
+        # First checkout attempt
+        res1 = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            payload,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=idem_key,
+        )
+        assert res1.status_code == status.HTTP_201_CREATED
+        order_num = res1.json()["order"]["order_number"]
+
+        in_part.refresh_from_db()
+        assert in_part.stock_quantity == initial_stock - 2
+
+        # Second checkout attempt with identical idempotency key
+        res2 = buyer_auth_client.post(
+            "/api/v1/marketplace/orders/checkout/",
+            payload,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY=idem_key,
+        )
+        assert res2.status_code == status.HTTP_200_OK
+        assert res2.json().get("replayed") is True
+        assert res2.json()["order"]["order_number"] == order_num
+
+        # Stock must NOT be deducted again!
+        in_part.refresh_from_db()
+        assert in_part.stock_quantity == initial_stock - 2
+
+    def test_upi_and_razorpay_surfaced_in_payment_methods(self, buyer_auth_client):
+        res = buyer_auth_client.get(
+            "/api/v1/marketplace/orders/payment-methods/?country=India&currency=INR&amount=2500.00"
+        )
+        assert res.status_code == status.HTTP_200_OK
+        methods = res.json()["payment_methods"]
+
+        online_method = next((m for m in methods if m["provider"] == "RAZORPAY"), None)
+        assert online_method is not None
+        assert "UPI" in online_method["name"]
+        assert "UPI" in online_method["description"]
+
+    def test_razorpay_order_creation_live_api_integration(self, in_part, buyer_auth_client, monkeypatch):
+        import io
+        import urllib.request
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+        # Configure real-looking mock credentials
+        monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_real_live_mock_key")
+        monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "rzp_test_real_live_mock_secret")
+
+        provider = RazorpayPaymentProvider()
+        assert provider.is_configured is True
+
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order = Order.objects.get(id=res.json()["order"]["id"])
+
+        mock_response_body = json.dumps({
+            "id": "order_live_rzp_mocked_987654",
+            "entity": "order",
+            "amount": int(round(order.total_amount * 100)),
+            "currency": "INR",
+            "status": "created",
+            "receipt": f"rcpt_{order.order_number}",
+        }).encode("utf-8")
+
+        class MockHTTPResponse(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        def mock_urlopen(req, timeout=10):
+            assert req.get_method() == "POST"
+            assert "https://api.razorpay.com/v1/orders" in req.full_url
+            assert "Basic " in req.headers.get("Authorization")
+            return MockHTTPResponse(mock_response_body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+        session = provider.create_payment_session(order)
+        assert session["provider_order_id"] == "order_live_rzp_mocked_987654"
+        assert session["currency"] == "INR"
+        assert session["amount_minor"] == int(round(order.total_amount * 100))
+        assert session["key_id"] == "rzp_test_real_live_mock_key"
+
+    def test_payment_verification_rejects_mismatched_session(self, buyer_auth_client, in_part):
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order_id = res.json()["order"]["id"]
+        order = Order.objects.get(id=order_id)
+
+        # Send mismatched razorpay_order_id
+        verify_res = buyer_auth_client.post(
+            f"/api/v1/marketplace/orders/{order_id}/payment/verify/",
+            {
+                "razorpay_order_id": "order_fabricated_does_not_match",
+                "razorpay_payment_id": "pay_test_123",
+                "razorpay_signature": "mock_sig_123",
+            },
+            format="json",
+        )
+        assert verify_res.status_code == status.HTTP_400_BAD_REQUEST
+        assert "does not match the active session" in verify_res.json()["error"]
