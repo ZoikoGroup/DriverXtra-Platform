@@ -3034,6 +3034,46 @@ class OrderPaymentSimulateTestView(views.APIView):
 
 
 
+
+class OrderPaymentFailedView(views.APIView):
+    """
+    Records a client-side payment failure reported by gateway callback (e.g. Razorpay modal failure).
+    POST /api/v1/marketplace/orders/<identifier>/payment/failed/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        order = _resolve_order_by_identifier(identifier)
+        if not order:
+            return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_staff = request.user.is_staff or request.user.is_superuser or request.user.has_role('STAFF') or request.user.has_role('ADMIN')
+        if order.buyer_id != request.user.id and not is_staff:
+            return Response({"error": "You do not have permission to report payment failure for this order."}, status=status.HTTP_403_FORBIDDEN)
+
+        reason = str(request.data.get('reason') or request.data.get('error_description') or 'Payment failed or declined').strip()
+        payment_id = str(request.data.get('payment_id') or request.data.get('razorpay_payment_id') or '').strip()
+
+        success, message, extra = PaymentService.record_payment_failure(
+            order=order,
+            actor=request.user,
+            reason=reason,
+            provider_transaction_id=payment_id,
+            extra_details=request.data,
+        )
+
+        if success:
+            order.refresh_from_db()
+            return Response({
+                "status": "success",
+                "message": message,
+                "payment_status": order.payment_status,
+                "order": OrderSerializer(order).data,
+                "extra": extra,
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": message}, status=status.HTTP_400_BAD_REQUEST)
+
 class OrderPaymentCancelView(views.APIView):
     """
     Cancels an unpaid online order, halts payment collection, and restores

@@ -31,6 +31,9 @@ urlpatterns = [
 
     # Notifications: in-app notifications generated from audit events
     path('api/v1/', include('apps.notifications.urls')),
+
+    # Phase 6: Workshop Services, Bookings & Quotations
+    path('api/v1/workshops/', include('apps.workshops.urls')),
 ]
 
 # Serve media files in development / test environments
