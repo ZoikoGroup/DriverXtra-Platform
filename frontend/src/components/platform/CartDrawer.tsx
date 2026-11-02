@@ -141,8 +141,12 @@ function loadRazorpayScript(): Promise<boolean> {
     }
     const existing = document.getElementById("razorpay-checkout-js");
     if (existing) {
-      existing.addEventListener("load", () => resolve(true));
-      existing.addEventListener("error", () => resolve(false));
+      if ((window as any).Razorpay) {
+        resolve(true);
+      } else {
+        existing.addEventListener("load", () => resolve(true));
+        existing.addEventListener("error", () => resolve(false));
+      }
       return;
     }
     const script = document.createElement("script");
@@ -313,6 +317,32 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         theme: {
           color: "#f59e0b",
         },
+        config: {
+          display: {
+            blocks: {
+              upi: {
+                name: "Pay via UPI",
+                instruments: [
+                  {
+                    method: "upi",
+                  },
+                ],
+              },
+              other: {
+                name: "Cards, NetBanking & Wallets",
+                instruments: [
+                  { method: "card" },
+                  { method: "netbanking" },
+                  { method: "wallet" },
+                ],
+              },
+            },
+            sequence: ["block.upi", "block.other"],
+            preferences: {
+              show_default_blocks: true,
+            },
+          },
+        },
         handler: async function (response: {
           razorpay_payment_id: string;
           razorpay_order_id: string;
@@ -325,6 +355,8 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_order_id: response.razorpay_order_id,
               razorpay_signature: response.razorpay_signature,
+              amount: order.total_amount,
+              currency: order.currency,
             });
             if (verifyRes.status === "success" && verifyRes.order) {
               clearCart(); // Cart cleared ONLY on verified success!
@@ -343,21 +375,34 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
           }
         },
         modal: {
+          confirm_close: true,
           ondismiss: function () {
             setIsSubmitting(false);
             setIsVerifyingPayment(false);
             setConfirmedOrder(order);
             setStep("confirmed");
-            setCheckoutError("Payment was dismissed. Your items are safe in your cart. You can complete payment below or cancel.");
+            setCheckoutError("Payment checkout was cancelled or dismissed. Your order is pending payment and stock is reserved. You can complete payment below or cancel the order to restore items.");
           },
         },
       };
 
       const rzp = new (window as any).Razorpay(options);
-      rzp.on("payment.failed", function (resp: any) {
+      rzp.on("payment.failed", async function (resp: any) {
         setIsSubmitting(false);
         setIsVerifyingPayment(false);
         const desc = resp?.error?.description || "Payment failed or was declined.";
+        const payId = resp?.error?.metadata?.payment_id || resp?.error?.payment_id || "";
+        const code = resp?.error?.code || "";
+        try {
+          await api.marketplace.reportPaymentFailure(order.id, {
+            reason: desc,
+            error_description: desc,
+            payment_id: payId,
+            error_code: code,
+          });
+        } catch (failErr) {
+          console.warn("Could not report payment failure to server:", failErr);
+        }
         setConfirmedOrder(order);
         setStep("confirmed");
         setCheckoutError(`Payment failed: ${desc}. Please retry or choose another payment method.`);
@@ -368,7 +413,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       setIsVerifyingPayment(false);
       setConfirmedOrder(order);
       setStep("confirmed");
-      setCheckoutError(e?.message || "Failed to launch Razorpay modal. You can verify using test mode or retry.");
+      setCheckoutError(e?.message || "Failed to launch Razorpay Checkout. Please check your network connection and retry.");
     }
   };
 
@@ -1726,18 +1771,18 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                       )}
                     </button>
 
-                    {/* Test Mode Simulation button (visible in test mode / development) */}
-                    {(pendingSession?.is_test_mode !== false) && (
-                      <button
-                        type="button"
-                        onClick={handleSimulatePayment}
-                        disabled={isVerifyingPayment || isCancellingOrder}
-                        className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-xs cursor-pointer"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>Complete Online Payment (Test Mode)</span>
-                      </button>
+                    {pendingSession?.methods_info && !pendingSession.methods_info.upi && pendingSession.methods_info.upi_intent && (
+                      <div className="text-[11px] text-amber-800 bg-amber-50 p-2.5 rounded-xl border border-amber-200 space-y-1">
+                        <div className="font-bold flex items-center gap-1.5">
+                          <span>📱 UPI Intent Active</span>
+                        </div>
+                        <p className="text-[10px] text-amber-700 leading-normal">
+                          UPI Intent is enabled for mobile checkouts (Google Pay, PhonePe, Paytm). For desktop QR &amp; VPA testing, enable UPI under <strong>Account &amp; Settings &rarr; Payment Methods</strong> in your Razorpay Dashboard.
+                        </p>
+                      </div>
                     )}
+
+
 
                     {/* Cancel Unpaid Order button (Restores inventory & keeps cart) */}
                     <button

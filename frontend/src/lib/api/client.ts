@@ -88,7 +88,8 @@ export const tokenStorage = {
 
 function getBaseUrl(): string {
   if (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL.replace(/\/+$/, "");
+    const raw = process.env.NEXT_PUBLIC_API_URL.trim().replace(/\/+$/, "");
+    return raw.endsWith("/api/v1") ? raw : `${raw}/api/v1`;
   }
   return DEFAULT_BASE_URL;
 }
@@ -1408,6 +1409,35 @@ export const api = {
       });
     },
 
+    async reportPaymentFailure(
+      identifier: string,
+      details?: {
+        reason?: string;
+        error_description?: string;
+        payment_id?: string;
+        error_code?: string;
+        [key: string]: unknown;
+      }
+    ): Promise<{
+      status: string;
+      message: string;
+      payment_status?: string;
+      order?: PlatformOrder;
+      extra?: Record<string, unknown>;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        payment_status?: string;
+        order?: PlatformOrder;
+        extra?: Record<string, unknown>;
+      }>(`/marketplace/orders/${identifier}/payment/failed/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(details || {}),
+      });
+    },
+
     async cancelPayment(
       identifier: string,
       reason?: string
@@ -2212,6 +2242,245 @@ export const api = {
       });
     },
   },
+
+  workshops: {
+    async list(params?: { city?: string; q?: string; accepting_only?: boolean }): Promise<{ results: WorkshopProfilePublic[]; count: number }> {
+      const query = new URLSearchParams();
+      if (params?.city) query.set("city", params.city);
+      if (params?.q) query.set("q", params.q);
+      if (params?.accepting_only) query.set("accepting_only", "true");
+      const qs = query.toString();
+      const res = await apiRequest<{ results: WorkshopProfilePublic[]; count: number } | WorkshopProfilePublic[]>(`/workshops/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+      if (Array.isArray(res)) {
+        return { results: res, count: res.length };
+      }
+      return res;
+    },
+
+    async get(idOrSlug: string): Promise<WorkshopProfilePublic> {
+      return apiRequest<WorkshopProfilePublic>(`/workshops/${idOrSlug}/`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+
+    async getCategories(): Promise<WorkshopServiceCategory[]> {
+      const res = await apiRequest<{ results: WorkshopServiceCategory[] } | WorkshopServiceCategory[]>("/workshops/categories/", {
+        method: "GET",
+        requiresAuth: false,
+      });
+      return Array.isArray(res) ? res : res.results;
+    },
+
+    async createBooking(data: {
+      workshop_id: string;
+      vehicle_id: string;
+      service_ids?: string[];
+      preferred_date: string;
+      preferred_time_slot?: string;
+      customer_notes?: string;
+      reported_faults?: string;
+    }): Promise<WorkshopBooking> {
+      return apiRequest<WorkshopBooking>("/workshops/bookings/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async listMyBookings(params?: { status?: string }): Promise<{ results: WorkshopBooking[]; count: number }> {
+      const query = new URLSearchParams();
+      if (params?.status) query.set("status", params.status);
+      const qs = query.toString();
+      return apiRequest<{ results: WorkshopBooking[]; count: number }>(`/workshops/bookings/my/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getMyBooking(id: string): Promise<WorkshopBooking> {
+      return apiRequest<WorkshopBooking>(`/workshops/bookings/my/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async cancelMyBooking(id: string, reason: string): Promise<WorkshopBooking> {
+      return apiRequest<WorkshopBooking>(`/workshops/bookings/my/${id}/cancel/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
+      });
+    },
+
+    async acceptQuotation(id: string): Promise<WorkshopQuotation> {
+      return apiRequest<WorkshopQuotation>(`/workshops/quotations/${id}/accept/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async rejectQuotation(id: string, rejection_reason?: string): Promise<WorkshopQuotation> {
+      return apiRequest<WorkshopQuotation>(`/workshops/quotations/${id}/reject/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ rejection_reason }),
+      });
+    },
+
+    async getQuotation(id: string): Promise<WorkshopQuotation> {
+      return apiRequest<WorkshopQuotation>(`/workshops/quotations/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    manageProfile: {
+      async get(): Promise<WorkshopProfilePublic> {
+        return apiRequest<WorkshopProfilePublic>("/workshops/manage/profile/", {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async update(data: Partial<WorkshopProfilePublic>): Promise<WorkshopProfilePublic> {
+        return apiRequest<WorkshopProfilePublic>("/workshops/manage/profile/", {
+          method: "PATCH",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+    },
+
+    manageHours: {
+      async get(): Promise<WorkshopOperatingHours[]> {
+        return apiRequest<WorkshopOperatingHours[]>("/workshops/manage/operating-hours/", {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async update(hours: WorkshopOperatingHours[]): Promise<WorkshopOperatingHours[]> {
+        return apiRequest<WorkshopOperatingHours[]>("/workshops/manage/operating-hours/", {
+          method: "PUT",
+          requiresAuth: true,
+          body: JSON.stringify(hours),
+        });
+      },
+    },
+
+    manageServices: {
+      async list(): Promise<WorkshopServiceItem[]> {
+        return apiRequest<WorkshopServiceItem[]>("/workshops/manage/services/", {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async create(data: Partial<WorkshopServiceItem>): Promise<WorkshopServiceItem> {
+        return apiRequest<WorkshopServiceItem>("/workshops/manage/services/", {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+      async update(id: string, data: Partial<WorkshopServiceItem>): Promise<WorkshopServiceItem> {
+        return apiRequest<WorkshopServiceItem>(`/workshops/manage/services/${id}/`, {
+          method: "PATCH",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+      async delete(id: string): Promise<{ status: string }> {
+        return apiRequest<{ status: string }>(`/workshops/manage/services/${id}/`, {
+          method: "DELETE",
+          requiresAuth: true,
+        });
+      },
+    },
+
+    manageBookings: {
+      async list(params?: { status?: string; date?: string }): Promise<{ results: WorkshopBooking[]; count: number }> {
+        const query = new URLSearchParams();
+        if (params?.status) query.set("status", params.status);
+        if (params?.date) query.set("date", params.date);
+        const qs = query.toString();
+        return apiRequest<{ results: WorkshopBooking[]; count: number }>(`/workshops/manage/bookings/${qs ? `?${qs}` : ""}`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async get(id: string): Promise<WorkshopBooking> {
+        return apiRequest<WorkshopBooking>(`/workshops/manage/bookings/${id}/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async updateStatus(
+        id: string,
+        data: {
+          action: "ACCEPT" | "REJECT" | "SCHEDULE";
+          rejection_reason?: string;
+          scheduled_appointment_start?: string;
+          scheduled_appointment_end?: string;
+          assigned_technician_id?: string;
+          internal_notes?: string;
+        }
+      ): Promise<WorkshopBooking> {
+        return apiRequest<WorkshopBooking>(`/workshops/manage/bookings/${id}/status/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+    },
+
+    manageQuotations: {
+      async create(
+        bookingId: string,
+        data: {
+          discount_amount?: string | number;
+          tax_rate_percent?: string | number;
+          valid_until?: string | null;
+          workshop_notes?: string;
+          terms_and_conditions?: string;
+          line_items: Array<{
+            item_type: string;
+            description: string;
+            part_number?: string;
+            catalogue_part_id?: string | null;
+            quantity: string | number;
+            unit_price: string | number;
+          }>;
+        }
+      ): Promise<WorkshopQuotation> {
+        return apiRequest<WorkshopQuotation>(`/workshops/manage/bookings/${bookingId}/quotations/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+      async issue(quotationId: string): Promise<WorkshopQuotation> {
+        return apiRequest<WorkshopQuotation>(`/workshops/manage/quotations/${quotationId}/issue/`, {
+          method: "POST",
+          requiresAuth: true,
+        });
+      },
+    },
+
+    adminBookings: {
+      async list(params?: { status?: string }): Promise<{ results: WorkshopBooking[] }> {
+        const query = new URLSearchParams();
+        if (params?.status) query.set("status", params.status);
+        const qs = query.toString();
+        return apiRequest<{ results: WorkshopBooking[] }>(`/workshops/admin/bookings/${qs ? `?${qs}` : ""}`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+    },
+  },
+
 };
 
 // ==========================================
@@ -2540,6 +2809,7 @@ export interface MarketplaceVehicleListing {
   body_type?: string;
   price: string | number;
   currency: string;
+  quoted_price?: string;
   condition: string;
   description?: string;
   primary_image_url?: string;
@@ -2784,6 +3054,7 @@ export interface PlatformOrder {
   cod_collected_by?: string | null;
   cod_collection_notes?: string;
   currency: string;
+  quoted_price?: string;
   place_of_supply: string;
   seller_state: string;
   shipping_name: string;
@@ -2821,6 +3092,7 @@ export interface SellerOrder {
   paid_at?: string | null;
   cod_collection_status: "NOT_APPLICABLE" | "PENDING" | "AWAITING_COLLECTION" | "COLLECTED" | "FAILED_COLLECTION" | "CANCELLED";
   currency: string;
+  quoted_price?: string;
   place_of_supply: string;
   seller_state: string;
   shipping_name: string;
@@ -2852,6 +3124,7 @@ export interface PaymentMethodOption {
   provider: "RAZORPAY" | "STRIPE" | "COD";
   name: string;
   currency: string;
+  quoted_price?: string;
   is_available: boolean;
   reason?: string | null;
   description: string;
@@ -2861,6 +3134,7 @@ export interface AvailablePaymentMethodsResponse {
   status: string;
   country: string;
   currency: string;
+  quoted_price?: string;
   amount: string;
   payment_methods: PaymentMethodOption[];
 }
@@ -2870,6 +3144,7 @@ export interface PaymentSessionResponse {
   payment_method: "ONLINE" | "COD";
   amount: string;
   currency: string;
+  quoted_price?: string;
   provider_order_id?: string;
   key_id?: string;
   publishable_key?: string;
@@ -2886,6 +3161,8 @@ export interface PaymentVerifyPayload {
   payment_intent_id?: string;
   stripe_payment_intent_id?: string;
   client_secret?: string;
+  amount?: string | number;
+  currency?: string;
 }
 
 export interface PaymentVerifyResponse {
@@ -2906,6 +3183,7 @@ export interface CODCollectionUpdatePayload {
 export interface OrderPaymentDetailResponse {
   order_number: string;
   currency: string;
+  quoted_price?: string;
   total_amount: string;
   payment_method: "ONLINE" | "COD";
   payment_status: string;
@@ -2921,6 +3199,7 @@ export interface OrderPaymentDetailResponse {
     provider: string;
     amount: string;
     currency: string;
+  quoted_price?: string;
     status: string;
     provider_transaction_id?: string;
     provider_order_id?: string;
@@ -2955,6 +3234,7 @@ export interface MarketplacePartListing {
     deviation?: string | number | null;
   };
   currency: string;
+  quoted_price?: string;
   stock_quantity: number;
   low_stock_threshold?: number;
   availability?: "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK";
@@ -3137,6 +3417,7 @@ export interface CataloguePartOffer {
   price: string | number;
   compare_at_price?: string | number | null;
   currency: string;
+  quoted_price?: string;
   condition: string;
   stock_quantity: number;
   low_stock_threshold?: number;
@@ -3188,6 +3469,7 @@ export interface VehicleEnquiry {
     year?: number;
     price: string | number;
     currency: string;
+  quoted_price?: string;
     primary_image_url?: string;
     location_city?: string;
     status?: string;
@@ -3326,6 +3608,7 @@ export interface PlatformRefund {
   dispute_number?: string | null;
   amount: string | number;
   currency: string;
+  quoted_price?: string;
   refund_method?: RefundMethod;
   refund_method_display?: string;
   status: RefundStatus;
@@ -3349,6 +3632,7 @@ export interface PlatformRefund {
 export interface OrderRefundSummary {
   order_number: string;
   currency: string;
+  quoted_price?: string;
   total_amount: string | number;
   payment_method: "ONLINE" | "COD";
   payment_status: string;
@@ -3435,6 +3719,7 @@ export interface OrderItemReturnEligibility {
 export interface OrderReturnEligibilityResponse {
   order_number: string;
   currency: string;
+  quoted_price?: string;
   order_total: string;
   order_status: string;
   payment_status: string;
@@ -3668,3 +3953,172 @@ export interface CreateSellerRatingPayload {
   comment?: string;
 }
 
+
+
+// ==========================================
+// Workshop Services & Bookings Type Definitions
+// ==========================================
+
+export interface WorkshopServiceCategory {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  icon_name: string;
+  display_order: number;
+  is_active: boolean;
+}
+
+export interface WorkshopOperatingHours {
+  id?: string;
+  day_of_week: number;
+  day_name?: string;
+  is_closed: boolean;
+  open_time?: string | null;
+  close_time?: string | null;
+  slot_duration_minutes?: number;
+}
+
+export interface WorkshopServiceItem {
+  id: string;
+  workshop?: string;
+  category?: string | null;
+  category_name?: string | null;
+  name: string;
+  description: string;
+  estimated_duration_minutes: number;
+  base_price: string;
+  currency: string;
+  quoted_price?: string;
+  is_price_variable: boolean;
+  is_active: boolean;
+}
+
+export interface WorkshopProfilePublic {
+  id: string;
+  organisation_id: string;
+  organisation_name: string;
+  organisation_slug: string;
+  business_name: string;
+  display_name: string;
+  slug: string;
+  description: string;
+  contact_email: string;
+  contact_phone: string;
+  address_line1: string;
+  address_line2: string;
+  city: string;
+  state_province: string;
+  postal_code: string;
+  country: string;
+  latitude?: string | null;
+  longitude?: string | null;
+  currency: string;
+  quoted_price?: string;
+  bay_capacity: number;
+  is_accepting_bookings: boolean;
+  is_verified: boolean;
+  is_tax_registered: boolean;
+  default_tax_rate_percent?: string;
+  services: WorkshopServiceItem[];
+  operating_hours: WorkshopOperatingHours[];
+  created_at: string;
+}
+
+export interface WorkshopBookingServiceItem {
+  id: string;
+  service?: string | null;
+  service_name: string;
+  service_price: string;
+  currency: string;
+  quoted_price?: string;
+}
+
+export interface QuotationLineItem {
+  id: string;
+  item_type: "LABOUR" | "PART" | "DIAGNOSTIC" | "DISPOSAL" | "OTHER" | "FEE" | "DISCOUNT";
+  item_type_display: string;
+  description: string;
+  part_number?: string;
+  catalogue_part?: string | null;
+  catalogue_part_name?: string | null;
+  quantity: string;
+  unit_price: string;
+  line_total: string;
+}
+
+export interface WorkshopQuotation {
+  id: string;
+  quotation_number: string;
+  booking: string;
+  booking_number: string;
+  version: number;
+  revision_number?: number;
+  subtotal?: string;
+  grand_total?: string;
+  status: "DRAFT" | "ISSUED" | "ACCEPTED" | "REJECTED" | "SUPERSEDED" | "EXPIRED";
+  subtotal_labour: string;
+  subtotal_parts: string;
+  subtotal_other: string;
+  discount_amount: string;
+  tax_rate_percent: string;
+  tax_amount: string;
+  total_amount: string;
+  currency: string;
+  quoted_price?: string;
+  valid_until?: string | null;
+  workshop_notes?: string;
+  terms_and_conditions?: string;
+  customer_rejection_reason?: string;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  issued_at?: string | null;
+  accepted_at?: string | null;
+  rejected_at?: string | null;
+  line_items: QuotationLineItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkshopBooking {
+  id: string;
+  booking_number: string;
+  workshop: string;
+  workshop_name: string;
+  workshop_city: string;
+  workshop_phone: string;
+  workshop_email: string;
+  buyer: string;
+  buyer_name: string;
+  buyer_email: string;
+  vehicle: string;
+  vehicle_make: string;
+  vehicle_model: string;
+  vehicle_year: number | null;
+  vehicle_registration_plate: string;
+  vehicle_vin: string;
+  current_odometer: number | null;
+  odometer_unit: string;
+  preferred_date: string;
+  preferred_time_slot: string;
+  scheduled_appointment_start?: string | null;
+  scheduled_appointment_end?: string | null;
+  customer_notes: string;
+  reported_faults: string;
+  assigned_technician?: string | null;
+  assigned_technician_name?: string | null;
+  internal_notes: string;
+  status: "REQUESTED" | "UNDER_REVIEW" | "ACCEPTED" | "REJECTED" | "QUOTED" | "CONFIRMED" | "CANCELLED";
+  booking_reference?: string;
+  customer_name?: string;
+  buyer_id?: string;
+  vehicle_registration?: string;
+  rejection_reason?: string;
+  cancellation_reason?: string;
+  cancelled_at?: string | null;
+  service_items: WorkshopBookingServiceItem[];
+  quotations: WorkshopQuotation[];
+  active_quotation?: WorkshopQuotation | null;
+  created_at: string;
+  updated_at: string;
+}

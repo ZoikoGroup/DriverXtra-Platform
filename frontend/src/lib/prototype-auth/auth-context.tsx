@@ -315,14 +315,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           });
 
           if (mounted) {
-            if (statusCode === 401) {
-              tokenStorage.clearTokens();
-              setUser(null);
-              setAuthError("Session expired. Please log in again.");
-            } else {
-              setUser(null);
-              setAuthError(errorMessage);
-            }
+            tokenStorage.clearTokens();
+            setUser(null);
+            // On initial session check/restoration failure, do not display a blocking error
+            // to unauthenticated users visiting the login or public landing page.
+            setAuthError(null);
           }
         } finally {
           if (mounted) {
