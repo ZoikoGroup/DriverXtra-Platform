@@ -1,0 +1,30 @@
+name: Deploy DriverXtra Platform
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Redeploy backend and frontend even if nothing changed"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-driverxtra-platform
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Deploy to the VM over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GCP_SSH_HOST }}
+          username: ${{ secrets.GCP_SSH_USER }}
+          key: ${{ secrets.GCP_SSH_KEY }}
+          command_timeout: 35m
+          script_stop: true
+          script: FORCE=${{ inputs.force && '1' || '0' }} /usr/local/bin/driverxtra-deploy
