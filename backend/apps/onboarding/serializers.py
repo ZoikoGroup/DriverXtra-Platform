@@ -37,6 +37,7 @@ class SellerApplicationSerializer(serializers.ModelSerializer):
             'city',
             'postal_code',
             'country',
+            'jurisdiction',
             'website_url',
             'description',
             'status',
@@ -89,6 +90,7 @@ class SellerApplicationCreateUpdateSerializer(serializers.ModelSerializer):
             'city',
             'postal_code',
             'country',
+            'jurisdiction',
             'website_url',
             'description',
             'submit_now',
@@ -154,6 +156,51 @@ class SellerApplicationCreateUpdateSerializer(serializers.ModelSerializer):
             if instance.status == SellerApplicationStatusChoices.APPROVED:
                 raise serializers.ValidationError('Approved seller applications cannot be modified.')
 
+        # Regional country and jurisdiction validation
+        country = attrs.get('country')
+        jurisdiction = attrs.get('jurisdiction')
+        tax_id = attrs.get('tax_id')
+        if country:
+            from platform_core.regional import (
+                normalize_country_code,
+                validate_country_code,
+                validate_jurisdiction,
+                derive_jurisdiction_from_tax_id,
+                get_default_jurisdiction_for_country,
+                is_supported_country,
+            )
+            norm_country = normalize_country_code(country)
+            if not is_supported_country(norm_country):
+                raise serializers.ValidationError({'country': f"Unsupported country '{country}'. Supported: IN, GB."})
+
+            if norm_country in ('IN', 'INDIA', 'BHARAT') and tax_id and str(tax_id).strip():
+                gst_jurisdiction = derive_jurisdiction_from_tax_id(tax_id, norm_country)
+                if not gst_jurisdiction:
+                    raise serializers.ValidationError({
+                        'tax_id': f"Invalid GSTIN format '{tax_id}'. Indian GSTIN must be a 15-character statutory alphanumeric code starting with a valid state code."
+                    })
+                if jurisdiction and str(jurisdiction).strip():
+                    clean_j = str(jurisdiction).strip().upper()
+                    if clean_j != gst_jurisdiction:
+                        raise serializers.ValidationError({
+                            'jurisdiction': f"Jurisdiction mismatch: The provided GSTIN '{tax_id}' corresponds to jurisdiction '{gst_jurisdiction}', which does not match the submitted jurisdiction '{jurisdiction}'."
+                        })
+                else:
+                    jurisdiction = gst_jurisdiction
+            elif not jurisdiction and tax_id:
+                jurisdiction = derive_jurisdiction_from_tax_id(tax_id, norm_country)
+
+            if not jurisdiction:
+                jurisdiction = get_default_jurisdiction_for_country(norm_country)
+
+            try:
+                valid_c = validate_country_code(norm_country)
+                valid_j = validate_jurisdiction(valid_c, jurisdiction)
+                attrs['country'] = valid_c
+                attrs['jurisdiction'] = valid_j
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({'jurisdiction': str(exc.message if hasattr(exc, 'message') else exc)})
+
         return attrs
 
     def create(self, validated_data):
@@ -211,4 +258,49 @@ class SellerApplicationReviewSerializer(serializers.Serializer):
             raise serializers.ValidationError({'reason': 'A rejection reason is required when rejecting an application.'})
 
         attrs['reason'] = reason
+        # Regional country and jurisdiction validation
+        country = attrs.get('country')
+        jurisdiction = attrs.get('jurisdiction')
+        tax_id = attrs.get('tax_id')
+        if country:
+            from platform_core.regional import (
+                normalize_country_code,
+                validate_country_code,
+                validate_jurisdiction,
+                derive_jurisdiction_from_tax_id,
+                get_default_jurisdiction_for_country,
+                is_supported_country,
+            )
+            norm_country = normalize_country_code(country)
+            if not is_supported_country(norm_country):
+                raise serializers.ValidationError({'country': f"Unsupported country '{country}'. Supported: IN, GB."})
+
+            if norm_country in ('IN', 'INDIA', 'BHARAT') and tax_id and str(tax_id).strip():
+                gst_jurisdiction = derive_jurisdiction_from_tax_id(tax_id, norm_country)
+                if not gst_jurisdiction:
+                    raise serializers.ValidationError({
+                        'tax_id': f"Invalid GSTIN format '{tax_id}'. Indian GSTIN must be a 15-character statutory alphanumeric code starting with a valid state code."
+                    })
+                if jurisdiction and str(jurisdiction).strip():
+                    clean_j = str(jurisdiction).strip().upper()
+                    if clean_j != gst_jurisdiction:
+                        raise serializers.ValidationError({
+                            'jurisdiction': f"Jurisdiction mismatch: The provided GSTIN '{tax_id}' corresponds to jurisdiction '{gst_jurisdiction}', which does not match the submitted jurisdiction '{jurisdiction}'."
+                        })
+                else:
+                    jurisdiction = gst_jurisdiction
+            elif not jurisdiction and tax_id:
+                jurisdiction = derive_jurisdiction_from_tax_id(tax_id, norm_country)
+
+            if not jurisdiction:
+                jurisdiction = get_default_jurisdiction_for_country(norm_country)
+
+            try:
+                valid_c = validate_country_code(norm_country)
+                valid_j = validate_jurisdiction(valid_c, jurisdiction)
+                attrs['country'] = valid_c
+                attrs['jurisdiction'] = valid_j
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({'jurisdiction': str(exc.message if hasattr(exc, 'message') else exc)})
+
         return attrs

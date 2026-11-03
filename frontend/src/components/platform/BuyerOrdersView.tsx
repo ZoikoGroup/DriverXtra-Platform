@@ -1,16 +1,13 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import Image from "next/image";
 import {
   api,
   PlatformOrder,
   PlatformOrderItem,
-  PlatformShipment,
-  PlatformTrackingEvent,
   PlatformReturnRequest,
-  PlatformRefund,
   PlatformDispute,
-  PlatformDisputeEvent,
   OrderReturnEligibilityResponse,
   ReturnReason,
   ReturnRequestType,
@@ -30,31 +27,22 @@ import {
   RotateCcw,
   ShoppingBag,
   Building2,
-  User,
   AlertTriangle,
-  Mail,
-  Phone,
   Copy,
   Check,
   Calendar,
   Search,
-  ChevronRight,
   MapPin,
   Receipt,
   FileText,
-  AlertCircle,
   X,
   Loader2,
-  ShieldAlert,
   CreditCard,
   Banknote,
-  ExternalLink,
-  Navigation,
   Scale,
   MessageSquare,
   UploadCloud,
   Send,
-  HelpCircle,
   Star,
   ThumbsUp,
   Edit3,
@@ -263,7 +251,7 @@ export default function BuyerOrdersView({
         (o) => o.id === initialOrderId || o.order_number === initialOrderId
       );
       if (found) {
-        setSelectedOrder(found);
+        queueMicrotask(() => setSelectedOrder(found));
       }
     }
   }, [initialOrderId, orders]);
@@ -859,6 +847,11 @@ export default function BuyerOrdersView({
           </div>
 
           {/* Orders List */}
+          {error && (
+            <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs font-bold mb-4">
+              {error}
+            </div>
+          )}
           {loading ? (
             <div className="p-12 text-center text-slate-400 text-xs">
               <Loader2 className="w-6 h-6 animate-spin mx-auto text-amber-500 mb-2" />
@@ -1157,7 +1150,7 @@ export default function BuyerOrdersView({
                             rel="noopener noreferrer"
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity"
                           >
-                            <img src={resolveMediaUrl(url)} alt={`Evidence ${i + 1}`} className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${i + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -1596,7 +1589,7 @@ export default function BuyerOrdersView({
                       <div className="flex flex-wrap gap-2 pt-1">
                         {returnEvidenceUrls.map((url, idx) => (
                           <div key={idx} className="relative w-14 h-14 rounded-xl border border-slate-300 overflow-hidden group">
-                            <img src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
                             <button
                               type="button"
                               onClick={() => setReturnEvidenceUrls((prev) => prev.filter((_, i) => i !== idx))}
@@ -1744,7 +1737,7 @@ export default function BuyerOrdersView({
                   <div className="flex flex-wrap gap-2 pt-1">
                     {disputeEvidenceUrls.map((url, idx) => (
                       <div key={idx} className="relative w-14 h-14 rounded-xl border border-slate-300 overflow-hidden group">
-                        <img src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} className="w-full h-full object-cover" />
+                        <Image src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
                         <button
                           type="button"
                           onClick={() => setDisputeEvidenceUrls((prev) => prev.filter((_, i) => i !== idx))}

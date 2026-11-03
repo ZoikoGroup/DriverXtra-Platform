@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import Image from "next/image";
 import {
   api,
   resolveMediaUrl,
@@ -425,8 +426,11 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
                       {/* Image / Header Banner */}
                       <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
                         {v?.primary_image_url ? (
-                          <img
+                          <Image
                             src={resolveMediaUrl(v.primary_image_url)}
+                            fill
+                            unoptimized
+                            sizes="(max-width: 768px) 100vw, 33vw"
                             alt={v.title || "Vehicle"}
                             className={`w-full h-full object-cover transition-opacity ${
                               isAvailable ? "" : "opacity-60 grayscale"
@@ -586,8 +590,11 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
                     {/* Image / Header Banner */}
                     <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
                       {p?.primary_image_url ? (
-                        <img
+                        <Image
                           src={resolveMediaUrl(p.primary_image_url)}
+                          fill
+                          unoptimized
+                          sizes="(max-width: 768px) 100vw, 33vw"
                           alt={p.name || "Spare Part"}
                           className={`w-full h-full object-cover transition-opacity ${
                             isAvailable ? "" : "opacity-60 grayscale"
@@ -818,8 +825,11 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
               return (
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden h-64 bg-slate-950 flex items-center justify-center">
-                    <img
+                    <Image
                       src={resolveMediaUrl(activeImage)}
+                      fill
+                      unoptimized
+                      sizes="(max-width: 768px) 100vw, 50vw"
                       alt={`${selectedVehicle.title} - photo ${activeIdx + 1}`}
                       className="w-full h-full object-cover"
                       onError={(e) => {
@@ -872,10 +882,13 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
                               : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
                           }`}
                         >
-                          <img
+                          <Image
                             src={resolveMediaUrl(url)}
                             alt={`Thumbnail ${idx + 1}`}
-                            className="w-full h-full object-cover"
+                            fill
+                            unoptimized
+                            sizes="64px"
+                            className="object-cover"
                             onError={(e) => {
                               e.currentTarget.style.display = "none";
                             }}
@@ -995,8 +1008,11 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
               return (
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden h-64 bg-slate-950 flex items-center justify-center">
-                    <img
+                    <Image
                       src={resolveMediaUrl(activeImage)}
+                      fill
+                      unoptimized
+                      sizes="(max-width: 768px) 100vw, 50vw"
                       alt={`${selectedPart.name} - photo ${activeIdx + 1}`}
                       className="w-full h-full object-cover"
                       onError={(e) => {
@@ -1049,10 +1065,13 @@ export default function BuyerFavouritesView({ onNavigateToBrowse }: BuyerFavouri
                               : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
                           }`}
                         >
-                          <img
+                          <Image
                             src={resolveMediaUrl(url)}
                             alt={`Thumbnail ${idx + 1}`}
-                            className="w-full h-full object-cover"
+                            fill
+                            unoptimized
+                            sizes="64px"
+                            className="object-cover"
                             onError={(e) => {
                               e.currentTarget.style.display = "none";
                             }}

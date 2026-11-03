@@ -165,26 +165,28 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
 
   // Safely restore cart from localStorage after mount
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(CART_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
-          const validItems: CartItem[] = [];
-          for (const raw of parsed) {
-            const clean = sanitizeCartItem(raw);
-            if (clean) validItems.push(clean);
+    queueMicrotask(() => {
+      try {
+        const stored = localStorage.getItem(CART_STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed)) {
+            const validItems: CartItem[] = [];
+            for (const raw of parsed) {
+              const clean = sanitizeCartItem(raw);
+              if (clean) validItems.push(clean);
+            }
+            setItems(validItems);
           }
-          setItems(validItems);
         }
+      } catch (err) {
+        console.warn("[Cart] Unable to restore cart from localStorage:", err);
+        // Fallback to empty cart on parse error without disrupting the app
+        setItems([]);
+      } finally {
+        setIsInitialized(true);
       }
-    } catch (err) {
-      console.warn("[Cart] Unable to restore cart from localStorage:", err);
-      // Fallback to empty cart on parse error without disrupting the app
-      setItems([]);
-    } finally {
-      setIsInitialized(true);
-    }
+    });
   }, []);
 
   // Persist cart whenever items change (skip during initial mount)

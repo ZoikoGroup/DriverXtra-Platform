@@ -119,3 +119,143 @@ class GarageVehicle(BaseUUIDModel):
             ).exclude(pk=self.pk).order_by('-created_at').first()
             if next_vehicle:
                 next_vehicle.set_as_primary()
+
+
+class RecordSourceChoices(models.TextChoices):
+    PLATFORM_VERIFIED = 'PLATFORM_VERIFIED', 'Platform Verified'
+    BUYER_ENTERED = 'BUYER_ENTERED', 'Buyer Entered'
+
+
+class VehicleServiceRecord(BaseUUIDModel):
+    """
+    Vehicle service and maintenance record forming the vehicle's permanent passport history.
+    Generated automatically upon WorkOrder completion (PLATFORM_VERIFIED) or manually
+    registered by the vehicle owner for external maintenance (BUYER_ENTERED).
+    """
+    vehicle = models.ForeignKey(
+        GarageVehicle,
+        on_delete=models.CASCADE,
+        related_name='service_records',
+        db_index=True,
+    )
+    work_order = models.OneToOneField(
+        'workshops.WorkOrder',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='service_history_record',
+    )
+    workshop = models.ForeignKey(
+        'workshops.WorkshopProfile',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='service_history_records',
+    )
+    service_centre_name = models.CharField(max_length=200, blank=True)
+
+    # Core service information
+    service_title = models.CharField(max_length=200)
+    service_type = models.CharField(max_length=50, blank=True, default='SERVICE')
+    description = models.TextField(blank=True)
+    service_date = models.DateField(db_index=True)
+
+    # Telemetry and financials
+    odometer_reading = models.PositiveIntegerField(null=True, blank=True)
+    odometer_unit = models.CharField(max_length=10, default='mi')
+    total_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, default='GBP')
+
+    # Provenance and verification
+    record_source = models.CharField(
+        max_length=30,
+        choices=RecordSourceChoices.choices,
+        default=RecordSourceChoices.BUYER_ENTERED,
+        db_index=True,
+    )
+    is_verified = models.BooleanField(default=False, db_index=True)
+
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_service_records',
+    )
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Service Record'
+        verbose_name_plural = 'Vehicle Service Records'
+        ordering = ['-service_date', '-created_at']
+        indexes = [
+            models.Index(fields=['vehicle', '-service_date']),
+            models.Index(fields=['vehicle', 'record_source']),
+            models.Index(fields=['vehicle', 'is_verified']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(record_source='PLATFORM_VERIFIED', is_verified=True, work_order__isnull=False) |
+                    models.Q(record_source='BUYER_ENTERED', is_verified=False, work_order__isnull=True)
+                ),
+                name='valid_record_source_verification_work_order',
+            ),
+        ]
+
+    def __str__(self):
+        source = 'Verified' if self.is_verified else 'Buyer-Entered'
+        return f'{self.vehicle} - {self.service_title} ({self.service_date}) [{source}]'
+
+    def clean(self):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        super().clean()
+        if self.service_date and self.service_date > timezone.now().date():
+            raise DjangoValidationError({'service_date': 'Service date cannot be in the future.'})
+
+        if self.currency:
+            self.currency = self.currency.upper()
+
+        if self.record_source == RecordSourceChoices.PLATFORM_VERIFIED:
+            if not self.is_verified:
+                raise DjangoValidationError({'is_verified': 'Platform verified records must have is_verified=True.'})
+            if not self.work_order_id:
+                raise DjangoValidationError({'work_order': 'Platform verified records must have an originating Work Order.'})
+
+            # Currency validation for platform-verified records linked to a workshop
+            if self.workshop_id:
+                workshop = self.workshop
+                if workshop and workshop.currency:
+                    if not self.currency:
+                        self.currency = workshop.currency
+                    elif self.currency != workshop.currency:
+                        raise DjangoValidationError({
+                            'currency': f"Currency '{self.currency}' does not match owning workshop currency '{workshop.currency}'."
+                        })
+
+            # Validate against associated quotation / work order currency where applicable
+            if self.work_order_id:
+                work_order = self.work_order
+                if work_order:
+                    wo_currency = None
+                    if hasattr(work_order, 'quotation') and work_order.quotation and work_order.quotation.currency:
+                        wo_currency = work_order.quotation.currency
+                    elif hasattr(work_order, 'currency') and work_order.currency:
+                        wo_currency = work_order.currency
+
+                    if wo_currency:
+                        if not self.currency:
+                            self.currency = wo_currency
+                        elif self.currency != wo_currency:
+                            raise DjangoValidationError({
+                                'currency': f"Currency '{self.currency}' does not match associated work order currency '{wo_currency}'."
+                            })
+        elif self.record_source == RecordSourceChoices.BUYER_ENTERED:
+            if self.is_verified:
+                raise DjangoValidationError({'is_verified': 'Buyer entered records cannot have is_verified=True.'})
+            if self.work_order_id:
+                raise DjangoValidationError({'work_order': 'Buyer entered records cannot be linked to a Work Order.'})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
+import Image from "next/image";
 import {
   api,
   resolveMediaUrl,
@@ -51,8 +52,6 @@ import {
   Star,
   ThumbsUp,
   Flag,
-  Share2,
-  Check,
 } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 
@@ -66,7 +65,7 @@ export default function MarketplaceBrowseView({
   initialPartId,
 }: MarketplaceBrowseViewProps = {}) {
   const { user } = useAuth();
-  const { addItem, getItemQuantity, isItemInCart, openCart } = useCart();
+  const { addItem, getItemQuantity, isItemInCart } = useCart();
   const [cartFeedback, setCartFeedback] = useState<{ id: string; message: string } | null>(null);
   const [activeTab, setActiveTab] = useState<"vehicles" | "parts">("vehicles");
 
@@ -212,7 +211,7 @@ export default function MarketplaceBrowseView({
         loadPartReviewsAndReputation(p.id, p.seller_id || p.seller);
       })
       .catch(console.error);
-  }, [initialPartId]);
+  }, [initialPartId, loadPartReviewsAndReputation]);
 
   const handleOpenEnquiryModal = (vehicle: MarketplaceVehicleListing) => {
     setEnquiryVehicle(vehicle);
@@ -952,10 +951,13 @@ export default function MarketplaceBrowseView({
                     {/* Image / Header Banner */}
                     <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
                       {v.primary_image_url ? (
-                        <img
+                        <Image
                           src={resolveMediaUrl(v.primary_image_url)}
                           alt={v.title}
-                          className="w-full h-full object-cover"
+                          fill
+                          unoptimized
+                          sizes="(max-width: 768px) 100vw, 33vw"
+                          className="object-cover"
                           onError={(e) => {
                             e.currentTarget.style.display = "none";
                             const fb = e.currentTarget.parentElement?.querySelector(".vehicle-card-fallback");
@@ -1588,10 +1590,13 @@ export default function MarketplaceBrowseView({
                           {/* Image / Header Banner */}
                           <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
                             {p.primary_image_url ? (
-                              <img
+                              <Image
                                 src={resolveMediaUrl(p.primary_image_url)}
                                 alt={p.name}
-                                className="w-full h-full object-cover"
+                                fill
+                                unoptimized
+                                sizes="(max-width: 768px) 100vw, 33vw"
+                                className="object-cover"
                                 onError={(e) => {
                                   e.currentTarget.style.display = "none";
                                   const fb = e.currentTarget.parentElement?.querySelector(".part-card-fallback");
@@ -1931,10 +1936,13 @@ export default function MarketplaceBrowseView({
               return (
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden h-72 bg-slate-950 flex items-center justify-center">
-                    <img
+                    <Image
                       src={resolveMediaUrl(activeImage)}
                       alt={`${selectedVehicle.title} - photo ${activeIdx + 1}`}
-                      className="w-full h-full object-cover"
+                      fill
+                      unoptimized
+                      sizes="(max-width: 768px) 100vw, 50vw"
+                      className="object-cover"
                       onError={(e) => {
                         e.currentTarget.style.display = "none";
                         const fb = e.currentTarget.parentElement?.querySelector(".gallery-vehicle-fallback");
@@ -1985,10 +1993,13 @@ export default function MarketplaceBrowseView({
                               : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
                           }`}
                         >
-                          <img
+                          <Image
                             src={resolveMediaUrl(url)}
                             alt={`Thumbnail ${idx + 1}`}
-                            className="w-full h-full object-cover"
+                            fill
+                            unoptimized
+                            sizes="64px"
+                            className="object-cover"
                             onError={(e) => {
                               e.currentTarget.style.display = "none";
                             }}
@@ -2236,10 +2247,13 @@ export default function MarketplaceBrowseView({
               return (
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden h-64 bg-slate-950 flex items-center justify-center">
-                    <img
+                    <Image
                       src={resolveMediaUrl(activeImage)}
                       alt={`${selectedPart.name} - photo ${activeIdx + 1}`}
-                      className="w-full h-full object-cover"
+                      fill
+                      unoptimized
+                      sizes="(max-width: 768px) 100vw, 50vw"
+                      className="object-cover"
                       onError={(e) => {
                         e.currentTarget.style.display = "none";
                         const fb = e.currentTarget.parentElement?.querySelector(".gallery-part-fallback");
@@ -2290,10 +2304,13 @@ export default function MarketplaceBrowseView({
                               : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
                           }`}
                         >
-                          <img
+                          <Image
                             src={resolveMediaUrl(url)}
                             alt={`Thumbnail ${idx + 1}`}
-                            className="w-full h-full object-cover"
+                            fill
+                            unoptimized
+                            sizes="64px"
+                            className="object-cover"
                             onError={(e) => {
                               e.currentTarget.style.display = "none";
                             }}
@@ -2980,9 +2997,12 @@ export default function MarketplaceBrowseView({
             {/* Vehicle Summary Card */}
             <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-3">
               {enquiryVehicle.primary_image_url ? (
-                <img
+                <Image
                   src={resolveMediaUrl(enquiryVehicle.primary_image_url)}
                   alt={enquiryVehicle.title}
+                  width={56}
+                  height={56}
+                  unoptimized
                   className="w-14 h-14 rounded-xl object-cover border border-slate-200 flex-shrink-0"
                 />
               ) : (

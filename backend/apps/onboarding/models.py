@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 from common.models import BaseUUIDModel
@@ -78,6 +78,11 @@ class SellerApplication(BaseUUIDModel):
     city = models.CharField(max_length=100, blank=True)
     postal_code = models.CharField(max_length=30, blank=True)
     country = models.CharField(max_length=100, default='United Kingdom')
+    jurisdiction = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Authoritative ISO 3166-2 legal jurisdiction (e.g. IN-TG, GB-ENG).",
+    )
     website_url = models.URLField(blank=True)
     description = models.TextField(blank=True)
 
@@ -126,6 +131,48 @@ class SellerApplication(BaseUUIDModel):
             if len(self.requested_roles) != len(set(self.requested_roles)):
                 raise ValidationError({'requested_roles': 'Duplicate roles are not permitted.'})
 
+        # Validate regional country and jurisdiction consistency
+        if self.country:
+            from platform_core.regional import (
+                normalize_country_code,
+                validate_country_code,
+                validate_jurisdiction,
+                derive_jurisdiction_from_tax_id,
+                get_default_jurisdiction_for_country,
+                is_supported_country,
+            )
+            norm_country = normalize_country_code(self.country)
+            if not norm_country or not is_supported_country(norm_country):
+                raise ValidationError({'country': f"Unsupported or invalid country: '{self.country}'. Supported countries are India (IN) and United Kingdom (GB)."})
+
+            if norm_country in ('IN', 'INDIA', 'BHARAT') and self.tax_id and str(self.tax_id).strip():
+                gst_jurisdiction = derive_jurisdiction_from_tax_id(self.tax_id, norm_country)
+                if not gst_jurisdiction:
+                    raise ValidationError({
+                        'tax_id': f"Invalid GSTIN format '{self.tax_id}'. Indian GSTIN must be a 15-character statutory alphanumeric code starting with a valid state code."
+                    })
+                if self.jurisdiction and str(self.jurisdiction).strip():
+                    clean_j = str(self.jurisdiction).strip().upper()
+                    if clean_j != gst_jurisdiction:
+                        raise ValidationError({
+                            'jurisdiction': f"Jurisdiction mismatch: The provided GSTIN '{self.tax_id}' corresponds to jurisdiction '{gst_jurisdiction}', which does not match the submitted jurisdiction '{self.jurisdiction}'."
+                        })
+                else:
+                    self.jurisdiction = gst_jurisdiction
+            elif not self.jurisdiction and self.tax_id:
+                derived = derive_jurisdiction_from_tax_id(self.tax_id, norm_country)
+                if derived:
+                    self.jurisdiction = derived
+
+            if not self.jurisdiction:
+                self.jurisdiction = get_default_jurisdiction_for_country(norm_country)
+
+            try:
+                valid_c = validate_country_code(norm_country)
+                self.jurisdiction = validate_jurisdiction(valid_c, self.jurisdiction)
+            except ValidationError as exc:
+                raise ValidationError({'jurisdiction': str(exc.message if hasattr(exc, 'message') else exc)})
+
     def submit_for_review(self):
         """Transitions draft or rejected application into pending review state."""
         if self.status == SellerApplicationStatusChoices.APPROVED:
@@ -151,15 +198,25 @@ class SellerApplication(BaseUUIDModel):
         if self.status != SellerApplicationStatusChoices.PENDING:
             raise ValidationError(f'Only applications in PENDING status can be approved (current: {self.status}).')
 
-        self.status = SellerApplicationStatusChoices.APPROVED
-        self.reviewed_by = reviewer
-        self.reviewed_at = timezone.now()
-        if notes:
-            self.admin_notes = notes
-        self.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'admin_notes', 'updated_at'])
+        with transaction.atomic():
+            self.status = SellerApplicationStatusChoices.APPROVED
+            self.reviewed_by = reviewer
+            self.reviewed_at = timezone.now()
+            if notes:
+                self.admin_notes = notes
+            self.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'admin_notes', 'updated_at'])
 
-        # Grant verified platform roles to applicant
-        grant_roles_for_application(self.user, self.business_type, self.requested_roles)
+            # Grant verified platform roles to applicant
+            grant_roles_for_application(self.user, self.business_type, self.requested_roles)
+
+            # Provision workshop organisation if workshop role requested or business type is WORKSHOP
+            is_workshop = (
+                self.business_type == BusinessTypeChoices.WORKSHOP
+                or (self.requested_roles and RoleChoices.WORKSHOP in self.requested_roles)
+            )
+            if is_workshop:
+                from apps.onboarding.services import provision_workshop_organisation
+                provision_workshop_organisation(self)
 
     def reject(self, reviewer: User, reason: str, notes: str = ''):
         """Rejects the application with mandatory rejection reason."""

@@ -1,4 +1,5 @@
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from common.models import BaseUUIDModel
@@ -617,6 +618,11 @@ class Order(BaseUUIDModel):
     igst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     total_tax_amount = models.DecimalField(max_digits=12, decimal_places=2)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    tax_breakdown = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Immutable statutory tax calculation snapshot.",
+    )
 
     class Meta:
         verbose_name = 'Order'
@@ -625,6 +631,73 @@ class Order(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.order_number} ({self.buyer.email}) - {self.currency} {self.total_amount}"
+
+    def clean(self):
+        super().clean()
+        if not self._state.adding and self.pk:
+            try:
+                db_instance = Order.objects.get(pk=self.pk)
+                financial_fields = [
+                    'subtotal_taxable_amount',
+                    'cgst_amount',
+                    'sgst_amount',
+                    'igst_amount',
+                    'total_tax_amount',
+                    'total_amount',
+                    'currency',
+                ]
+                for f in financial_fields:
+                    old_val = getattr(db_instance, f)
+                    new_val = getattr(self, f)
+                    if old_val is not None and old_val != new_val:
+                        raise ValidationError(
+                            f"Order {self.order_number} financial snapshot field '{f}' is immutable once created."
+                        )
+                # Verify tax_breakdown immutability: once saved with a snapshot, it cannot be tampered with
+                if db_instance.tax_breakdown and self.tax_breakdown != db_instance.tax_breakdown:
+                    raise ValidationError(
+                        f"Order {self.order_number} tax snapshot is immutable once recorded."
+                    )
+            except Order.DoesNotExist:
+                pass
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and self.pk:
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None:
+                financial_fields = {
+                    'subtotal_taxable_amount',
+                    'cgst_amount',
+                    'sgst_amount',
+                    'igst_amount',
+                    'total_tax_amount',
+                    'total_amount',
+                    'currency',
+                    'tax_breakdown',
+                }
+                intersected = set(update_fields).intersection(financial_fields)
+                if intersected:
+                    try:
+                        db_instance = Order.objects.get(pk=self.pk)
+                        for f in intersected:
+                            if getattr(self, f) != getattr(db_instance, f):
+                                raise ValidationError(
+                                    f"Order {self.order_number} financial snapshot field '{f}' is immutable once created."
+                                )
+                    except Order.DoesNotExist:
+                        pass
+            else:
+                self.full_clean()
+        else:
+            self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status != OrderStatusChoices.CANCELLED and self.payment_status == PaymentStatusChoices.PAID:
+            raise ValidationError(
+                f"Order {self.order_number} has completed payment records and cannot be deleted."
+            )
+        super().delete(*args, **kwargs)
 
 
 class OrderItem(BaseUUIDModel):
@@ -667,6 +740,57 @@ class OrderItem(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.title} x {self.quantity} (Order {self.order.order_number})"
+
+    def clean(self):
+        super().clean()
+        if not self._state.adding and self.pk:
+            try:
+                db_instance = OrderItem.objects.get(pk=self.pk)
+                financial_fields = [
+                    'unit_price', 'quantity', 'taxable_amount',
+                    'cgst_amount', 'sgst_amount', 'igst_amount',
+                    'tax_amount', 'total_amount', 'gst_rate', 'hsn_code',
+                ]
+                for f in financial_fields:
+                    if getattr(self, f) != getattr(db_instance, f):
+                        raise ValidationError(
+                            f"OrderItem {self.id} financial snapshot field '{f}' is immutable once created."
+                        )
+            except OrderItem.DoesNotExist:
+                pass
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and self.pk:
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None:
+                financial_fields = {
+                    'unit_price', 'quantity', 'taxable_amount',
+                    'cgst_amount', 'sgst_amount', 'igst_amount',
+                    'tax_amount', 'total_amount', 'gst_rate', 'hsn_code',
+                }
+                intersected = set(update_fields).intersection(financial_fields)
+                if intersected:
+                    try:
+                        db_instance = OrderItem.objects.get(pk=self.pk)
+                        for f in intersected:
+                            if getattr(self, f) != getattr(db_instance, f):
+                                raise ValidationError(
+                                    f"OrderItem {self.id} financial snapshot field '{f}' is immutable once created."
+                                )
+                    except OrderItem.DoesNotExist:
+                        pass
+            else:
+                self.full_clean()
+        else:
+            self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.order_id and self.order.status != OrderStatusChoices.CANCELLED:
+            raise ValidationError(
+                f"OrderItem {self.id} is part of active order {self.order.order_number} and cannot be deleted."
+            )
+        super().delete(*args, **kwargs)
 
 
 class VehicleEnquiryStatusChoices(models.TextChoices):

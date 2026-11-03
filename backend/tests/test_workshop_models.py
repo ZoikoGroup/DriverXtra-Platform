@@ -58,6 +58,7 @@ def workshop_profile(db, workshop_org):
         country="GB",
         bay_capacity=4,
         is_tax_registered=True,
+        can_collect_tax=True,
         default_tax_rate_percent=Decimal("20.00"),
     )
 
@@ -126,6 +127,8 @@ class TestWorkshopProfileModel:
         org = Organisation.objects.create(
             name="Delhi Tech Garage",
             type=OrganisationTypeChoices.WORKSHOP,
+            country="IN",
+            jurisdiction="IN-DL",
             created_by=workshop_user,
         )
         # Workshop in India with 18% GST and INR currency

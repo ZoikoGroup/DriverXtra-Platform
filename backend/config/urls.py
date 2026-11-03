@@ -34,6 +34,9 @@ urlpatterns = [
 
     # Phase 6: Workshop Services, Bookings & Quotations
     path('api/v1/workshops/', include('apps.workshops.urls')),
+
+    # Platform Core: Regional Configuration & Multi-Country Specifications
+    path('api/v1/regions/', include('platform_core.regional.urls')),
 ]
 
 # Serve media files in development / test environments

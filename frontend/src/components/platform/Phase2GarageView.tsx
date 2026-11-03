@@ -1,7 +1,17 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
-import { api, GarageVehicle, AddGarageVehiclePayload, VehicleMake, VehicleModel, VehicleVariant, ApiError } from "@/lib/api/client";
+import {
+  api,
+  GarageVehicle,
+  AddGarageVehiclePayload,
+  VehicleMake,
+  VehicleModel,
+  VehicleVariant,
+  VehicleServiceRecord,
+  CreateServiceRecordPayload,
+  ApiError,
+} from "@/lib/api/client";
 import {
   Car,
   Plus,
@@ -14,6 +24,14 @@ import {
   RefreshCw,
   X,
   Fuel,
+  ShieldCheck,
+  Wrench,
+  Calendar,
+  Building2,
+  Eye,
+  FileText,
+  User,
+  Check,
 } from "lucide-react";
 
 interface Phase2GarageViewProps {
@@ -43,6 +61,26 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
   const [selectedMakeId, setSelectedMakeId] = useState("");
   const [selectedModelId, setSelectedModelId] = useState("");
   const [selectedVariantId, setSelectedVariantId] = useState("");
+
+  // Service History States
+  const [serviceRecords, setServiceRecords] = useState<VehicleServiceRecord[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isAddServiceModalOpen, setIsAddServiceModalOpen] = useState(false);
+  const [serviceToEdit, setServiceToEdit] = useState<VehicleServiceRecord | null>(null);
+  const [serviceToDelete, setServiceToDelete] = useState<VehicleServiceRecord | null>(null);
+  const [serviceDetailToView, setServiceDetailToView] = useState<VehicleServiceRecord | null>(null);
+
+  // Service Form fields
+  const [serviceFormTitle, setServiceFormTitle] = useState("");
+  const [serviceFormDate, setServiceFormDate] = useState(new Date().toISOString().split("T")[0]);
+  const [serviceFormType, setServiceFormType] = useState("SERVICE");
+  const [serviceFormCentre, setServiceFormCentre] = useState("");
+  const [serviceFormOdometer, setServiceFormOdometer] = useState<number | "">("");
+  const [serviceFormCost, setServiceFormCost] = useState("");
+  const [serviceFormCurrency, setServiceFormCurrency] = useState("GBP");
+  const [serviceFormDesc, setServiceFormDesc] = useState("");
+  const [serviceFormNotes, setServiceFormNotes] = useState("");
+  const [serviceFormError, setServiceFormError] = useState<string | null>(null);
 
   // Common Add Form fields
   const [formPlate, setFormPlate] = useState("");
@@ -91,6 +129,142 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
       setIsLoading(false);
     }
   }, []);
+
+  const loadServiceHistory = useCallback(async (vehicleId: string) => {
+    try {
+      setIsLoadingHistory(true);
+      const records = await api.garage.listServiceRecords(vehicleId);
+      setServiceRecords(records);
+    } catch (err: unknown) {
+      console.error("Failed to load vehicle service history:", err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let ignore = false;
+    if (selectedVehicle?.id) {
+      api.garage
+        .listServiceRecords(selectedVehicle.id)
+        .then((records) => {
+          if (!ignore) {
+            setServiceRecords(records);
+            setIsLoadingHistory(false);
+          }
+        })
+        .catch((err: unknown) => {
+          console.error("Failed to load vehicle service history:", err);
+          if (!ignore) setIsLoadingHistory(false);
+        });
+    } else {
+      queueMicrotask(() => {
+        if (!ignore) {
+          setServiceRecords([]);
+        }
+      });
+    }
+    return () => {
+      ignore = true;
+    };
+  }, [selectedVehicle?.id]);
+
+  const handleOpenAddServiceModal = () => {
+    setServiceToEdit(null);
+    setServiceFormTitle("");
+    setServiceFormDate(new Date().toISOString().split("T")[0]);
+    setServiceFormType("SERVICE");
+    setServiceFormCentre("");
+    setServiceFormOdometer(selectedVehicle?.current_odometer ?? "");
+    setServiceFormCost("");
+    setServiceFormCurrency("GBP");
+    setServiceFormDesc("");
+    setServiceFormNotes("");
+    setServiceFormError(null);
+    setIsAddServiceModalOpen(true);
+  };
+
+  const handleOpenEditServiceModal = (rec: VehicleServiceRecord) => {
+    setServiceToEdit(rec);
+    setServiceFormTitle(rec.service_title);
+    setServiceFormDate(rec.service_date);
+    setServiceFormType(rec.service_type || "SERVICE");
+    setServiceFormCentre(rec.service_centre_name || "");
+    setServiceFormOdometer(rec.odometer_reading ?? "");
+    setServiceFormCost(rec.total_cost ?? "");
+    setServiceFormCurrency(rec.currency || "GBP");
+    setServiceFormDesc(rec.description || "");
+    setServiceFormNotes(rec.notes || "");
+    setServiceFormError(null);
+    setIsAddServiceModalOpen(true);
+  };
+
+  const handleSaveServiceRecord = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedVehicle) return;
+
+    if (!serviceFormTitle.trim()) {
+      setServiceFormError("Service title is required.");
+      return;
+    }
+    if (!serviceFormDate) {
+      setServiceFormError("Service date is required.");
+      return;
+    }
+    const todayStr = new Date().toISOString().split("T")[0];
+    if (serviceFormDate > todayStr) {
+      setServiceFormError("Service date cannot be in the future.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setServiceFormError(null);
+
+    try {
+      const payload: CreateServiceRecordPayload = {
+        service_title: serviceFormTitle.trim(),
+        service_date: serviceFormDate,
+        service_type: serviceFormType,
+        service_centre_name: serviceFormCentre.trim() || undefined,
+        odometer_reading: serviceFormOdometer === "" ? null : Number(serviceFormOdometer),
+        odometer_unit: selectedVehicle.odometer_unit || "mi",
+        total_cost: serviceFormCost === "" ? null : serviceFormCost,
+        currency: serviceFormCurrency || "GBP",
+        description: serviceFormDesc.trim() || undefined,
+        notes: serviceFormNotes.trim() || undefined,
+      };
+
+      if (serviceToEdit) {
+        await api.garage.updateServiceRecord(serviceToEdit.id, payload);
+        showSuccess(`Service record "${payload.service_title}" updated successfully.`);
+      } else {
+        await api.garage.createServiceRecord(selectedVehicle.id, payload);
+        showSuccess(`Historical service record logged in vehicle passport.`);
+      }
+
+      setIsAddServiceModalOpen(false);
+      await loadServiceHistory(selectedVehicle.id);
+    } catch (err: unknown) {
+      setServiceFormError(err instanceof ApiError ? err.message : "Failed to save service record.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteServiceRecord = async () => {
+    if (!serviceToDelete || !selectedVehicle) return;
+    setIsSubmitting(true);
+    try {
+      await api.garage.deleteServiceRecord(serviceToDelete.id);
+      showSuccess(`Service record "${serviceToDelete.service_title}" deleted.`);
+      setServiceToDelete(null);
+      await loadServiceHistory(selectedVehicle.id);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof ApiError ? err.message : "Failed to delete service record.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   useEffect(() => {
     let ignore = false;
@@ -628,6 +802,221 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
       )}
 
       {/* ==================================================== */}
+      {/* Vehicle Service History & Maintenance Passport      */}
+      {/* ==================================================== */}
+      {selectedVehicle && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-6">
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="p-1.5 rounded-lg bg-emerald-500 text-white font-black text-xs flex items-center gap-1 shadow-sm">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Passport
+                </span>
+                <h2 className="text-lg font-black text-slate-950">
+                  Service & Maintenance History
+                </h2>
+              </div>
+              <p className="text-xs text-slate-600 mt-1">
+                Verified workshop repairs and historical maintenance logs for{" "}
+                <span className="font-bold text-slate-900">
+                  {selectedVehicle.year} {selectedVehicle.make} {selectedVehicle.model}
+                </span>{" "}
+                {selectedVehicle.registration_plate && (
+                  <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-[11px] font-bold">
+                    [{selectedVehicle.registration_plate}]
+                  </span>
+                )}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                  <ShieldCheck className="w-3 h-3 text-emerald-600" />
+                  {serviceRecords.filter((r) => r.is_verified).length} Verified
+                </span>
+                <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                  {serviceRecords.length} Total Records
+                </span>
+              </div>
+              <button
+                onClick={handleOpenAddServiceModal}
+                className="bg-slate-950 hover:bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-2 shadow-sm transition-all"
+              >
+                <Plus className="w-4 h-4 text-amber-400" />
+                <span>Log Historical Service</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Timeline of Records */}
+          {isLoadingHistory ? (
+            <div className="py-12 text-center space-y-3">
+              <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+              <p className="text-xs font-bold text-slate-600">Loading service history records...</p>
+            </div>
+          ) : serviceRecords.length === 0 ? (
+            <div className="py-12 text-center space-y-3 max-w-md mx-auto">
+              <div className="w-12 h-12 bg-slate-50 text-slate-400 rounded-2xl flex items-center justify-center mx-auto border border-slate-200">
+                <Wrench className="w-6 h-6" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-slate-900">No Service Records Registered</h4>
+                <p className="text-xs text-slate-500 mt-1">
+                  When repairs are completed at verified DriverXtra workshops, official service records appear here automatically. You can also manually log past service and maintenance history.
+                </p>
+              </div>
+              <button
+                onClick={handleOpenAddServiceModal}
+                className="bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs inline-flex items-center gap-1.5 shadow-sm transition-all"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Historical Record</span>
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {serviceRecords.map((record) => (
+                <div
+                  key={record.id}
+                  className={`rounded-2xl p-5 border transition-all ${
+                    record.is_verified
+                      ? "border-emerald-300 bg-gradient-to-r from-emerald-50/40 to-white shadow-sm"
+                      : "border-slate-200 bg-white hover:border-slate-300 shadow-sm"
+                  }`}
+                >
+                  <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                    {/* Left: Badge, Title, Details */}
+                    <div className="space-y-2 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {record.is_verified ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-900 border border-emerald-300">
+                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                            Platform Verified
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                            <User className="w-3.5 h-3.5 text-slate-500" />
+                            Buyer-Entered (Unverified)
+                          </span>
+                        )}
+
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold uppercase bg-slate-100 text-slate-600">
+                          {record.service_type || "SERVICE"}
+                        </span>
+
+                        <span className="text-xs text-slate-500 flex items-center gap-1">
+                          <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                          {record.service_date}
+                        </span>
+
+                        {record.work_order_number && (
+                          <span className="text-[10px] font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                            WO #{record.work_order_number}
+                          </span>
+                        )}
+                      </div>
+
+                      <h3 className="text-base font-black text-slate-950">
+                        {record.service_title}
+                      </h3>
+
+                      {/* Workshop / Centre */}
+                      <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                        <Building2 className="w-3.5 h-3.5 text-slate-400" />
+                        <span className="font-semibold text-slate-800">
+                          {record.workshop_name || record.service_centre_name || "Independent Specialist"}
+                        </span>
+                        {record.is_verified && (
+                          <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.2 rounded">
+                            Verified Workshop
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Description preview */}
+                      {record.description && (
+                        <p className="text-xs text-slate-600 line-clamp-2 mt-1">
+                          {record.description}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Right: Telemetry & Actions */}
+                    <div className="flex md:flex-col items-center md:items-end justify-between gap-3 pt-3 md:pt-0 border-t md:border-t-0 border-slate-100">
+                      <div className="text-right">
+                        {record.total_cost && (
+                          <div className="text-base font-black text-slate-950">
+                            {record.currency === "GBP" ? "£" : `${record.currency} `}
+                            {Number(record.total_cost).toLocaleString(undefined, {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </div>
+                        )}
+                        {record.odometer_reading ? (
+                          <div className="text-xs font-semibold text-slate-600 flex flex-col md:items-end gap-0.5 mt-0.5">
+                            <div className="flex items-center gap-1">
+                              <Gauge className="w-3 h-3 text-slate-400" />
+                              <span>
+                                {record.odometer_reading.toLocaleString()} {record.odometer_unit || "mi"}
+                              </span>
+                            </div>
+                            {selectedVehicle?.odometer_unit && record.odometer_unit && selectedVehicle.odometer_unit.toLowerCase() !== record.odometer_unit.toLowerCase() && (
+                              <span
+                                className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-md"
+                                title={`Vehicle is configured in ${selectedVehicle.odometer_unit}, but this service was recorded in ${record.odometer_unit}.`}
+                              >
+                                <AlertCircle className="w-2.5 h-2.5 text-amber-600" />
+                                Unit Mismatch ({record.odometer_unit})
+                              </span>
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setServiceDetailToView(record)}
+                          className="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5 transition-colors"
+                          title="View complete record breakdown"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>View Details</span>
+                        </button>
+
+                        {!record.is_verified && (
+                          <>
+                            <button
+                              onClick={() => handleOpenEditServiceModal(record)}
+                              className="p-1.5 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 transition-colors"
+                              title="Edit historical entry"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => setServiceToDelete(record)}
+                              className="p-1.5 rounded-xl border border-slate-200 hover:bg-amber-50 text-amber-600 transition-colors"
+                              title="Delete historical entry"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ==================================================== */}
       {/* Modal: Add Vehicle                                  */}
       {/* ==================================================== */}
       {isAddModalOpen && (
@@ -1034,6 +1423,399 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
                 className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl text-xs transition-colors shadow-sm disabled:opacity-50"
               >
                 {isSubmitting ? "Archiving..." : "Archive Vehicle"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ==================================================== */}
+      {/* Modal: Add / Edit Historical Service Record        */}
+      {/* ==================================================== */}
+      {isAddServiceModalOpen && selectedVehicle && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-5 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-slate-950 text-amber-400 flex items-center justify-center font-bold">
+                  <Wrench className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-950">
+                    {serviceToEdit ? "Edit Historical Service Record" : "Log Historical Service Record"}
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {selectedVehicle.year} {selectedVehicle.make} {selectedVehicle.model}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsAddServiceModalOpen(false)}
+                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {serviceFormError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-300 text-rose-900 text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{serviceFormError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveServiceRecord} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Service Title <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Major Service & Brake Fluid Replacement"
+                  value={serviceFormTitle}
+                  onChange={(e) => setServiceFormTitle(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Service Date <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    max={new Date().toISOString().split("T")[0]}
+                    value={serviceFormDate}
+                    onChange={(e) => setServiceFormDate(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Service Category</label>
+                  <select
+                    value={serviceFormType}
+                    onChange={(e) => setServiceFormType(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  >
+                    <option value="SERVICE">Scheduled Service</option>
+                    <option value="REPAIR">Mechanical Repair</option>
+                    <option value="MOT">MOT Inspection</option>
+                    <option value="DIAGNOSTIC">Diagnostic & Electrical</option>
+                    <option value="INSPECTION">Pre-Purchase / Safety Check</option>
+                    <option value="OTHER">Other Maintenance</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Workshop or Service Centre Name
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Kwik Fit, National Tyres, or Independent Specialist"
+                  value={serviceFormCentre}
+                  onChange={(e) => setServiceFormCentre(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Odometer Reading ({selectedVehicle.odometer_unit || "mi"})
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder="e.g. 45000"
+                    value={serviceFormOdometer}
+                    onChange={(e) => setServiceFormOdometer(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Total Cost ({serviceFormCurrency})
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder="e.g. 150.00"
+                    value={serviceFormCost}
+                    onChange={(e) => setServiceFormCost(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Service Description</label>
+                <textarea
+                  rows={3}
+                  placeholder="Details of work completed, fluids replaced, or diagnostic notes..."
+                  value={serviceFormDesc}
+                  onChange={(e) => setServiceFormDesc(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Additional Notes</label>
+                <input
+                  type="text"
+                  placeholder="e.g. 12-month parts warranty, invoice stored in glovebox"
+                  value={serviceFormNotes}
+                  onChange={(e) => setServiceFormNotes(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsAddServiceModalOpen(false)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="bg-slate-950 hover:bg-slate-800 text-white font-bold px-5 py-2.5 rounded-xl text-xs flex items-center gap-2 shadow-sm transition-all disabled:opacity-50"
+                >
+                  {isSubmitting ? "Saving..." : serviceToEdit ? "Update Service Record" : "Save to Passport"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* Modal: Delete Historical Record Confirmation        */}
+      {/* ==================================================== */}
+      {serviceToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-sm w-full p-6 space-y-4 animate-in fade-in zoom-in-95">
+            <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center mx-auto">
+              <Trash2 className="w-5 h-5" />
+            </div>
+            <div className="text-center">
+              <h3 className="text-base font-black text-slate-950">Delete Service Record</h3>
+              <p className="text-xs text-slate-500 mt-1">
+                Are you sure you want to delete <span className="font-bold text-slate-800">{serviceToDelete.service_title}</span> ({serviceToDelete.service_date})? This entry will be permanently removed from your vehicle passport.
+              </p>
+            </div>
+
+            <div className="pt-2 flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => setServiceToDelete(null)}
+                className="px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteServiceRecord}
+                disabled={isSubmitting}
+                className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-4 py-2 rounded-xl text-xs transition-colors shadow-sm disabled:opacity-50"
+              >
+                {isSubmitting ? "Deleting..." : "Delete Record"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* Modal: View Service Record Details                  */}
+      {/* ==================================================== */}
+      {serviceDetailToView && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-5 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
+                  serviceDetailToView.is_verified
+                    ? "bg-emerald-500 text-white"
+                    : "bg-slate-950 text-amber-400"
+                }`}>
+                  {serviceDetailToView.is_verified ? (
+                    <ShieldCheck className="w-4 h-4" />
+                  ) : (
+                    <FileText className="w-4 h-4" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-950">
+                    Service Record Overview
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {serviceDetailToView.service_date} • {serviceDetailToView.service_type || "SERVICE"}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setServiceDetailToView(null)}
+                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Badges */}
+            <div className="flex items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs">
+              <div className="flex items-center gap-2">
+                {serviceDetailToView.is_verified ? (
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-900 border border-emerald-300 flex items-center gap-1">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    Platform Verified
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-slate-200 text-slate-700 flex items-center gap-1">
+                    <User className="w-3.5 h-3.5 text-slate-500" />
+                    Buyer-Entered (Unverified)
+                  </span>
+                )}
+              </div>
+              {serviceDetailToView.work_order_number && (
+                <span className="font-mono text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                  WO #{serviceDetailToView.work_order_number}
+                </span>
+              )}
+            </div>
+
+            {/* Core details list */}
+            <div className="space-y-3 text-xs">
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500 font-medium">Service Title</span>
+                <span className="font-bold text-slate-900">{serviceDetailToView.service_title}</span>
+              </div>
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500 font-medium">Workshop / Service Centre</span>
+                <span className="font-bold text-slate-900">
+                  {serviceDetailToView.workshop_name || serviceDetailToView.service_centre_name || "Independent"}
+                </span>
+              </div>
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500 font-medium">Service Date</span>
+                <span className="font-bold text-slate-900">{serviceDetailToView.service_date}</span>
+              </div>
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500 font-medium">Odometer Reading</span>
+                <span className="font-bold text-slate-900">
+                  {serviceDetailToView.odometer_reading
+                    ? `${serviceDetailToView.odometer_reading.toLocaleString()} ${serviceDetailToView.odometer_unit || "mi"}`
+                    : "Not recorded"}
+                </span>
+              </div>
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500 font-medium">Total Cost</span>
+                <span className="font-black text-slate-950">
+                  {serviceDetailToView.total_cost
+                    ? `${serviceDetailToView.currency === "GBP" ? "£" : `${serviceDetailToView.currency} `}${Number(serviceDetailToView.total_cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                    : "Not recorded"}
+                </span>
+              </div>
+            </div>
+
+            {/* Odometer Unit Notice */}
+            {selectedVehicle?.odometer_unit && serviceDetailToView.odometer_unit && selectedVehicle.odometer_unit.toLowerCase() !== serviceDetailToView.odometer_unit.toLowerCase() && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2.5 text-amber-900 text-xs">
+                <AlertCircle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+                <div>
+                  <span className="font-bold block">Odometer Unit Notice</span>
+                  <span>This service was logged in <strong>{serviceDetailToView.odometer_unit}</strong>, while your vehicle display is configured in <strong>{selectedVehicle.odometer_unit}</strong>. Vehicle cluster reading was preserved to prevent conversion errors.</span>
+                </div>
+              </div>
+            )}
+
+            {/* Description */}
+            {serviceDetailToView.description && (
+              <div className="space-y-1">
+                <span className="text-xs font-bold text-slate-700">Service Description</span>
+                <p className="text-xs text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                  {serviceDetailToView.description}
+                </p>
+              </div>
+            )}
+
+            {/* Work Order Tasks (sanitized) */}
+            {serviceDetailToView.work_order_tasks && serviceDetailToView.work_order_tasks.length > 0 && (
+              <div className="space-y-2">
+                <span className="text-xs font-bold text-slate-700">Completed Repair Tasks</span>
+                <div className="space-y-1.5">
+                  {serviceDetailToView.work_order_tasks.map((task) => (
+                    <div
+                      key={task.id}
+                      className="p-2.5 rounded-xl border border-slate-100 bg-slate-50 flex items-center justify-between text-xs"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span className="font-medium text-slate-800">{task.description}</span>
+                      </div>
+                      {task.actual_labour_minutes ? (
+                        <span className="text-[11px] font-mono text-slate-500">
+                          {task.actual_labour_minutes} mins
+                        </span>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Work Order Parts (sanitized, no wholesale pricing) */}
+            {serviceDetailToView.work_order_parts && serviceDetailToView.work_order_parts.length > 0 && (
+              <div className="space-y-2">
+                <span className="text-xs font-bold text-slate-700">Installed Spare Parts</span>
+                <div className="space-y-1.5">
+                  {serviceDetailToView.work_order_parts.map((part) => (
+                    <div
+                      key={part.id}
+                      className="p-2.5 rounded-xl border border-slate-100 bg-slate-50 flex items-center justify-between text-xs"
+                    >
+                      <span className="font-medium text-slate-800">
+                        {part.part_name}{" "}
+                        {part.part_number && (
+                          <span className="font-mono text-slate-500 text-[10px]">
+                            ({part.part_number})
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-bold text-slate-700 text-xs">
+                        Qty: {part.quantity}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Notes */}
+            {serviceDetailToView.notes && (
+              <div className="space-y-1">
+                <span className="text-xs font-bold text-slate-700">Additional Notes</span>
+                <p className="text-xs text-slate-600 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                  {serviceDetailToView.notes}
+                </p>
+              </div>
+            )}
+
+            <div className="pt-3 border-t border-slate-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setServiceDetailToView(null)}
+                className="bg-slate-950 hover:bg-slate-800 text-white font-bold px-4 py-2 rounded-xl text-xs transition-colors"
+              >
+                Close Overview
               </button>
             </div>
           </div>

@@ -135,3 +135,167 @@ class GarageVehicleSerializer(serializers.ModelSerializer):
         if not GarageVehicle.objects.filter(user=user, is_archived=False).exists():
             validated_data['is_primary'] = True
         return super().create(validated_data)
+
+from decimal import Decimal
+from apps.garage.models import VehicleServiceRecord, RecordSourceChoices
+
+
+class VehicleServiceRecordSerializer(serializers.ModelSerializer):
+    """
+    Read serializer for vehicle service history records.
+    Safely presents verified workshop repairs and unverified buyer records
+    without exposing sensitive internal workshop annotations or wholesale costs.
+    """
+    vehicle_registration_plate = serializers.CharField(source='vehicle.registration_plate', read_only=True)
+    workshop_name = serializers.SerializerMethodField()
+    work_order_number = serializers.CharField(source='work_order.work_order_number', read_only=True, allow_null=True)
+    work_order_tasks = serializers.SerializerMethodField()
+    work_order_parts = serializers.SerializerMethodField()
+
+    class Meta:
+        model = VehicleServiceRecord
+        fields = [
+            'id',
+            'vehicle',
+            'vehicle_registration_plate',
+            'work_order',
+            'work_order_number',
+            'workshop',
+            'workshop_name',
+            'service_centre_name',
+            'service_title',
+            'service_type',
+            'description',
+            'service_date',
+            'odometer_reading',
+            'odometer_unit',
+            'total_cost',
+            'currency',
+            'record_source',
+            'is_verified',
+            'notes',
+            'work_order_tasks',
+            'work_order_parts',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_workshop_name(self, obj):
+        if obj.workshop:
+            return obj.workshop.display_name
+        return obj.service_centre_name or ''
+
+    def get_work_order_tasks(self, obj):
+        if not obj.work_order_id or not obj.work_order:
+            return []
+        # Return sanitized task list (no technician IDs, no internal notes)
+        return [
+            {
+                "id": str(task.id),
+                "description": task.description,
+                "status": task.status,
+                "actual_labour_minutes": task.actual_labour_minutes,
+            }
+            for task in obj.work_order.tasks.order_by('order_index')
+        ]
+
+    def get_work_order_parts(self, obj):
+        if not obj.work_order_id or not obj.work_order:
+            return []
+        # Return sanitized parts usage (no wholesale unit_cost or wholesale total_cost)
+        return [
+            {
+                "id": str(p.id),
+                "part_name": p.part_name,
+                "part_number": p.part_number,
+                "quantity": str(p.quantity),
+            }
+            for p in obj.work_order.parts_used.all()
+        ]
+
+
+class BuyerServiceRecordCreateSerializer(serializers.Serializer):
+    """
+    Payload validator for buyer-entered service records.
+    Strictly forbids client injection of verification status or Work Order linking.
+    """
+    service_title = serializers.CharField(max_length=200, required=True)
+    service_type = serializers.CharField(max_length=50, required=False, default='SERVICE')
+    service_centre_name = serializers.CharField(max_length=200, required=False, allow_blank=True, default='')
+    service_date = serializers.DateField(required=True)
+    odometer_reading = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    odometer_unit = serializers.CharField(max_length=10, required=False, allow_blank=True, default=None)
+    total_cost = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True, min_value=Decimal('0.00'))
+    currency = serializers.CharField(max_length=3, required=False, allow_blank=True, default=None)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_service_date(self, value):
+        from django.utils import timezone
+        if value > timezone.now().date():
+            raise serializers.ValidationError("Service date cannot be in the future.")
+        return value
+
+    def validate(self, attrs):
+        from platform_core.regional import derive_regional_context_for_vehicle_and_buyer
+
+        vehicle = self.context.get('vehicle')
+        user = (
+            self.context.get('request').user
+            if self.context.get('request') and hasattr(self.context.get('request'), 'user')
+            else getattr(vehicle, 'user', None)
+        )
+
+        reg_ctx = derive_regional_context_for_vehicle_and_buyer(vehicle=vehicle, buyer=user)
+
+        # 1. Odometer unit: preserve manually supplied unit, derive from vehicle stored unit, or regional default
+        supplied_unit = attrs.get('odometer_unit')
+        if supplied_unit and str(supplied_unit).strip():
+            attrs['odometer_unit'] = str(supplied_unit).strip().lower()
+        else:
+            vehicle_unit = getattr(vehicle, 'odometer_unit', None)
+            derived_unit = vehicle_unit or reg_ctx.get('odometer_unit')
+            if not derived_unit:
+                raise serializers.ValidationError({
+                    'odometer_unit': "Odometer unit could not be reliably determined. Please specify 'km' or 'mi'."
+                })
+            attrs['odometer_unit'] = derived_unit
+
+        # 2. Currency: preserve manually supplied currency, or derive from reliable regional source
+        supplied_currency = attrs.get('currency')
+        if supplied_currency and str(supplied_currency).strip():
+            attrs['currency'] = str(supplied_currency).strip().upper()
+        else:
+            derived_curr = reg_ctx.get('currency')
+            if derived_curr:
+                attrs['currency'] = derived_curr
+            else:
+                raise serializers.ValidationError({
+                    'currency': "Currency could not be reliably determined from your regional profile. Please provide an explicit currency code (e.g. INR, GBP)."
+                })
+
+        return attrs
+
+
+class BuyerServiceRecordUpdateSerializer(serializers.Serializer):
+    """
+    Payload validator for updating buyer-entered service records.
+    All fields are optional. Verification status and work order cannot be changed.
+    """
+    service_title = serializers.CharField(max_length=200, required=False)
+    service_type = serializers.CharField(max_length=50, required=False)
+    service_centre_name = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    service_date = serializers.DateField(required=False)
+    odometer_reading = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    odometer_unit = serializers.CharField(max_length=10, required=False)
+    total_cost = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True, min_value=Decimal('0.00'))
+    currency = serializers.CharField(max_length=3, required=False)
+    description = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_service_date(self, value):
+        from django.utils import timezone
+        if value > timezone.now().date():
+            raise serializers.ValidationError("Service date cannot be in the future.")
+        return value

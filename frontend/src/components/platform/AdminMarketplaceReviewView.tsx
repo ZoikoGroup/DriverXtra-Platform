@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
+import Image from "next/image";
 import {
   api,
   resolveMediaUrl,
@@ -27,8 +28,6 @@ import {
   Flag,
   ShieldAlert,
   Trash2,
-  Filter,
-  MessageSquare,
 } from "lucide-react";
 
 interface AdminMarketplaceReviewViewProps {
@@ -773,7 +772,7 @@ export default function AdminMarketplaceReviewView({
                   <div className="flex items-start gap-4">
                     <div className="w-20 h-16 rounded-xl bg-slate-900 overflow-hidden flex-shrink-0 flex items-center justify-center">
                       {app.primary_image_url ? (
-                        <img src={resolveMediaUrl(app.primary_image_url)} alt={app.model_name} className="w-full h-full object-cover" />
+                        <Image src={resolveMediaUrl(app.primary_image_url)} alt={app.model_name} width={80} height={64} unoptimized className="w-full h-full object-cover" />
                       ) : (
                         <Car className="w-6 h-6 text-slate-700" />
                       )}
@@ -852,7 +851,7 @@ export default function AdminMarketplaceReviewView({
                 >
                   <div className="flex items-start gap-4">
                     <div className="w-20 h-16 rounded-xl bg-slate-900 overflow-hidden flex-shrink-0 flex items-center justify-center border border-amber-400">
-                      <img src={resolveMediaUrl(prop.proposed_image_url)} alt="Proposed" className="w-full h-full object-cover" />
+                      <Image src={resolveMediaUrl(prop.proposed_image_url)} alt="Proposed" width={80} height={64} unoptimized className="w-full h-full object-cover" />
                     </div>
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
@@ -1256,10 +1255,13 @@ export default function AdminMarketplaceReviewView({
                   return allImages.length > 0 ? (
                     <div className="space-y-2">
                       <div className="rounded-2xl overflow-hidden h-64 bg-slate-950 relative flex items-center justify-center border border-slate-200">
-                        <img
+                        <Image
                           src={resolveMediaUrl(currentImage)}
                           alt={inspectVehicle.title}
-                          className="w-full h-full object-cover"
+                          fill
+                          unoptimized
+                          sizes="(max-width: 768px) 100vw, 50vw"
+                          className="object-cover"
                           onError={(e) => {
                             (e.target as HTMLElement).style.display = "none";
                           }}
@@ -1282,7 +1284,7 @@ export default function AdminMarketplaceReviewView({
                                   : "border-slate-200 opacity-70 hover:opacity-100"
                               }`}
                             >
-                              <img src={resolveMediaUrl(img)} alt={`Thumb ${idx + 1}`} className="w-full h-full object-cover" />
+                              <Image src={resolveMediaUrl(img)} alt={`Thumb ${idx + 1}`} fill unoptimized sizes="64px" className="object-cover" />
                               {img === inspectVehicle.primary_image_url && (
                                 <span className="absolute bottom-0 inset-x-0 bg-black/70 text-[7px] text-amber-300 font-bold text-center">
                                   Primary
@@ -1365,10 +1367,13 @@ export default function AdminMarketplaceReviewView({
                   return allImages.length > 0 ? (
                     <div className="space-y-2">
                       <div className="rounded-2xl overflow-hidden h-64 bg-slate-950 relative flex items-center justify-center border border-slate-200">
-                        <img
+                        <Image
                           src={resolveMediaUrl(currentImage)}
                           alt={inspectPart.name}
-                          className="w-full h-full object-cover"
+                          fill
+                          unoptimized
+                          sizes="(max-width: 768px) 100vw, 50vw"
+                          className="object-cover"
                           onError={(e) => {
                             (e.target as HTMLElement).style.display = "none";
                           }}
@@ -1391,7 +1396,7 @@ export default function AdminMarketplaceReviewView({
                                   : "border-slate-200 opacity-70 hover:opacity-100"
                               }`}
                             >
-                              <img src={resolveMediaUrl(img)} alt={`Thumb ${idx + 1}`} className="w-full h-full object-cover" />
+                              <Image src={resolveMediaUrl(img)} alt={`Thumb ${idx + 1}`} fill unoptimized sizes="64px" className="object-cover" />
                               {img === inspectPart.primary_image_url && (
                                 <span className="absolute bottom-0 inset-x-0 bg-black/70 text-[7px] text-amber-300 font-bold text-center">
                                   Primary
@@ -1532,10 +1537,13 @@ export default function AdminMarketplaceReviewView({
                   return allImages.length > 0 ? (
                     <div className="space-y-2">
                       <div className="rounded-2xl overflow-hidden h-64 bg-slate-950 relative flex items-center justify-center border border-slate-200">
-                        <img
+                        <Image
                           src={resolveMediaUrl(currentImage)}
                           alt={inspectApplication.model_name}
-                          className="w-full h-full object-cover"
+                          fill
+                          unoptimized
+                          sizes="(max-width: 768px) 100vw, 50vw"
+                          className="object-cover"
                           onError={(e) => {
                             (e.target as HTMLElement).style.display = "none";
                           }}
@@ -1558,7 +1566,7 @@ export default function AdminMarketplaceReviewView({
                                   : "border-slate-200 opacity-70 hover:opacity-100"
                               }`}
                             >
-                              <img src={resolveMediaUrl(img)} alt={`Thumb ${idx + 1}`} className="w-full h-full object-cover" />
+                              <Image src={resolveMediaUrl(img)} alt={`Thumb ${idx + 1}`} fill unoptimized sizes="64px" className="object-cover" />
                               {img === inspectApplication.primary_image_url && (
                                 <span className="absolute bottom-0 inset-x-0 bg-black/70 text-[7px] text-amber-300 font-bold text-center">
                                   Primary
@@ -1660,7 +1668,7 @@ export default function AdminMarketplaceReviewView({
                     <span className="font-bold text-slate-500 uppercase tracking-wider text-[10px] block">Current Official Image</span>
                     <div className="h-44 rounded-2xl bg-slate-900 overflow-hidden flex items-center justify-center border border-slate-200">
                       {inspectPhotoProposal.current_image_url ? (
-                        <img src={resolveMediaUrl(inspectPhotoProposal.current_image_url)} alt="Current" className="w-full h-full object-cover" />
+                        <Image src={resolveMediaUrl(inspectPhotoProposal.current_image_url)} alt="Current" width={300} height={176} unoptimized className="w-full h-full object-cover" />
                       ) : (
                         <span className="text-slate-400 italic">No image currently set</span>
                       )}
@@ -1669,7 +1677,7 @@ export default function AdminMarketplaceReviewView({
                   <div className="space-y-1">
                     <span className="font-bold text-amber-600 uppercase tracking-wider text-[10px] block">Proposed Image</span>
                     <div className="h-44 rounded-2xl bg-slate-900 overflow-hidden flex items-center justify-center border-2 border-amber-500">
-                      <img src={resolveMediaUrl(inspectPhotoProposal.proposed_image_url)} alt="Proposed" className="w-full h-full object-cover" />
+                      <Image src={resolveMediaUrl(inspectPhotoProposal.proposed_image_url)} alt="Proposed" width={300} height={176} unoptimized className="w-full h-full object-cover" />
                     </div>
                   </div>
                 </div>

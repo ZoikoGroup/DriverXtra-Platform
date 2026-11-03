@@ -1,3 +1,5 @@
+import logging
+from django.db import transaction
 from rest_framework import views, status, generics, permissions
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -9,6 +11,8 @@ from apps.onboarding.serializers import (
     SellerApplicationCreateUpdateSerializer,
     SellerApplicationReviewSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SellerApplicationMeView(views.APIView):
@@ -170,8 +174,6 @@ class AdminSellerApplicationReviewView(views.APIView):
     permission_classes = [IsPlatformStaff, HasPermission('seller.verify')]
 
     def post(self, request, id):
-        application = generics.get_object_or_404(SellerApplication, id=id)
-
         serializer = SellerApplicationReviewSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -181,37 +183,57 @@ class AdminSellerApplicationReviewView(views.APIView):
 
         corr_id = getattr(request, 'correlation_id', '')
         try:
-            if action == "APPROVE":
-                application.approve(reviewer=request.user, notes=admin_notes)
-                granted_roles = application.requested_roles if application.requested_roles else (
-                    ['SELLER', 'WORKSHOP'] if application.business_type == 'WORKSHOP' else ['SELLER']
+            with transaction.atomic():
+                application = generics.get_object_or_404(
+                    SellerApplication.objects.select_for_update(),
+                    id=id,
                 )
-                record_audit_entry(
-                    event_type="seller.application.approved",
-                    action="seller:application.approve",
-                    resource_type="SellerApplication",
-                    resource_id=str(application.id),
-                    actor_id=request.user.id,
-                    correlation_id=corr_id,
-                    metadata={
-                        "business_name": application.business_name,
-                        "applicant_id": str(application.user_id),
-                        "granted_roles": granted_roles,
-                    },
-                )
-                message = f"Seller application for '{application.business_name}' approved. Seller privileges granted."
-            else:
-                application.reject(reviewer=request.user, reason=reason, notes=admin_notes)
-                record_audit_entry(
-                    event_type="seller.application.rejected",
-                    action="seller:application.reject",
-                    resource_type="SellerApplication",
-                    resource_id=str(application.id),
-                    actor_id=request.user.id,
-                    correlation_id=corr_id,
-                    metadata={"business_name": application.business_name, "applicant_id": str(application.user_id), "reason": reason},
-                )
-                message = f"Seller application for '{application.business_name}' rejected."
+                if action == "APPROVE":
+                    application.approve(reviewer=request.user, notes=admin_notes)
+                    granted_roles = application.requested_roles if application.requested_roles else (
+                        ['SELLER', 'WORKSHOP'] if application.business_type == 'WORKSHOP' else ['SELLER']
+                    )
+                    record_audit_entry(
+                        event_type="seller.application.approved",
+                        action="seller:application.approve",
+                        resource_type="SellerApplication",
+                        resource_id=str(application.id),
+                        actor_id=request.user.id,
+                        correlation_id=corr_id,
+                        metadata={
+                            "business_name": application.business_name,
+                            "applicant_id": str(application.user_id),
+                            "granted_roles": granted_roles,
+                        },
+                    )
+                    message = f"Seller application for '{application.business_name}' approved. Seller privileges granted."
+
+                    # Post-commit notification dispatch
+                    def send_approval_notification():
+                        try:
+                            from apps.notifications.services import create_notification
+                            create_notification(
+                                recipient=application.user,
+                                title="Workshop Application Approved",
+                                message=f"Your application for '{application.business_name}' has been approved.",
+                                link="/platform?tab=workshop_landing",
+                            )
+                        except Exception as exc:
+                            logger.warning(f"Post-commit notification delivery failed: {exc}")
+
+                    transaction.on_commit(send_approval_notification)
+                else:
+                    application.reject(reviewer=request.user, reason=reason, notes=admin_notes)
+                    record_audit_entry(
+                        event_type="seller.application.rejected",
+                        action="seller:application.reject",
+                        resource_type="SellerApplication",
+                        resource_id=str(application.id),
+                        actor_id=request.user.id,
+                        correlation_id=corr_id,
+                        metadata={"business_name": application.business_name, "applicant_id": str(application.user_id), "reason": reason},
+                    )
+                    message = f"Seller application for '{application.business_name}' rejected."
         except DjangoValidationError as exc:
             return Response(
                 {"status": "error", "message": exc.messages[0] if hasattr(exc, "messages") else str(exc)},

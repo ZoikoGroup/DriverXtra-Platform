@@ -1359,6 +1359,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'igst_amount',
             'total_tax_amount',
             'total_amount',
+            'tax_breakdown',
             'items',
             'shipments',
             'return_requests',

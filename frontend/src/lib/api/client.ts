@@ -415,11 +415,17 @@ export interface BackendOrganisation {
   name: string;
   slug: string;
   type: "INDIVIDUAL" | "DEALER_GROUP" | "WORKSHOP" | "FLEET_OPERATOR" | "INTERNAL_OPS";
+  country?: string;
   jurisdiction: string;
   created_by?: string;
   is_active: boolean;
   user_role: string | null;
   member_count: number;
+  default_currency?: string;
+  default_odometer_unit?: string;
+  tax_scheme?: string;
+  subdivision_name?: string | null;
+  gst_state_code?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -434,6 +440,7 @@ export interface PaginatedOrganisations {
 export interface CreateOrganisationPayload {
   name: string;
   type?: "INDIVIDUAL" | "DEALER_GROUP" | "WORKSHOP" | "FLEET_OPERATOR" | "INTERNAL_OPS";
+  country?: string;
   jurisdiction?: string;
 }
 
@@ -949,6 +956,44 @@ export const api = {
 
     async deleteVehicle(id: string): Promise<void> {
       return this.archiveVehicle(id);
+    },
+
+    async listServiceRecords(vehicleId: string): Promise<VehicleServiceRecord[]> {
+      const res = await apiRequest<VehicleServiceRecord[] | { results: VehicleServiceRecord[] }>(`/garage/vehicles/${vehicleId}/service-history/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getServiceRecord(id: string): Promise<VehicleServiceRecord> {
+      return apiRequest<VehicleServiceRecord>(`/garage/service-history/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async createServiceRecord(vehicleId: string, payload: CreateServiceRecordPayload): Promise<VehicleServiceRecord> {
+      return apiRequest<VehicleServiceRecord>(`/garage/vehicles/${vehicleId}/service-history/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async updateServiceRecord(id: string, payload: UpdateServiceRecordPayload): Promise<VehicleServiceRecord> {
+      return apiRequest<VehicleServiceRecord>(`/garage/service-history/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async deleteServiceRecord(id: string): Promise<void> {
+      return apiRequest<void>(`/garage/service-history/${id}/`, {
+        method: "DELETE",
+        requiresAuth: true,
+      });
     },
   },
 
@@ -2469,15 +2514,188 @@ export const api = {
     },
 
     adminBookings: {
-      async list(params?: { status?: string }): Promise<{ results: WorkshopBooking[] }> {
+      async list(params?: { status?: string; q?: string }): Promise<{ results: WorkshopBooking[]; count: number }> {
         const query = new URLSearchParams();
-        if (params?.status) query.set("status", params.status);
+        if (params?.status && params.status !== "ALL") query.set("status", params.status);
+        if (params?.q) query.set("q", params.q);
         const qs = query.toString();
-        return apiRequest<{ results: WorkshopBooking[] }>(`/workshops/admin/bookings/${qs ? `?${qs}` : ""}`, {
+        return apiRequest<{ results: WorkshopBooking[]; count: number }>(`/workshops/admin/bookings/${qs ? `?${qs}` : ""}`, {
           method: "GET",
           requiresAuth: true,
         });
       },
+    },
+
+    manageWorkOrders: {
+      async list(params?: { status?: string; q?: string; technician_id?: string }): Promise<{ results: WorkOrderSummary[]; count: number }> {
+        const query = new URLSearchParams();
+        if (params?.status) query.set("status", params.status);
+        if (params?.q) query.set("q", params.q);
+        if (params?.technician_id) query.set("technician_id", params.technician_id);
+        const qs = query.toString();
+        const res = await apiRequest<{ results: WorkOrderSummary[]; count: number } | WorkOrderSummary[]>(`/workshops/manage/work-orders/${qs ? `?${qs}` : ""}`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+        return Array.isArray(res) ? { results: res, count: res.length } : res;
+      },
+      async get(id: string): Promise<WorkOrderDetail> {
+        return apiRequest<WorkOrderDetail>(`/workshops/manage/work-orders/${id}/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async assignTechnician(id: string, technician_id: string): Promise<WorkOrderDetail> {
+        return apiRequest<WorkOrderDetail>(`/workshops/manage/work-orders/${id}/assign/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify({ technician_id }),
+        });
+      },
+      async updateStatus(
+        id: string,
+        data: {
+          status: "ASSIGNED" | "IN_PROGRESS" | "AWAITING_PARTS" | "QUALITY_CHECK" | "COMPLETED" | "CANCELLED";
+          internal_notes?: string;
+          quality_notes?: string;
+          cancellation_reason?: string;
+        }
+      ): Promise<WorkOrderStatusUpdateResponse> {
+        return apiRequest<WorkOrderStatusUpdateResponse>(`/workshops/manage/work-orders/${id}/status/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+      async addTask(
+        id: string,
+        data: {
+          description: string;
+          estimated_labour_minutes?: number;
+          assigned_technician_id?: string;
+          order_index?: number;
+        }
+      ): Promise<WorkOrderTaskItem> {
+        return apiRequest<WorkOrderTaskItem>(`/workshops/manage/work-orders/${id}/tasks/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+      async updateTask(
+        id: string,
+        taskId: string,
+        data: Partial<{
+          description: string;
+          status: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "BLOCKED";
+          actual_labour_minutes: number;
+          estimated_labour_minutes: number;
+          notes: string;
+          assigned_technician_id: string | null;
+          order_index: number;
+        }>
+      ): Promise<WorkOrderTaskItem> {
+        return apiRequest<WorkOrderTaskItem>(`/workshops/manage/work-orders/${id}/tasks/${taskId}/`, {
+          method: "PATCH",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+      async deleteTask(id: string, taskId: string): Promise<{ status: string }> {
+        return apiRequest<{ status: string }>(`/workshops/manage/work-orders/${id}/tasks/${taskId}/`, {
+          method: "DELETE",
+          requiresAuth: true,
+        });
+      },
+      async recordPartUsage(
+        id: string,
+        data: {
+          part_name: string;
+          quantity: string | number;
+          unit_cost: string | number;
+          part_number?: string;
+          description?: string;
+          catalogue_part_id?: string | null;
+        }
+      ): Promise<WorkOrderPartUsageItem> {
+        return apiRequest<WorkOrderPartUsageItem>(`/workshops/manage/work-orders/${id}/parts/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(data),
+        });
+      },
+      async deletePartUsage(id: string, partId: string): Promise<{ status: string }> {
+        return apiRequest<{ status: string }>(`/workshops/manage/work-orders/${id}/parts/${partId}/`, {
+          method: "DELETE",
+          requiresAuth: true,
+        });
+      },
+      async listChangeOrders(workOrderId: string): Promise<{ results: ChangeOrder[]; authorized_total_amount: string; approved_change_orders_amount: string; has_pending_change_orders: boolean }> {
+        return apiRequest(`/workshops/manage/work-orders/${workOrderId}/change-orders/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async createChangeOrder(workOrderId: string, payload: CreateChangeOrderPayload): Promise<ChangeOrder> {
+        return apiRequest(`/workshops/manage/work-orders/${workOrderId}/change-orders/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        });
+      },
+      async submitChangeOrder(changeOrderId: string): Promise<ChangeOrder> {
+        return apiRequest(`/workshops/manage/change-orders/${changeOrderId}/submit/`, {
+          method: "POST",
+          requiresAuth: true,
+        });
+      },
+      async cancelChangeOrder(changeOrderId: string, reason?: string): Promise<ChangeOrder> {
+        return apiRequest(`/workshops/manage/change-orders/${changeOrderId}/cancel/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify({ reason }),
+        });
+      },
+    },
+
+    manageTechnicians: {
+      async list(): Promise<WorkshopTechnicianMember[]> {
+        const res = await apiRequest<{ results: WorkshopTechnicianMember[] } | WorkshopTechnicianMember[]>("/workshops/manage/technicians/", {
+          method: "GET",
+          requiresAuth: true,
+        });
+        return Array.isArray(res) ? res : (res && "results" in res && Array.isArray(res.results) ? res.results : []);
+      },
+    },
+
+    async getBuyerWorkOrder(bookingId: string): Promise<WorkOrderDetail> {
+      return apiRequest<WorkOrderDetail>(`/workshops/bookings/my/${bookingId}/work-order/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async listBuyerChangeOrders(bookingId: string): Promise<{ results: ChangeOrder[]; authorized_total_amount: string; approved_change_orders_amount: string; has_pending_change_orders: boolean }> {
+      return apiRequest(`/workshops/bookings/my/${bookingId}/change-orders/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async approveChangeOrder(changeOrderId: string, notes?: string): Promise<ChangeOrder> {
+      return apiRequest(`/workshops/change-orders/${changeOrderId}/approve/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ notes }),
+      });
+    },
+
+    async rejectChangeOrder(changeOrderId: string, reason?: string): Promise<ChangeOrder> {
+      return apiRequest(`/workshops/change-orders/${changeOrderId}/reject/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
+      });
     },
   },
 
@@ -2779,6 +2997,75 @@ export interface AddGarageVehiclePayload {
   odometer_unit?: string;
   is_primary?: boolean;
 }
+
+export type ServiceRecordSource = "PLATFORM_VERIFIED" | "BUYER_ENTERED";
+
+export interface ServiceRecordTask {
+  id: string;
+  description: string;
+  status: string;
+  actual_labour_minutes?: number;
+}
+
+export interface ServiceRecordPart {
+  id: string;
+  part_name: string;
+  part_number?: string;
+  quantity: string;
+}
+
+export interface VehicleServiceRecord {
+  id: string;
+  vehicle: string;
+  vehicle_registration_plate?: string;
+  work_order?: string | null;
+  work_order_number?: string | null;
+  workshop?: string | null;
+  workshop_name?: string;
+  service_centre_name?: string;
+  service_title: string;
+  service_type: string;
+  description?: string;
+  service_date: string;
+  odometer_reading?: number | null;
+  odometer_unit: string;
+  total_cost?: string | null;
+  currency: string;
+  record_source: ServiceRecordSource;
+  is_verified: boolean;
+  notes?: string;
+  work_order_tasks?: ServiceRecordTask[];
+  work_order_parts?: ServiceRecordPart[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateServiceRecordPayload {
+  service_title: string;
+  service_date: string;
+  service_type?: string;
+  service_centre_name?: string;
+  odometer_reading?: number | null;
+  odometer_unit?: string;
+  total_cost?: string | number | null;
+  currency?: string;
+  description?: string;
+  notes?: string;
+}
+
+export interface UpdateServiceRecordPayload {
+  service_title?: string;
+  service_date?: string;
+  service_type?: string;
+  service_centre_name?: string;
+  odometer_reading?: number | null;
+  odometer_unit?: string;
+  total_cost?: string | number | null;
+  currency?: string;
+  description?: string;
+  notes?: string;
+}
+
 
 // ==========================================
 // Marketplace Types
@@ -4019,6 +4306,7 @@ export interface WorkshopProfilePublic {
   is_accepting_bookings: boolean;
   is_verified: boolean;
   is_tax_registered: boolean;
+  can_collect_tax?: boolean;
   default_tax_rate_percent?: string;
   services: WorkshopServiceItem[];
   operating_hours: WorkshopOperatingHours[];
@@ -4119,6 +4407,190 @@ export interface WorkshopBooking {
   service_items: WorkshopBookingServiceItem[];
   quotations: WorkshopQuotation[];
   active_quotation?: WorkshopQuotation | null;
+  work_order_id?: string | null;
+  work_order_number?: string | null;
+  work_order_status?: string | null;
+  work_order_technician?: string | null;
+  work_order_tasks_count?: number;
+  work_order_created_at?: string | null;
+  work_order?: WorkOrderDetail | null;
+  audit_logs?: Array<{
+    id: string;
+    event_type: string;
+    action: string;
+    created_at: string | null;
+    status: string;
+    metadata: Record<string, unknown>;
+  }>;
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkOrderTaskItem {
+  id: string;
+  work_order: string;
+  description: string;
+  assigned_technician?: string | null;
+  assigned_technician_name?: string | null;
+  estimated_labour_minutes: number;
+  actual_labour_minutes: number;
+  status: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "BLOCKED";
+  status_display?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  notes?: string;
+  order_index: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface WorkOrderPartUsageItem {
+  id: string;
+  work_order: string;
+  part_name: string;
+  part_number?: string;
+  description?: string;
+  catalogue_part?: string | null;
+  quantity: string;
+  unit_cost: string;
+  total_cost: string;
+  usage_date: string;
+  added_by?: string | null;
+  added_by_name?: string | null;
+  created_at?: string;
+}
+
+export type ChangeOrderStatus = "DRAFT" | "SUBMITTED" | "APPROVED" | "REJECTED" | "CANCELLED";
+
+export interface ChangeOrderLineItem {
+  id: string;
+  item_type: "LABOUR" | "PART" | "DIAGNOSTIC" | "DISPOSAL" | "OTHER";
+  item_type_display?: string;
+  description: string;
+  part_number?: string;
+  catalogue_part?: string | null;
+  quantity: string;
+  unit_price: string;
+  line_total: string;
+  estimated_labour_minutes?: number | null;
+  created_at?: string;
+}
+
+export interface ChangeOrder {
+  id: string;
+  change_order_number: string;
+  work_order?: string;
+  work_order_number?: string;
+  version: number;
+  status: ChangeOrderStatus;
+  status_display?: string;
+  reason: string;
+  subtotal_labour: string;
+  subtotal_parts: string;
+  subtotal_other: string;
+  discount_amount: string;
+  tax_rate_percent: string;
+  tax_amount: string;
+  additional_amount: string;
+  revised_authorized_total: string;
+  currency: string;
+  created_by_name?: string | null;
+  submitted_at?: string | null;
+  reviewed_by_name?: string | null;
+  reviewed_at?: string | null;
+  buyer_notes?: string;
+  workshop_notes?: string;
+  line_items: ChangeOrderLineItem[];
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface CreateChangeOrderPayload {
+  reason: string;
+  discount_amount?: string | number;
+  tax_rate_percent?: string | number;
+  workshop_notes?: string;
+  submit_for_approval?: boolean;
+  line_items: Array<{
+    item_type: string;
+    description: string;
+    part_number?: string;
+    catalogue_part_id?: string | null;
+    quantity: string | number;
+    unit_price: string | number;
+    estimated_labour_minutes?: number | null;
+  }>;
+}
+
+export interface WorkOrderSummary {
+  id: string;
+  work_order_number: string;
+  booking: string;
+  booking_number: string;
+  quotation: string;
+  quotation_number: string;
+  vehicle_make: string;
+  vehicle_model: string;
+  vehicle_year: number | null;
+  vehicle_registration_plate: string;
+  lead_technician?: string | null;
+  lead_technician_name?: string | null;
+  status: "ASSIGNED" | "IN_PROGRESS" | "AWAITING_PARTS" | "QUALITY_CHECK" | "COMPLETED" | "CANCELLED";
+  status_display: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  total_parts_cost: string;
+  total_actual_labour_minutes: number;
+  total_estimated_labour_minutes: number;
+  task_count: number;
+  authorized_total_amount?: string;
+  approved_change_orders_amount?: string;
+  has_pending_change_orders?: boolean;
+  current_odometer?: number | null;
+  odometer_unit?: string | null;
+  vehicle_odometer_unit?: string | null;
+  odometer_unit_mismatch?: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface WorkOrderStatusUpdateWarning {
+  code: string;
+  message: string;
+  vehicle_odometer_unit: string;
+  work_order_odometer_unit: string;
+  vehicle_current_odometer: number | null;
+  work_order_odometer_reading: number | null;
+}
+
+export interface WorkOrderStatusUpdateResponse {
+  status: string;
+  message: string;
+  work_order: WorkOrderDetail;
+  warnings?: WorkOrderStatusUpdateWarning[];
+}
+
+export interface WorkOrderDetail extends WorkOrderSummary {
+  quotation_total: string;
+  quotation_currency: string;
+  buyer_name: string;
+  buyer_email: string;
+  buyer_phone: string;
+  lead_technician_email?: string | null;
+  internal_notes: string;
+  quality_notes: string;
+  cancellation_reason?: string;
+  tasks: WorkOrderTaskItem[];
+  parts_used: WorkOrderPartUsageItem[];
+  planned_parts?: QuotationLineItem[];
+  change_orders?: ChangeOrder[];
+}
+
+export interface WorkshopTechnicianMember {
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  role_display?: string;
+  is_active?: boolean;
 }

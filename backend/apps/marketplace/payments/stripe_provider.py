@@ -1,11 +1,17 @@
 import hmac
 import hashlib
 import json
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from decimal import Decimal
 from typing import Dict, Any, Tuple, Optional
 from django.conf import settings
 from apps.marketplace.payments.base import BasePaymentProvider
+
+logger = logging.getLogger(__name__)
 
 
 class StripePaymentProvider(BasePaymentProvider):
@@ -56,12 +62,74 @@ class StripePaymentProvider(BasePaymentProvider):
     ) -> Dict[str, Any]:
         """
         Creates a Stripe PaymentIntent / Checkout session.
+        If genuine Stripe credentials are configured, registers the PaymentIntent via Stripe API.
         In test mode or mock settings, creates a deterministic test PaymentIntent.
         """
         if order.currency != 'GBP':
             raise ValueError(f"Stripe UK provider only supports GBP transactions; received '{order.currency}'.")
 
         amount_pence = self._to_pence(order.total_amount)
+        buyer_email = getattr(order.buyer, 'email', '') if hasattr(order, 'buyer') and order.buyer else ''
+
+        # Attempt live Stripe API call if configured
+        if self.is_configured:
+            url = "https://api.stripe.com/v1/payment_intents"
+            params = {
+                "amount": str(amount_pence),
+                "currency": "gbp",
+                "payment_method_types[]": "card",
+                "description": f"DriverXtra Order {order.order_number}",
+                "receipt_email": buyer_email,
+                "metadata[order_number]": str(order.order_number),
+                "metadata[order_id]": str(order.id),
+                "metadata[buyer_email]": buyer_email,
+            }
+            if return_url:
+                params["return_url"] = return_url
+
+            encoded_data = urllib.parse.urlencode(params).encode('utf-8')
+            req = urllib.request.Request(
+                url,
+                data=encoded_data,
+                headers={
+                    "Authorization": f"Bearer {self.secret_key}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "DriverXtra-Platform/1.0",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    stripe_data = json.loads(resp.read().decode('utf-8'))
+                    pi_id = stripe_data.get('id')
+                    client_sec = stripe_data.get('client_secret')
+                    return {
+                        "provider": self.provider_name,
+                        "provider_order_id": pi_id,
+                        "client_secret": client_sec,
+                        "amount": str(order.total_amount),
+                        "amount_minor": amount_pence,
+                        "currency": "GBP",
+                        "publishable_key": self.publishable_key,
+                        "metadata": {
+                            "order_number": order.order_number,
+                            "order_id": str(order.id),
+                            "buyer_email": buyer_email,
+                        },
+                        "is_test_mode": self.test_mode,
+                        "raw_response": stripe_data,
+                    }
+            except urllib.error.HTTPError as http_err:
+                err_text = http_err.read().decode('utf-8', errors='replace')
+                logger.error("Stripe PaymentIntent creation error HTTP %s: %s", http_err.code, err_text)
+                if not getattr(settings, 'IS_TESTING', False):
+                    raise RuntimeError(f"Stripe API rejected payment session creation (HTTP {http_err.code}): {err_text}")
+                logger.warning("Falling back to deterministic test session in IS_TESTING environment due to Stripe HTTP error.")
+            except Exception as exc:
+                logger.error("Failed to connect to Stripe API: %s", str(exc))
+                if not getattr(settings, 'IS_TESTING', False):
+                    raise RuntimeError(f"Failed to communicate with Stripe API: {str(exc)}")
+                logger.warning("Falling back to deterministic test session in IS_TESTING environment due to connection error.")
 
         if self.test_mode:
             payment_intent_id = f"pi_test_{uuid.uuid4().hex[:18]}"
@@ -78,22 +146,16 @@ class StripePaymentProvider(BasePaymentProvider):
                 "metadata": {
                     "order_number": order.order_number,
                     "order_id": str(order.id),
-                    "buyer_email": order.buyer.email,
+                    "buyer_email": buyer_email,
                 },
                 "is_test_mode": True,
             }
 
         # In production, check if real Stripe API credentials are configured
-        has_real_stripe_key = (
-            bool(self.secret_key)
-            and not self.secret_key.startswith('sk_test_placeholder')
-            and self.secret_key.startswith(('sk_live_', 'sk_test_'))
+        raise RuntimeError(
+            "Live Stripe online payments are currently disabled. Real Stripe checkout requires "
+            "production Stripe API credentials (STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY)."
         )
-        if not has_real_stripe_key:
-            raise RuntimeError(
-                "Live Stripe online payments are currently disabled. Real Stripe checkout requires "
-                "production Stripe API credentials (STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY)."
-            )
 
     def verify_payment(
         self,
@@ -105,6 +167,23 @@ class StripePaymentProvider(BasePaymentProvider):
         Expected payload keys: payment_intent_id (or stripe_payment_intent_id, or client_secret).
         Rejects fabricated PaymentIntent IDs not associated with the order's session.
         """
+        # Strict currency enforcement
+        if getattr(order, 'currency', '') != 'GBP':
+            return False, f"Stripe UK provider only supports GBP transactions; received '{getattr(order, 'currency', '')}'.", {}
+
+        payload_currency = str(payload.get('currency', '')).strip().upper()
+        if payload_currency and payload_currency != 'GBP':
+            return False, f"Stripe verification received invalid currency '{payload_currency}'; expected GBP.", {}
+
+        # Amount validation if supplied in payload
+        if 'amount' in payload and payload.get('amount') is not None:
+            try:
+                dec_amount = Decimal(str(payload['amount']))
+                if dec_amount != Decimal(str(order.total_amount)):
+                    return False, f"Stripe verification amount ({dec_amount}) does not match order amount ({order.total_amount} GBP).", {}
+            except (ValueError, ArithmeticError):
+                return False, f"Invalid payment amount '{payload.get('amount')}'.", {}
+
         payment_intent_id = (
             payload.get('payment_intent_id')
             or payload.get('stripe_payment_intent_id')
@@ -135,8 +214,6 @@ class StripePaymentProvider(BasePaymentProvider):
         if not self.test_mode or has_real_stripe_key:
             if not has_real_stripe_key:
                 return False, "Production Stripe verification requires valid Stripe API keys.", {}
-            import urllib.request
-            import urllib.error
             url = f"https://api.stripe.com/v1/payment_intents/{payment_intent_id}"
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.secret_key}"})
             try:
@@ -150,6 +227,10 @@ class StripePaymentProvider(BasePaymentProvider):
                     expected_pence = self._to_pence(order.total_amount)
                     if stripe_amount != expected_pence:
                         return False, f"Stripe payment amount ({stripe_amount}) does not match order amount ({expected_pence} pence).", stripe_data
+
+                    stripe_currency = str(stripe_data.get('currency', '')).strip().upper()
+                    if stripe_currency != 'GBP':
+                        return False, f"Stripe payment currency ({stripe_currency}) does not match order currency (GBP).", stripe_data
 
                     return True, payment_intent_id, {
                         "payment_intent_id": payment_intent_id,

@@ -1,52 +1,35 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import Image from "next/image";
 import {
   api,
   PlatformDispute,
   PlatformRefund,
-  PlatformDisputeEvent,
   OrderRefundSummary,
-  DisputeCategory,
   DisputeStatus,
-  DisputePriority,
   DisputeResolution,
   RefundMethod,
   resolveMediaUrl,
 } from "@/lib/api/client";
-import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
   Scale,
   RotateCcw,
-  Clock,
   CheckCircle2,
-  XCircle,
-  AlertTriangle,
   Search,
-  Filter,
   CreditCard,
-  Banknote,
   Send,
   MessageSquare,
-  ShieldAlert,
   ShieldCheck,
-  FileText,
-  DollarSign,
-  User,
-  ArrowRight,
-  ExternalLink,
-  ChevronRight,
   Copy,
   Check,
   X,
   Loader2,
   RefreshCw,
-  Eye,
   AlertCircle,
 } from "lucide-react";
 
 export default function AdminDisputesRefundsView() {
-  const { user } = useAuth();
 
   // Navigation
   const [activeTab, setActiveTab] = useState<"disputes" | "refunds" | "issue_refund">("disputes");
@@ -145,11 +128,13 @@ export default function AdminDisputesRefundsView() {
   }, [refundFilter]);
 
   useEffect(() => {
-    if (activeTab === "disputes") {
-      loadDisputes();
-    } else if (activeTab === "refunds") {
-      loadRefunds();
-    }
+    queueMicrotask(() => {
+      if (activeTab === "disputes") {
+        void loadDisputes();
+      } else if (activeTab === "refunds") {
+        void loadRefunds();
+      }
+    });
   }, [activeTab, loadDisputes, loadRefunds]);
 
   // Handle dispute adjudication
@@ -1125,7 +1110,7 @@ export default function AdminDisputesRefundsView() {
                             rel="noopener noreferrer"
                             className="block w-16 h-16 rounded-xl border border-slate-300 overflow-hidden hover:opacity-80 transition-opacity bg-white"
                           >
-                            <img src={resolveMediaUrl(url)} alt={`Evidence ${idx + 1}`} className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${idx + 1}`} width={64} height={64} unoptimized className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>

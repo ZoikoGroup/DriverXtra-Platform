@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
+import NextImage from "next/image";
 import {
   Image as ImageIcon,
   Upload,
@@ -79,16 +80,17 @@ export default function ListingPhotoManager({
   const activeBlobUrlsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    const urls = activeBlobUrlsRef.current;
     return () => {
       // Revoke all created browser object URLs on unmount
-      activeBlobUrlsRef.current.forEach((objUrl) => {
+      urls.forEach((objUrl) => {
         try {
           URL.revokeObjectURL(objUrl);
         } catch {
           // Ignore
         }
       });
-      activeBlobUrlsRef.current.clear();
+      urls.clear();
     };
   }, []);
 
@@ -544,13 +546,16 @@ const handleSetPrimary = (url: string) => {
                 {/* Thumbnail */}
                 <div className="relative aspect-[4/3] bg-slate-950 flex items-center justify-center overflow-hidden">
                   {!isBroken ? (
-                    <img
+                    <NextImage
                       src={resolvedSrc}
                       alt={`Listing Photo ${index + 1}`}
+                      fill
+                      unoptimized
+                      sizes="(max-width: 768px) 100vw, 33vw"
                       onError={() => {
                         setBrokenImages((prev) => ({ ...prev, [url]: true }));
                       }}
-                      className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      className="object-cover transition-transform duration-300 group-hover:scale-105"
                     />
                   ) : (
                     <div className="p-3 text-center text-slate-500 space-y-1">
@@ -711,10 +716,13 @@ const handleSetPrimary = (url: string) => {
               className="relative rounded-2xl border border-amber-500/50 bg-slate-900 overflow-hidden flex flex-col animate-pulse"
             >
               <div className="relative aspect-[4/3] bg-slate-950 flex items-center justify-center overflow-hidden">
-                <img
+                <NextImage
                   src={item.tempUrl}
                   alt={item.filename}
-                  className="w-full h-full object-cover opacity-50"
+                  fill
+                  unoptimized
+                  sizes="(max-width: 768px) 100vw, 33vw"
+                  className="object-cover opacity-50"
                 />
                 <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-1.5 p-2 text-center">
                   {item.status === "uploading" ? (

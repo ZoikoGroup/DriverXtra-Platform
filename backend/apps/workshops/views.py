@@ -1,3 +1,5 @@
+from apps.identity.models import User
+from apps.catalogue.models import Part
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
@@ -15,6 +17,14 @@ from apps.workshops.models import (
     DayOfWeekChoices,
     BookingStatusChoices,
     QuotationStatusChoices,
+    WorkOrder,
+    WorkOrderTask,
+    WorkOrderPartUsage,
+    WorkOrderStatusChoices,
+    WorkOrderTaskStatusChoices,
+    ChangeOrder,
+    ChangeOrderLineItem,
+    ChangeOrderStatusChoices,
 )
 from apps.workshops.serializers import (
     WorkshopProfilePublicSerializer,
@@ -29,8 +39,30 @@ from apps.workshops.serializers import (
     WorkshopQuotationSerializer,
     QuotationCreateUpdateSerializer,
     QuotationResponseSerializer,
+    WorkOrderSerializer,
+    WorkOrderListSerializer,
+    WorkOrderTaskSerializer,
+    WorkOrderPartUsageSerializer,
+    WorkOrderAssignTechnicianSerializer,
+    WorkOrderStatusUpdateSerializer,
+    WorkOrderTaskCreateUpdateSerializer,
+    WorkOrderPartUsageCreateSerializer,
+    WorkshopTechnicianMemberSerializer,
+    BuyerWorkOrderSerializer,
+    ChangeOrderSerializer,
+    BuyerChangeOrderSerializer,
+    ChangeOrderCreateSerializer,
+    ChangeOrderDecisionSerializer,
+    AdminWorkshopTaxAuthorizationSerializer,
 )
-from apps.workshops.services import BookingService, QuotationService, CapacityExceededError
+from apps.workshops.services import (
+    BookingService,
+    QuotationService,
+    WorkOrderService,
+    ChangeOrderService,
+    CapacityExceededError,
+    WorkshopTaxAuthorizationService,
+)
 from apps.workshops.permissions import (
     IsWorkshopOwnerOrAdmin,
     IsWorkshopStaffOrMember,
@@ -40,37 +72,55 @@ from apps.workshops.permissions import (
 from apps.organisations.models import Organisation, OrganisationTypeChoices, OrganisationRoleChoices
 
 
-def get_user_workshop_profile(user) -> WorkshopProfile:
+def get_user_workshop_profile(user_or_request, organisation_id=None) -> WorkshopProfile:
     """
     Resolves the WorkshopProfile associated with an authenticated user's active WORKSHOP organisation.
+
+    Strictly READ-ONLY: does not create or modify Organisation, Membership, or WorkshopProfile records.
+    Detects ambiguous multiple workshop organisations if organisation_id is not specified.
     """
+    if hasattr(user_or_request, 'user'):
+        request = user_or_request
+        user = request.user
+        if not organisation_id:
+            organisation_id = request.headers.get('X-Organisation-ID') or request.query_params.get('organisation_id')
+    else:
+        user = user_or_request
+        if not organisation_id:
+            organisation_id = getattr(user, '_target_organisation_id', None)
+
     if is_platform_admin_or_staff(user):
+        if organisation_id:
+            profile = WorkshopProfile.objects.filter(organisation_id=organisation_id, is_verified=True).first()
+            if profile:
+                return profile
         # Platform admins default to first active workshop if not linked directly
         profile = WorkshopProfile.objects.filter(is_verified=True).first()
         if profile:
             return profile
 
     # Look for active membership in a WORKSHOP organisation
-    membership = user.organisation_memberships.filter(
+    memberships = user.organisation_memberships.filter(
         is_active=True,
         organisation__type=OrganisationTypeChoices.WORKSHOP,
         organisation__is_active=True,
-    ).select_related('organisation').first()
+    ).select_related('organisation')
 
-    if not membership:
+    if organisation_id:
+        memberships = memberships.filter(organisation_id=organisation_id)
+
+    count = memberships.count()
+    if count == 0:
         raise PermissionDenied("You are not an active member of any registered workshop organisation.")
+    if count > 1:
+        raise PermissionDenied("Multiple active workshop organisations found. Please specify the target organisation.")
 
+    membership = memberships.first()
     org = membership.organisation
-    profile, _ = WorkshopProfile.objects.get_or_create(
-        organisation=org,
-        defaults={
-            'business_name': org.name,
-            'slug': org.slug,
-            'currency': 'GBP',
-            'is_accepting_bookings': True,
-        }
-    )
-    return profile
+    try:
+        return org.workshop_profile
+    except (WorkshopProfile.DoesNotExist, AttributeError):
+        raise PermissionDenied("No workshop profile exists for your organisation. Please contact support.")
 
 
 # =========================================================
@@ -164,7 +214,14 @@ class BuyerBookingListCreateView(views.APIView):
         ).prefetch_related('service_items', 'quotations', 'quotations__line_items').order_by('-created_at')
 
         if status_filter:
-            qs = qs.filter(status=status_filter.upper())
+            status_val = status_filter.upper()
+            if status_val == BookingStatusChoices.QUOTED:
+                qs = qs.filter(
+                    Q(status=BookingStatusChoices.QUOTED) |
+                    Q(quotations__status=QuotationStatusChoices.ISSUED)
+                ).distinct()
+            else:
+                qs = qs.filter(status=status_val)
 
         serializer = WorkshopBookingDetailSerializer(qs, many=True)
         return Response({'results': serializer.data, 'count': qs.count()})
@@ -292,19 +349,39 @@ class WorkshopProfileManageView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        profile = get_user_workshop_profile(request.user)
+        profile = get_user_workshop_profile(request)
         serializer = WorkshopProfilePublicSerializer(profile)
         return Response(serializer.data)
 
     def patch(self, request):
-        profile = get_user_workshop_profile(request.user)
+        profile = get_user_workshop_profile(request)
         # Verify Owner or Admin role
-        if not is_platform_admin_or_staff(request.user):
+        is_staff_user = is_platform_admin_or_staff(request.user)
+        if not is_staff_user:
             role = profile.organisation.get_member_role(request.user)
             if role not in (OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN):
                 raise PermissionDenied("Only workshop Owners and Admins can update profile settings.")
+            if 'can_collect_tax' in request.data:
+                raise PermissionDenied(
+                    "Workshop owners and operators cannot modify tax collection authorization. Only platform administrators can grant or revoke tax collection permissions."
+                )
 
-        serializer = WorkshopProfileManageSerializer(profile, data=request.data, partial=True)
+        # If staff user explicitly passed can_collect_tax, use the audited authorization service
+        if is_staff_user and 'can_collect_tax' in request.data:
+            tax_auth_requested = bool(request.data['can_collect_tax'])
+            if tax_auth_requested != profile.can_collect_tax:
+                try:
+                    WorkshopTaxAuthorizationService.set_tax_collection_authorization(
+                        workshop=profile,
+                        authorized=tax_auth_requested,
+                        actor=request.user,
+                        reason="Staff profile manage PATCH",
+                    )
+                except DjangoValidationError as exc:
+                    msg = exc.message if hasattr(exc, 'message') else str(exc)
+                    return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = WorkshopProfileManageSerializer(profile, data=request.data, partial=True, context={'request': request})
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(WorkshopProfilePublicSerializer(profile).data)
@@ -368,7 +445,10 @@ class WorkshopServiceListCreateView(views.APIView):
 
     def get(self, request):
         profile = get_user_workshop_profile(request.user)
-        services = profile.services.filter(is_active=True).select_related('category').order_by('name')
+        services = profile.services.all().select_related('category').order_by('name')
+        active_only = request.query_params.get('active_only')
+        if active_only and active_only.lower() in ('1', 'true', 'yes'):
+            services = services.filter(is_active=True)
         serializer = WorkshopServiceSerializer(services, many=True)
         return Response(serializer.data)
 
@@ -379,9 +459,9 @@ class WorkshopServiceListCreateView(views.APIView):
             if role not in (OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN):
                 raise PermissionDenied("Only workshop Owners and Admins can create services.")
 
-        serializer = WorkshopServiceSerializer(data=request.data)
+        serializer = WorkshopServiceSerializer(data=request.data, context={'request': request, 'workshop': profile})
         serializer.is_valid(raise_exception=True)
-        service = serializer.save(workshop=profile)
+        service = serializer.save(workshop=profile, currency=profile.currency)
         return Response(WorkshopServiceSerializer(service).data, status=status.HTTP_201_CREATED)
 
 
@@ -404,12 +484,13 @@ class WorkshopServiceDetailView(views.APIView):
 
     def patch(self, request, id):
         service = self.get_service(request, id)
+        profile = service.workshop
         if not is_platform_admin_or_staff(request.user):
-            role = service.workshop.organisation.get_member_role(request.user)
+            role = profile.organisation.get_member_role(request.user)
             if role not in (OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN):
                 raise PermissionDenied("Only workshop Owners and Admins can update services.")
 
-        serializer = WorkshopServiceSerializer(service, data=request.data, partial=True)
+        serializer = WorkshopServiceSerializer(service, data=request.data, partial=True, context={'request': request, 'workshop': profile})
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(WorkshopServiceSerializer(service).data)
@@ -443,7 +524,14 @@ class WorkshopBookingManageListView(views.APIView):
         ).prefetch_related('service_items', 'quotations', 'quotations__line_items').order_by('-created_at')
 
         if status_filter:
-            qs = qs.filter(status=status_filter.upper())
+            status_val = status_filter.upper()
+            if status_val == BookingStatusChoices.QUOTED:
+                qs = qs.filter(
+                    Q(status=BookingStatusChoices.QUOTED) |
+                    Q(quotations__status=QuotationStatusChoices.ISSUED)
+                ).distinct()
+            else:
+                qs = qs.filter(status=status_val)
         if date_filter:
             qs = qs.filter(preferred_date=date_filter)
 
@@ -532,7 +620,7 @@ class WorkshopQuotationCreateReviseView(views.APIView):
         profile = get_user_workshop_profile(request.user)
         booking = get_object_or_404(WorkshopBooking, id=id, workshop=profile)
 
-        serializer = QuotationCreateUpdateSerializer(data=request.data)
+        serializer = QuotationCreateUpdateSerializer(data=request.data, context={'request': request, 'booking': booking})
         serializer.is_valid(raise_exception=True)
 
         try:
@@ -608,12 +696,557 @@ class AdminWorkshopBookingListView(generics.ListAPIView):
             raise PermissionDenied("Requires platform staff or admin privileges.")
 
         qs = WorkshopBooking.objects.all().select_related(
-            'workshop', 'workshop__organisation', 'buyer', 'vehicle', 'assigned_technician'
-        ).prefetch_related('service_items', 'quotations').order_by('-created_at')
+            'workshop', 'workshop__organisation', 'buyer', 'vehicle', 'assigned_technician',
+            'work_order', 'work_order__lead_technician'
+        ).prefetch_related(
+            'service_items',
+            'quotations',
+            'quotations__line_items',
+            'work_order__tasks',
+            'work_order__parts_used',
+            'work_order__change_orders',
+            'work_order__change_orders__line_items',
+        ).order_by('-created_at')
 
         status_param = self.request.query_params.get('status')
-        if status_param:
-            qs = qs.filter(status=status_param.upper())
-        return qs
+        if status_param and status_param.upper() != 'ALL':
+            status_val = status_param.upper()
+            if status_val == BookingStatusChoices.QUOTED:
+                qs = qs.filter(
+                    Q(status=BookingStatusChoices.QUOTED) |
+                    Q(quotations__status=QuotationStatusChoices.ISSUED)
+                )
+            else:
+                qs = qs.filter(status=status_val)
+
+        q = self.request.query_params.get('q') or self.request.query_params.get('search')
+        if q and q.strip():
+            query_str = q.strip()
+            qs = qs.filter(
+                Q(booking_number__icontains=query_str) |
+                Q(workshop__business_name__icontains=query_str) |
+                Q(workshop__organisation__name__icontains=query_str) |
+                Q(buyer__first_name__icontains=query_str) |
+                Q(buyer__last_name__icontains=query_str) |
+                Q(buyer__email__icontains=query_str) |
+                Q(vehicle_registration_plate__icontains=query_str) |
+                Q(vehicle__registration_plate__icontains=query_str) |
+                Q(quotations__quotation_number__icontains=query_str) |
+                Q(work_order__work_order_number__icontains=query_str)
+            )
+
+        return qs.distinct()
 
     serializer_class = WorkshopBookingDetailSerializer
+
+
+class AdminWorkshopTaxAuthorizationView(views.APIView):
+    """
+    Platform administration endpoint to explicitly grant or revoke tax collection authorization.
+    POST /api/v1/workshops/admin/<uuid:id>/tax-authorization/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        if not is_platform_admin_or_staff(request.user):
+            raise PermissionDenied("Only authorized platform administrators and staff can modify workshop tax collection permissions.")
+
+        workshop = get_object_or_404(WorkshopProfile, id=id)
+        serializer = AdminWorkshopTaxAuthorizationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        can_collect_tax = serializer.validated_data['can_collect_tax']
+        reason = serializer.validated_data.get('reason', '')
+
+        try:
+            updated_workshop = WorkshopTaxAuthorizationService.set_tax_collection_authorization(
+                workshop=workshop,
+                authorized=can_collect_tax,
+                actor=request.user,
+                reason=reason,
+            )
+            return Response(WorkshopProfilePublicSerializer(updated_workshop).data, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+# =============================================================================
+# WORK ORDER MANAGEMENT VIEWS
+# =============================================================================
+
+class WorkOrderManageListView(views.APIView):
+    """
+    List work orders for the authenticated user's workshop.
+    GET /api/v1/workshops/manage/work-orders/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        profile = get_user_workshop_profile(request.user)
+        queryset = WorkOrder.objects.filter(workshop=profile).select_related(
+            'booking', 'quotation', 'buyer', 'lead_technician', 'workshop'
+        ).prefetch_related('tasks', 'parts_used')
+
+        status_param = request.query_params.get('status')
+        if status_param and status_param != 'ALL':
+            queryset = queryset.filter(status=status_param.upper())
+
+        technician_param = request.query_params.get('technician_id')
+        if technician_param:
+            queryset = queryset.filter(lead_technician_id=technician_param)
+
+        search_query = request.query_params.get('q')
+        if search_query:
+            q = search_query.strip()
+            queryset = queryset.filter(
+                Q(work_order_number__icontains=q)
+                | Q(booking__booking_number__icontains=q)
+                | Q(vehicle_registration_plate__icontains=q)
+                | Q(vehicle_vin__icontains=q)
+                | Q(buyer__first_name__icontains=q)
+                | Q(buyer__last_name__icontains=q)
+                | Q(buyer__email__icontains=q)
+            )
+
+        serializer = WorkOrderListSerializer(queryset, many=True)
+        return Response({
+            'status': 'success',
+            'count': queryset.count(),
+            'results': serializer.data,
+        })
+
+
+class WorkOrderManageDetailView(views.APIView):
+    """
+    Retrieve single work order details.
+    GET /api/v1/workshops/manage/work-orders/<id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(
+            WorkOrder.objects.select_related(
+                'booking', 'quotation', 'buyer', 'lead_technician', 'assigned_by', 'quality_inspected_by', 'workshop'
+            ).prefetch_related('tasks', 'parts_used'),
+            id=id,
+            workshop=profile,
+        )
+        serializer = WorkOrderSerializer(work_order)
+        return Response(serializer.data)
+
+
+class WorkOrderAssignTechnicianView(views.APIView):
+    """
+    Assign or reassign lead technician to a work order.
+    POST /api/v1/workshops/manage/work-orders/<id>/assign-technician/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+
+        serializer = WorkOrderAssignTechnicianSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        technician = get_object_or_404(User, id=serializer.validated_data['technician_id'])
+
+        try:
+            updated = WorkOrderService.assign_technician(
+                work_order=work_order,
+                technician=technician,
+                actor=request.user,
+            )
+            return Response({
+                'status': 'success',
+                'message': f"Technician {technician.full_name or technician.email} assigned to Work Order #{updated.work_order_number}.",
+                'work_order': WorkOrderSerializer(updated).data,
+            })
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkOrderStatusUpdateView(views.APIView):
+    """
+    Execute validated status transition for a Work Order.
+    POST /api/v1/workshops/manage/work-orders/<id>/status/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+
+        serializer = WorkOrderStatusUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated = WorkOrderService.update_status(
+                work_order=work_order,
+                new_status=data['status'],
+                actor=request.user,
+                internal_notes=data.get('internal_notes', ''),
+                quality_notes=data.get('quality_notes', ''),
+                cancellation_reason=data.get('cancellation_reason', ''),
+            )
+            resp_data = {
+                'status': 'success',
+                'message': f"Work order transitioned to {updated.get_status_display()}.",
+                'work_order': WorkOrderSerializer(updated).data,
+            }
+            warnings = getattr(updated, '_status_update_warnings', [])
+            if warnings:
+                resp_data['warnings'] = warnings
+            return Response(resp_data)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkOrderTaskCreateView(views.APIView):
+    """
+    Add a task to a work order.
+    POST /api/v1/workshops/manage/work-orders/<id>/tasks/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+
+        serializer = WorkOrderTaskCreateUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        assigned_tech = None
+        if data.get('assigned_technician_id'):
+            assigned_tech = get_object_or_404(User, id=data['assigned_technician_id'])
+
+        try:
+            task = WorkOrderService.add_task(
+                work_order=work_order,
+                description=data['description'],
+                assigned_technician=assigned_tech,
+                estimated_labour_minutes=data.get('estimated_labour_minutes', 60),
+                notes=data.get('notes', ''),
+                actor=request.user,
+            )
+            return Response(WorkOrderTaskSerializer(task).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkOrderTaskDetailView(views.APIView):
+    """
+    Update or delete a task on a work order.
+    PATCH/DELETE /api/v1/workshops/manage/work-orders/<id>/tasks/<task_id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, id, task_id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+        task = get_object_or_404(WorkOrderTask, id=task_id, work_order=work_order)
+
+        serializer = WorkOrderTaskCreateUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        assigned_tech = None
+        if 'assigned_technician_id' in data:
+            if data['assigned_technician_id']:
+                assigned_tech = get_object_or_404(User, id=data['assigned_technician_id'])
+
+        try:
+            updated = WorkOrderService.update_task(
+                task=task,
+                status=data.get('status'),
+                actual_labour_minutes=data.get('actual_labour_minutes'),
+                notes=data.get('notes'),
+                assigned_technician=assigned_tech,
+                actor=request.user,
+            )
+            return Response(WorkOrderTaskSerializer(updated).data)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, id, task_id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+        task = get_object_or_404(WorkOrderTask, id=task_id, work_order=work_order)
+
+        try:
+            WorkOrderService.delete_task(task=task, actor=request.user)
+            return Response({'status': 'success', 'message': 'Task removed.'}, status=status.HTTP_204_NO_CONTENT)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkOrderPartUsageListCreateView(views.APIView):
+    """
+    List or record spare parts consumed on a work order.
+    GET/POST /api/v1/workshops/manage/work-orders/<id>/parts/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+        parts = work_order.parts_used.all().select_related('added_by', 'catalogue_part')
+        return Response({
+            'status': 'success',
+            'results': WorkOrderPartUsageSerializer(parts, many=True).data,
+            'total_parts_cost': str(work_order.total_parts_cost),
+        })
+
+    def post(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+
+        serializer = WorkOrderPartUsageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        catalogue_part = None
+        if data.get('catalogue_part_id'):
+            catalogue_part = get_object_or_404(Part, id=data['catalogue_part_id'])
+
+        try:
+            part_usage = WorkOrderService.record_part_usage(
+                work_order=work_order,
+                part_name=data['part_name'],
+                quantity=data['quantity'],
+                unit_cost=data['unit_cost'],
+                part_number=data.get('part_number', ''),
+                description=data.get('description', ''),
+                catalogue_part=catalogue_part,
+                actor=request.user,
+            )
+            return Response(WorkOrderPartUsageSerializer(part_usage).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkOrderPartUsageDetailView(views.APIView):
+    """
+    Delete a recorded part usage entry.
+    DELETE /api/v1/workshops/manage/work-orders/<id>/parts/<part_id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, id, part_id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+        part = get_object_or_404(WorkOrderPartUsage, id=part_id, work_order=work_order)
+
+        try:
+            WorkOrderService.delete_part_usage(part_usage=part, actor=request.user)
+            return Response({'status': 'success', 'message': 'Part usage entry removed.'}, status=status.HTTP_204_NO_CONTENT)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkshopTechnicianListView(views.APIView):
+    """
+    List active technicians and staff members of the caller's workshop organisation.
+    GET /api/v1/workshops/manage/technicians/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        profile = get_user_workshop_profile(request.user)
+        memberships = profile.organisation.memberships.filter(
+            is_active=True
+        ).select_related('user')
+
+        serializer = WorkshopTechnicianMemberSerializer(memberships, many=True)
+        return Response({
+            'status': 'success',
+            'results': serializer.data,
+        })
+
+
+class BuyerWorkOrderDetailView(views.APIView):
+    """
+    Allows a buyer to inspect the active work order and live repair progress for their booking.
+    GET /api/v1/workshops/bookings/my/<booking_id>/work-order/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        booking = get_object_or_404(WorkshopBooking, id=id, buyer=request.user)
+        if not hasattr(booking, 'work_order') or not booking.work_order:
+            return Response({'status': 'error', 'message': 'No work order has been created for this booking yet.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = BuyerWorkOrderSerializer(booking.work_order)
+        return Response(serializer.data)
+
+# ==========================================
+# Change Orders Views (Workshop & Buyer)
+# ==========================================
+
+class WorkOrderChangeOrderListCreateView(views.APIView):
+    """
+    List or create change orders for a specific work order.
+    GET/POST /api/v1/workshops/manage/work-orders/<id>/change-orders/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+        orders = work_order.change_orders.all().select_related('created_by', 'reviewed_by').prefetch_related('line_items')
+        return Response({
+            'status': 'success',
+            'results': ChangeOrderSerializer(orders, many=True).data,
+            'authorized_total_amount': str(work_order.authorized_total_amount),
+            'approved_change_orders_amount': str(work_order.approved_change_orders_amount),
+            'has_pending_change_orders': work_order.has_pending_change_orders,
+        })
+
+    def post(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        work_order = get_object_or_404(WorkOrder, id=id, workshop=profile)
+
+        serializer = ChangeOrderCreateSerializer(data=request.data, context={'request': request, 'work_order': work_order})
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            change_order = ChangeOrderService.create_change_order(
+                work_order=work_order,
+                data=serializer.validated_data,
+                actor=request.user,
+            )
+            return Response(ChangeOrderSerializer(change_order).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ChangeOrderDetailView(views.APIView):
+    """
+    Retrieve change order details for workshop staff.
+    GET /api/v1/workshops/manage/change-orders/<id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        change_order = get_object_or_404(ChangeOrder, id=id, work_order__workshop=profile)
+        return Response(ChangeOrderSerializer(change_order).data)
+
+
+class ChangeOrderSubmitView(views.APIView):
+    """
+    Submit a draft change order to the buyer for authorization.
+    POST /api/v1/workshops/manage/change-orders/<id>/submit/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        change_order = get_object_or_404(ChangeOrder, id=id, work_order__workshop=profile)
+
+        try:
+            submitted = ChangeOrderService.submit_change_order(
+                change_order=change_order,
+                actor=request.user,
+            )
+            return Response(ChangeOrderSerializer(submitted).data)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ChangeOrderCancelView(views.APIView):
+    """
+    Cancel an unresolved change order by the workshop.
+    POST /api/v1/workshops/manage/change-orders/<id>/cancel/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        profile = get_user_workshop_profile(request.user)
+        change_order = get_object_or_404(ChangeOrder, id=id, work_order__workshop=profile)
+        reason = request.data.get('reason', '')
+
+        try:
+            cancelled = ChangeOrderService.cancel_change_order(
+                change_order=change_order,
+                actor=request.user,
+                reason=reason,
+            )
+            return Response(ChangeOrderSerializer(cancelled).data)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BuyerChangeOrderListView(views.APIView):
+    """
+    List all change orders on an active booking for the authenticated buyer.
+    GET /api/v1/workshops/bookings/my/<booking_id>/change-orders/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        booking = get_object_or_404(WorkshopBooking, id=id, buyer=request.user)
+        if not hasattr(booking, 'work_order') or not booking.work_order:
+            return Response({'status': 'success', 'results': []})
+
+        orders = booking.work_order.change_orders.all().prefetch_related('line_items')
+        return Response({
+            'status': 'success',
+            'results': BuyerChangeOrderSerializer(orders, many=True).data,
+            'authorized_total_amount': str(booking.work_order.authorized_total_amount),
+            'approved_change_orders_amount': str(booking.work_order.approved_change_orders_amount),
+            'has_pending_change_orders': booking.work_order.has_pending_change_orders,
+        })
+
+
+class BuyerChangeOrderApproveView(views.APIView):
+    """
+    Buyer authorizes the additional repairs and costs for a change order.
+    POST /api/v1/workshops/change-orders/<id>/approve/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        change_order = get_object_or_404(ChangeOrder, id=id, work_order__buyer=request.user)
+        serializer = ChangeOrderDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        notes = serializer.validated_data.get('notes', '')
+
+        try:
+            approved = ChangeOrderService.approve_change_order(
+                change_order=change_order,
+                buyer=request.user,
+                notes=notes,
+            )
+            return Response(BuyerChangeOrderSerializer(approved).data)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BuyerChangeOrderRejectView(views.APIView):
+    """
+    Buyer declines the additional repair request.
+    POST /api/v1/workshops/change-orders/<id>/reject/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        change_order = get_object_or_404(ChangeOrder, id=id, work_order__buyer=request.user)
+        serializer = ChangeOrderDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get('reason') or serializer.validated_data.get('notes', '')
+
+        try:
+            rejected = ChangeOrderService.reject_change_order(
+                change_order=change_order,
+                buyer=request.user,
+                reason=reason,
+            )
+            return Response(BuyerChangeOrderSerializer(rejected).data)
+        except DjangoValidationError as e:
+            return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
