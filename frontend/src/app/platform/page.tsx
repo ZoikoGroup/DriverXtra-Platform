@@ -16,7 +16,6 @@ import SellerInventoryView from "@/components/platform/SellerInventoryView";
 import WorkshopLandingView from "@/components/platform/WorkshopLandingView";
 import BuyerWorkshopsView from "@/components/platform/BuyerWorkshopsView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
-import AdminDisputesRefundsView from "@/components/platform/AdminDisputesRefundsView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import AdminWorkshopOversightView from "@/components/platform/AdminWorkshopOversightView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
@@ -63,11 +62,13 @@ export default function PlatformDashboardPage() {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
       if (tabParam) {
-        if (tabParam === "seller_disputes" || tabParam === "admin_disputes_refunds") {
-          setSelectedTab({ role: activeRole, tab: "seller_orders", itemData: { type: "tab", id: "disputes" } });
-        } else {
-          setSelectedTab({ role: activeRole, tab: tabParam });
-        }
+        queueMicrotask(() => {
+          if (tabParam === "seller_disputes" || tabParam === "admin_disputes_refunds") {
+            setSelectedTab({ role: activeRole, tab: "seller_orders", itemData: { type: "tab", id: "disputes" } });
+          } else {
+            setSelectedTab({ role: activeRole, tab: tabParam });
+          }
+        });
       }
     }
   }, [activeRole]);

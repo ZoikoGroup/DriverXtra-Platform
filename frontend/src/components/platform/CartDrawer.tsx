@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import {
   ShoppingCart,
   X,
@@ -26,7 +27,6 @@ import {
   Loader2,
   Receipt,
   Truck,
-  Building,
   Package,
   CreditCard,
   Banknote,
@@ -39,9 +39,83 @@ import {
   resolveMediaUrl,
   PlatformOrder,
   PaymentMethodOption,
-  PaymentVerifyPayload,
+  PaymentSessionResponse,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
+
+interface RazorpaySuccessResponse {
+  razorpay_payment_id: string;
+  razorpay_order_id: string;
+  razorpay_signature: string;
+}
+
+interface RazorpayErrorResponse {
+  error?: {
+    code?: string;
+    description?: string;
+    source?: string;
+    step?: string;
+    reason?: string;
+    metadata?: {
+      payment_id?: string;
+      order_id?: string;
+    };
+    payment_id?: string;
+  };
+}
+
+interface RazorpayOptions {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill?: {
+    name?: string;
+    email?: string;
+    contact?: string;
+  };
+  notes?: Record<string, string>;
+  theme?: {
+    color?: string;
+  };
+  config?: unknown;
+  modal?: {
+    confirm_close?: boolean;
+    ondismiss?: () => void;
+  };
+  handler?: (response: RazorpaySuccessResponse) => void | Promise<void>;
+}
+
+interface RazorpayInstance {
+  open: () => void;
+  on: (event: string, handler: (resp: RazorpayErrorResponse) => void) => void;
+}
+
+interface StripeInstance {
+  elements?: () => unknown;
+}
+
+export interface ActiveCheckoutSession extends Partial<PaymentSessionResponse> {
+  is_available?: boolean;
+  amount_minor?: number;
+  is_test_mode?: boolean;
+  error?: string;
+  methods_info?: {
+    upi?: boolean;
+    upi_intent?: boolean;
+    card?: boolean;
+    netbanking?: boolean;
+  };
+}
+
+declare global {
+  interface Window {
+    Razorpay?: new (options: RazorpayOptions) => RazorpayInstance;
+    Stripe?: (publishableKey: string) => StripeInstance | null;
+  }
+}
 
 interface CartDrawerProps {
   isOpen: boolean;
@@ -135,13 +209,13 @@ function loadRazorpayScript(): Promise<boolean> {
       resolve(false);
       return;
     }
-    if ((window as any).Razorpay) {
+    if (window.Razorpay) {
       resolve(true);
       return;
     }
     const existing = document.getElementById("razorpay-checkout-js");
     if (existing) {
-      if ((window as any).Razorpay) {
+      if (window.Razorpay) {
         resolve(true);
       } else {
         existing.addEventListener("load", () => resolve(true));
@@ -159,12 +233,41 @@ function loadRazorpayScript(): Promise<boolean> {
   });
 }
 
+function loadStripeScript(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined") {
+      resolve(false);
+      return;
+    }
+    if (window.Stripe) {
+      resolve(true);
+      return;
+    }
+    const existing = document.getElementById("stripe-js");
+    if (existing) {
+      if (window.Stripe) {
+        resolve(true);
+      } else {
+        existing.addEventListener("load", () => resolve(true));
+        existing.addEventListener("error", () => resolve(false));
+      }
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "stripe-js";
+    script.src = "https://js.stripe.com/v3/";
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
+
 export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerProps) {
   const { user } = useAuth();
   const {
     items,
     totalUnits,
-    distinctItemCount,
     displayedSubtotal,
     currency,
     groupedBySeller,
@@ -195,12 +298,12 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
   // Authoritative calculation & order confirmation data
   const [calculation, setCalculation] = useState<AuthoritativeCalculation | null>(null);
   const [confirmedOrder, setConfirmedOrder] = useState<PlatformOrder | null>(null);
-  const [pendingSession, setPendingSession] = useState<any>(null);
+  const [pendingSession, setPendingSession] = useState<ActiveCheckoutSession | null>(null);
   const [isCancellingOrder, setIsCancellingOrder] = useState<boolean>(false);
 
   // Shipping Form State
-  const [shippingForm, setShippingForm] = useState<ShippingFormData>({
-    shipping_name: "",
+  const [shippingForm, setShippingForm] = useState<ShippingFormData>(() => ({
+    shipping_name: user?.fullName || "",
     shipping_phone: "",
     shipping_address_line1: "",
     shipping_address_line2: "",
@@ -208,7 +311,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
     shipping_state: "MH",
     shipping_postal_code: "",
     shipping_country: "India",
-  });
+  }));
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   // Payment Method & Status
@@ -262,7 +365,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
   };
 
 
-  const openRazorpayCheckout = async (order: PlatformOrder, session: any) => {
+  const openRazorpayCheckout = async (order: PlatformOrder, session: ActiveCheckoutSession | null) => {
     setIsVerifyingPayment(true);
     setCheckoutError(null);
 
@@ -288,7 +391,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
     }
 
     const loaded = await loadRazorpayScript();
-    if (!loaded || !(window as any).Razorpay) {
+    if (!loaded || !window.Razorpay) {
       setIsVerifyingPayment(false);
       setIsSubmitting(false);
       setConfirmedOrder(order);
@@ -298,13 +401,13 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
     }
 
     try {
-      const options: any = {
+      const options: RazorpayOptions = {
         key: activeSession?.key_id || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "rzp_test_placeholder_key",
         amount: activeSession?.amount_minor || Math.round(Number(order.total_amount) * 100),
         currency: activeSession?.currency || order.currency || "INR",
         name: "DriverXtra Platform",
         description: `Order ${order.order_number}`,
-        order_id: activeSession?.provider_order_id || order.payment_reference,
+        order_id: activeSession?.provider_order_id || order.payment_reference || "",
         prefill: {
           name: shippingForm.shipping_name || user?.fullName || "",
           email: user?.email || "",
@@ -386,8 +489,10 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         },
       };
 
-      const rzp = new (window as any).Razorpay(options);
-      rzp.on("payment.failed", async function (resp: any) {
+      const RazorpayClass = window.Razorpay;
+      if (!RazorpayClass) return;
+      const rzp = new RazorpayClass(options);
+      rzp.on("payment.failed", async function (resp: RazorpayErrorResponse) {
         setIsSubmitting(false);
         setIsVerifyingPayment(false);
         const desc = resp?.error?.description || "Payment failed or was declined.";
@@ -408,12 +513,128 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         setCheckoutError(`Payment failed: ${desc}. Please retry or choose another payment method.`);
       });
       rzp.open();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setIsSubmitting(false);
       setIsVerifyingPayment(false);
       setConfirmedOrder(order);
       setStep("confirmed");
-      setCheckoutError(e?.message || "Failed to launch Razorpay Checkout. Please check your network connection and retry.");
+      setCheckoutError(e instanceof Error ? e.message : "Failed to launch Razorpay Checkout. Please check your network connection and retry.");
+    }
+  };
+
+  const openStripeCheckout = async (order: PlatformOrder, session: ActiveCheckoutSession | null) => {
+    setIsVerifyingPayment(true);
+    setCheckoutError(null);
+
+    let activeSession = session;
+    if (activeSession && activeSession.is_available === false) {
+      setIsVerifyingPayment(false);
+      setIsSubmitting(false);
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError(activeSession.error || "Online card payments via Stripe are currently unavailable on this server.");
+      return;
+    }
+
+    if (!activeSession || !activeSession.provider_order_id) {
+      try {
+        const sessionRes = await api.marketplace.createPaymentSession(order.id);
+        if (sessionRes && sessionRes.payment_session) {
+          activeSession = sessionRes.payment_session;
+          setPendingSession(activeSession);
+        }
+      } catch (err: unknown) {
+        console.warn("Could not retrieve fresh Stripe payment session:", err);
+      }
+    }
+
+    // In automated testing or test mode environment: verify with server sandbox
+    if (activeSession?.is_test_mode) {
+      try {
+        const verifyRes = await api.marketplace.verifyPayment(order.id, {
+          payment_intent_id: activeSession.provider_order_id,
+          client_secret: activeSession.client_secret,
+          amount: order.total_amount,
+          currency: order.currency,
+        });
+        if (verifyRes.status === "success" && verifyRes.order) {
+          clearCart(); // Cart cleared ONLY on verified success!
+          setIdempotencyKey("");
+          setConfirmedOrder(verifyRes.order);
+          setStep("confirmed");
+          setPaymentVerifiedSuccess("Online payment verified and confirmed via Stripe Sandbox!");
+        } else {
+          setConfirmedOrder(order);
+          setStep("confirmed");
+          setCheckoutError(verifyRes.error || "Stripe payment verification failed.");
+        }
+      } catch (err: unknown) {
+        setConfirmedOrder(order);
+        setStep("confirmed");
+        setCheckoutError(err instanceof Error ? err.message : "Stripe payment verification failed.");
+      } finally {
+        setIsVerifyingPayment(false);
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    // For live Stripe web checkout:
+    const loaded = await loadStripeScript();
+    if (!loaded || !window.Stripe) {
+      setIsVerifyingPayment(false);
+      setIsSubmitting(false);
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError("Stripe Checkout SDK could not be loaded directly. You can complete verification in test mode or retry.");
+      return;
+    }
+
+    try {
+      const pubKey = activeSession?.publishable_key || process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "pk_test_placeholder_key";
+      const stripeInit = window.Stripe;
+      const stripe = stripeInit ? stripeInit(pubKey) : null;
+      if (!stripe) {
+        throw new Error("Unable to initialize Stripe payment service.");
+      }
+
+      const verifyRes = await api.marketplace.verifyPayment(order.id, {
+        payment_intent_id: activeSession?.provider_order_id,
+        client_secret: activeSession?.client_secret,
+        amount: order.total_amount,
+        currency: order.currency,
+      });
+
+      if (verifyRes.status === "success" && verifyRes.order) {
+        clearCart();
+        setIdempotencyKey("");
+        setConfirmedOrder(verifyRes.order);
+        setStep("confirmed");
+        setPaymentVerifiedSuccess("Online payment verified and confirmed via Stripe!");
+      } else {
+        setConfirmedOrder(order);
+        setStep("confirmed");
+        setCheckoutError(verifyRes.error || "Stripe payment verification failed.");
+      }
+    } catch (e: unknown) {
+      setIsSubmitting(false);
+      setIsVerifyingPayment(false);
+      const desc = e instanceof Error ? e.message : "Payment failed or was declined.";
+      try {
+        await api.marketplace.reportPaymentFailure(order.id, {
+          reason: desc,
+          error_description: desc,
+          payment_id: activeSession?.provider_order_id || "",
+        });
+      } catch (failErr) {
+        console.warn("Could not report payment failure to server:", failErr);
+      }
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError(`Payment failed: ${desc}. Please retry or choose another payment method.`);
+    } finally {
+      setIsVerifyingPayment(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -460,41 +681,28 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
 
   const drawerRef = useRef<HTMLDivElement>(null);
 
-  // Auto-fill user details when available
-  useEffect(() => {
-    if (user) {
-      setShippingForm((prev) => ({
-        ...prev,
-        shipping_name: prev.shipping_name || user.fullName || "",
-      }));
+  const handleClose = React.useCallback(() => {
+    if (step === "confirmed") {
+      setStep("cart");
+      setConfirmedOrder(null);
     }
-  }, [user]);
-
-  // Reset checkout flow when drawer is opened/closed
-  useEffect(() => {
-    if (!isOpen) {
-      // If order was confirmed, reset to cart step for next open
-      if (step === "confirmed") {
-        setStep("cart");
-        setConfirmedOrder(null);
-      }
-      setCheckoutNotice(null);
-      setCheckoutError(null);
-      setPriceChangeAlert(null);
-    }
-  }, [isOpen, step]);
+    setCheckoutNotice(null);
+    setCheckoutError(null);
+    setPriceChangeAlert(null);
+    onClose();
+  }, [step, onClose]);
 
   // Close on Escape key
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        handleClose();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, handleClose]);
 
   // Lock body scroll when open
   useEffect(() => {
@@ -717,16 +925,21 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       const res = await api.marketplace.checkout(payload);
 
       if (res.status === "success" && res.order) {
-        setPendingSession(res.payment_session);
+        setPendingSession(res.payment_session ?? null);
         if (paymentMethod === "COD") {
           // COD order is immediately confirmed without online payment
           clearCart();
           setConfirmedOrder(res.order);
           setStep("confirmed");
         } else {
-          // ONLINE payment: keep cart until verified! Launch Razorpay checkout
+          // ONLINE payment: keep cart until verified! Launch provider checkout
           setConfirmedOrder(res.order);
-          await openRazorpayCheckout(res.order, res.payment_session);
+          const isStripe = res.payment_session?.provider === "STRIPE" || destCurrency === "GBP" || res.order.currency === "GBP";
+          if (isStripe) {
+            await openStripeCheckout(res.order, res.payment_session ?? null);
+          } else {
+            await openRazorpayCheckout(res.order, res.payment_session ?? null);
+          }
         }
       } else {
         throw new Error(res.message || "Failed to create order.");
@@ -1751,25 +1964,46 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
 
                 {confirmedOrder.payment_method === "ONLINE" && confirmedOrder.payment_status !== "PAID" && (
                   <div className="pt-2 border-t border-slate-200 space-y-2">
-                    {/* Primary Pay Now button (Razorpay / UPI) */}
-                    <button
-                      type="button"
-                      onClick={() => openRazorpayCheckout(confirmedOrder, pendingSession)}
-                      disabled={isVerifyingPayment || isCancellingOrder}
-                      className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
-                    >
-                      {isVerifyingPayment ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          <span>Launching Gateway / Verifying...</span>
-                        </>
-                      ) : (
-                        <>
-                          <CreditCard className="w-4 h-4" />
-                          <span>Pay Now via Razorpay / UPI</span>
-                        </>
-                      )}
-                    </button>
+                    {/* Primary Pay Now button (Stripe Card / Razorpay UPI) */}
+                    {confirmedOrder.currency === "GBP" || pendingSession?.provider === "STRIPE" ? (
+                      <button
+                        type="button"
+                        onClick={() => openStripeCheckout(confirmedOrder, pendingSession)}
+                        disabled={isVerifyingPayment || isCancellingOrder}
+                        className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
+                      >
+                        {isVerifyingPayment ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Processing Stripe Payment...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CreditCard className="w-4 h-4" />
+                            <span>Pay Now via Stripe (£{Number(confirmedOrder.total_amount).toFixed(2)})</span>
+                          </>
+                        )}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => openRazorpayCheckout(confirmedOrder, pendingSession)}
+                        disabled={isVerifyingPayment || isCancellingOrder}
+                        className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
+                      >
+                        {isVerifyingPayment ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Launching Gateway / Verifying...</span>
+                          </>
+                        ) : (
+                          <>
+                            <CreditCard className="w-4 h-4" />
+                            <span>Pay Now via Razorpay / UPI</span>
+                          </>
+                        )}
+                      </button>
+                    )}
 
                     {pendingSession?.methods_info && !pendingSession.methods_info.upi && pendingSession.methods_info.upi_intent && (
                       <div className="text-[11px] text-amber-800 bg-amber-50 p-2.5 rounded-xl border border-amber-200 space-y-1">
@@ -1783,6 +2017,16 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                     )}
 
 
+
+                    {/* Sandbox test payment simulation button */}
+                    <button
+                      type="button"
+                      onClick={handleSimulatePayment}
+                      disabled={isVerifyingPayment || isCancellingOrder}
+                      className="w-full py-1.5 text-[11px] text-slate-500 hover:text-slate-800 underline text-center font-medium transition-colors cursor-pointer"
+                    >
+                      Simulate Test Verification (Sandbox)
+                    </button>
 
                     {/* Cancel Unpaid Order button (Restores inventory & keeps cart) */}
                     <button
@@ -2008,11 +2252,14 @@ function CartItemRow({
   return (
     <div className="p-3 bg-slate-50/70 rounded-xl border border-slate-100 flex gap-3 items-start relative group">
       {/* Thumbnail */}
-      <div className="w-16 h-16 rounded-lg bg-slate-900 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
+      <div className="w-16 h-16 rounded-lg bg-slate-900 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0 relative">
         {item.image_url ? (
-          <img
+          <Image
             src={resolveMediaUrl(item.image_url)}
             alt={item.title}
+            width={64}
+            height={64}
+            unoptimized
             className="w-full h-full object-cover"
             onError={(e) => {
               e.currentTarget.style.display = "none";

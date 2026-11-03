@@ -39,7 +39,7 @@ interface Phase2CatalogueViewProps {
 }
 
 export default function Phase2CatalogueView({ initialPartId }: Phase2CatalogueViewProps = {}) {
-  const { addItem, getItemQuantity, isItemInCart, openCart } = useCart();
+  const { addItem, getItemQuantity, isItemInCart } = useCart();
   const [cartFeedback, setCartFeedback] = useState<{ id: string; message: string } | null>(null);
 
   // Mode switcher: OEM Reference Catalogue vs Approved Marketplace Stock

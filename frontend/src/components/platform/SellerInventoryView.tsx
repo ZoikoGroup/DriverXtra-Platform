@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
+import Image from "next/image";
 import {
   api,
   resolveMediaUrl,
@@ -43,7 +44,6 @@ import {
   History,
   FilePlus,
   Camera,
-  ExternalLink,
   HelpCircle,
   Upload,
   Loader2,
@@ -1409,7 +1409,7 @@ export default function SellerInventoryView() {
                     <div className="flex items-start gap-4">
                       <div className="w-24 h-20 rounded-2xl bg-slate-900 overflow-hidden flex-shrink-0 flex items-center justify-center">
                         {v.primary_image_url ? (
-                          <img src={resolveMediaUrl(v.primary_image_url)} alt={v.title} className="w-full h-full object-cover" />
+                          <Image src={resolveMediaUrl(v.primary_image_url)} alt={v.title} width={96} height={80} unoptimized className="w-full h-full object-cover" />
                         ) : (
                           <Car className="w-8 h-8 text-slate-700" />
                         )}
@@ -1587,7 +1587,7 @@ export default function SellerInventoryView() {
                     <div className="flex items-start gap-4">
                       <div className="w-20 h-16 rounded-2xl bg-slate-900 overflow-hidden flex-shrink-0 flex items-center justify-center">
                         {p.primary_image_url ? (
-                          <img src={resolveMediaUrl(p.primary_image_url)} alt={p.name} className="w-full h-full object-cover" />
+                          <Image src={resolveMediaUrl(p.primary_image_url)} alt={p.name} width={80} height={64} unoptimized className="w-full h-full object-cover" />
                         ) : (
                           <Wrench className="w-6 h-6 text-slate-700" />
                         )}
@@ -2012,9 +2012,12 @@ export default function SellerInventoryView() {
                       <div className="flex items-center gap-2 pt-1 overflow-x-auto">
                         {app.primary_image_url && (
                           <div className="w-16 h-12 rounded-xl bg-slate-900 overflow-hidden flex-shrink-0 relative border border-amber-400">
-                            <img
+                            <Image
                               src={app.primary_image_url}
                               alt="Primary"
+                              width={64}
+                              height={48}
+                              unoptimized
                               className="w-full h-full object-cover"
                               onError={(e) => {
                                 (e.target as HTMLElement).style.display = "none";
@@ -2027,9 +2030,12 @@ export default function SellerInventoryView() {
                         )}
                         {app.images?.filter((img) => img !== app.primary_image_url).map((img, i) => (
                           <div key={i} className="w-16 h-12 rounded-xl bg-slate-100 overflow-hidden flex-shrink-0 border border-slate-200">
-                            <img
+                            <Image
                               src={img}
                               alt={`Thumbnail ${i + 1}`}
+                              width={64}
+                              height={48}
+                              unoptimized
                               className="w-full h-full object-cover"
                               onError={(e) => {
                                 (e.target as HTMLElement).style.display = "none";
@@ -2137,7 +2143,7 @@ export default function SellerInventoryView() {
                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Current Official</span>
                         <div className="h-20 bg-slate-100 rounded-xl overflow-hidden border border-slate-200 flex items-center justify-center">
                           {prop.current_image_url ? (
-                            <img src={prop.current_image_url} alt="Current" className="w-full h-full object-cover" />
+                            <Image src={prop.current_image_url} alt="Current" width={160} height={80} unoptimized className="w-full h-full object-cover" />
                           ) : (
                             <span className="text-[10px] text-slate-400 italic">None</span>
                           )}
@@ -2146,9 +2152,12 @@ export default function SellerInventoryView() {
                       <div className="space-y-1">
                         <span className="text-[10px] font-bold text-amber-600 uppercase tracking-wider block">Proposed</span>
                         <div className="h-20 bg-slate-100 rounded-xl overflow-hidden border border-amber-300 flex items-center justify-center">
-                          <img
+                          <Image
                             src={prop.proposed_image_url}
                             alt="Proposed"
+                            width={160}
+                            height={80}
+                            unoptimized
                             className="w-full h-full object-cover"
                             onError={(e) => {
                               (e.target as HTMLElement).style.display = "none";
@@ -2259,9 +2268,12 @@ export default function SellerInventoryView() {
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
                       <div className="flex items-center gap-3">
                         {enq.listing_details?.primary_image_url ? (
-                          <img
+                          <Image
                             src={resolveMediaUrl(enq.listing_details.primary_image_url)}
                             alt={enq.listing_details.title || "Vehicle"}
+                            width={48}
+                            height={48}
+                            unoptimized
                             className="w-12 h-12 rounded-xl object-cover border border-slate-200 flex-shrink-0"
                           />
                         ) : (
@@ -4393,7 +4405,6 @@ export default function SellerInventoryView() {
                   value={proposalMakeName}
                   onChange={(e) => {
                     const makeId = e.target.value;
-                    const makeObj = makes.find((m) => m.id === makeId);
                     setProposalMakeName(makeId);
                     setProposalModelId("");
                     setProposalCurrentUrl("");
@@ -4439,11 +4450,11 @@ export default function SellerInventoryView() {
               {proposalModelId && (
                 <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
                   <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                    Current Official Photo
+                    Current Official Photo for {proposalModelName || "Model"}
                   </span>
                   {proposalCurrentUrl ? (
                     <div className="h-24 rounded-lg bg-slate-900 overflow-hidden flex items-center justify-center">
-                      <img src={resolveMediaUrl(proposalCurrentUrl)} alt="Current" className="w-full h-full object-cover" />
+                      <Image src={resolveMediaUrl(proposalCurrentUrl)} alt="Current" width={200} height={96} unoptimized className="w-full h-full object-cover" />
                     </div>
                   ) : (
                     <p className="text-slate-400 italic text-[11px]">No official photo currently set for this model.</p>
@@ -4491,9 +4502,12 @@ export default function SellerInventoryView() {
                     Proposed Image Preview
                   </span>
                   <div className="h-28 rounded-xl bg-slate-900 overflow-hidden flex items-center justify-center border border-amber-400">
-                    <img
+                    <Image
                       src={resolveMediaUrl(proposedUrl)}
                       alt="Proposed preview"
+                      width={200}
+                      height={112}
+                      unoptimized
                       className="w-full h-full object-cover"
                       onError={(e) => {
                         (e.target as HTMLElement).style.display = "none";

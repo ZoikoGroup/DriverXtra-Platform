@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Image from "next/image";
 import { MOCK_GARAGE_VEHICLES, VehicleInstance } from "@/lib/mock-data/vehicles";
 import { MOCK_ORDERS, PlatformOrder } from "@/lib/mock-data/orders";
 import { MOCK_CATALOG_PARTS } from "@/lib/mock-data/parts";
@@ -113,8 +114,8 @@ export default function ConsumerDashboardView({ activeTab }: { activeTab: string
                     : "border-slate-200 bg-white hover:border-slate-300"
                 }`}
               >
-                <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-100 shrink-0">
-                  <img src={v.primaryImageUrl} alt={v.model} className="w-full h-full object-cover" />
+                <div className="relative w-12 h-12 rounded-xl overflow-hidden bg-slate-100 shrink-0">
+                  <Image src={v.primaryImageUrl} alt={v.model} fill unoptimized sizes="48px" className="object-cover" />
                 </div>
                 <div className="min-w-0">
                   <div className="text-xs font-black text-slate-900 truncate">
@@ -132,11 +133,14 @@ export default function ConsumerDashboardView({ activeTab }: { activeTab: string
           <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm">
             <div className="flex flex-col lg:flex-row justify-between gap-6 pb-6 border-b border-slate-100">
               <div className="flex gap-5">
-                <div className="w-28 h-28 rounded-2xl overflow-hidden bg-slate-100 shrink-0 border border-slate-200">
-                  <img
+                <div className="relative w-28 h-28 rounded-2xl overflow-hidden bg-slate-100 shrink-0 border border-slate-200">
+                  <Image
                     src={selectedVehicle.primaryImageUrl}
                     alt={selectedVehicle.model}
-                    className="w-full h-full object-cover"
+                    fill
+                    unoptimized
+                    sizes="112px"
+                    className="object-cover"
                   />
                 </div>
                 <div>

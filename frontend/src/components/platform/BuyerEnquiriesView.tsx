@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import Image from "next/image";
 import {
   api,
   resolveMediaUrl,
   VehicleEnquiry,
-  VehicleEnquiryStatus,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
@@ -16,12 +16,9 @@ import {
   RotateCcw,
   ShoppingBag,
   Building2,
-  User,
   AlertTriangle,
-  Mail,
   Phone,
   Send,
-  Check,
   Calendar,
   Sparkles,
 } from "lucide-react";
@@ -378,7 +375,6 @@ export default function BuyerEnquiriesView({ onNavigateToBrowse }: BuyerEnquirie
       <div className="space-y-4">
         {filteredEnquiries.map((enq) => {
           const isNew = enq.status === "NEW";
-          const isResponded = enq.status === "RESPONDED" || Boolean(enq.seller_reply);
           const isClosed = enq.status === "CLOSED";
           const hasReply = Boolean(enq.seller_reply);
 
@@ -400,9 +396,12 @@ export default function BuyerEnquiriesView({ onNavigateToBrowse }: BuyerEnquirie
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-slate-100">
                 <div className="flex items-center gap-3.5">
                   {enq.listing_details?.primary_image_url ? (
-                    <img
+                    <Image
                       src={resolveMediaUrl(enq.listing_details.primary_image_url)}
                       alt={enq.listing_details.title || "Vehicle"}
+                      width={56}
+                      height={56}
+                      unoptimized
                       className="w-14 h-14 rounded-2xl object-cover border border-slate-200 shrink-0 shadow-xs"
                     />
                   ) : (

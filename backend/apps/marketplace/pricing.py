@@ -1,7 +1,12 @@
 from decimal import Decimal
 from typing import Dict, Any, Tuple, Optional
 from django.conf import settings
+from django.utils import timezone
 from apps.marketplace.tax import quantize_currency, calculate_gst_breakdown
+from platform_core.tax.models_data import TaxTransactionContext, TaxLineInput
+from platform_core.tax.engine import TaxEngineService
+from platform_core.tax.choices import SupplierRegistrationState
+from platform_core.tax.supplier_resolver import resolve_marketplace_supplier_tax_context
 
 
 class PriceCalculationError(Exception):
@@ -174,51 +179,44 @@ def calculate_item_tax_breakdown(
     shipping_city: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Computes line-level financial amounts and taxes based on destination country rules.
-    - India: Statutory GST breakdown (CGST, SGST, IGST) via CBIC rules.
-    - UK: Kept cleanly isolated from Indian GST; applies UK VAT when configured.
+    Computes line-level financial amounts and taxes using the centralized TaxEngineService.
+    Derives supplier registration status and indirect tax collection authorization
+    from verified platform records rather than hardcoded defaults or settings.
     """
     line_taxable = quantize_currency(unit_price * quantity)
+    effective_pos = place_of_supply or shipping_state or shipping_city
 
-    if country_code == 'GB':
-        # UK Order: Indian GST (CGST/SGST/IGST) strictly does not apply.
-        # UK VAT is managed separately.
-        uk_vat_rate = Decimal(str(getattr(settings, 'UK_VAT_RATE', Decimal('0.00'))))
-        if uk_vat_rate > Decimal('0.00'):
-            line_tax = quantize_currency(line_taxable * (uk_vat_rate / Decimal('100.00')))
-        else:
-            line_tax = Decimal('0.00')
+    context = resolve_marketplace_supplier_tax_context(
+        listing=listing,
+        country_code=country_code,
+        delivery_jurisdiction=effective_pos,
+        seller_state_hint=seller_state,
+    )
+    line_input = TaxLineInput(
+        line_id=str(getattr(listing, 'id', 'item-1')),
+        item_type='PART',
+        description=getattr(listing, 'name', 'Spare Part'),
+        taxable_amount=line_taxable,
+        classification_code=getattr(listing, 'hsn_code', None),
+        candidate_rate=getattr(listing, 'gst_rate', None),
+    )
+    result = TaxEngineService.calculate_transaction_tax(context, [line_input])
+    comp = result.components
+    line_res = result.lines[0] if result.lines else None
 
-        line_total = line_taxable + line_tax
-        return {
-            "gst_rate": uk_vat_rate,
-            "taxable_amount": line_taxable,
-            "cgst_amount": Decimal('0.00'),
-            "sgst_amount": Decimal('0.00'),
-            "igst_amount": Decimal('0.00'),
-            "tax_amount": line_tax,
-            "total_amount": line_total,
-            "effective_place_of_supply": shipping_state or shipping_city or 'UK',
-        }
-    else:
-        # India Order: Statutory GST breakdown (CGST/SGST/IGST)
-        gst_rate = getattr(listing, 'gst_rate', None) or Decimal('0.00')
-        effective_place_of_supply = place_of_supply or shipping_state or 'MH'
-
-        breakdown = calculate_gst_breakdown(
-            price=line_taxable,
-            gst_rate=gst_rate,
-            place_of_supply=effective_place_of_supply,
-            seller_state=seller_state,
-        )
-
-        return {
-            "gst_rate": gst_rate,
-            "taxable_amount": line_taxable,
-            "cgst_amount": breakdown['cgst_amount'],
-            "sgst_amount": breakdown['sgst_amount'],
-            "igst_amount": breakdown['igst_amount'],
-            "tax_amount": breakdown['gst_amount'],
-            "total_amount": breakdown['total_price'],
-            "effective_place_of_supply": effective_place_of_supply,
-        }
+    return {
+        "gst_rate": line_res.tax_rate if line_res else result.effective_tax_rate,
+        "taxable_amount": result.taxable_amount,
+        "cgst_amount": comp.cgst_amount,
+        "sgst_amount": comp.sgst_amount,
+        "igst_amount": comp.igst_amount,
+        "tax_amount": result.tax_amount,
+        "total_amount": result.total_amount,
+        "effective_place_of_supply": result.place_of_supply,
+        "snapshot": result.to_snapshot(),
+        "document_type": result.document_type.value,
+        "requires_tax_review": result.requires_tax_review,
+        "review_reason": result.review_reason,
+        "context": context,
+        "result": result,
+    }

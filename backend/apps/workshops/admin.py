@@ -8,6 +8,11 @@ from apps.workshops.models import (
     BookingServiceItem,
     WorkshopQuotation,
     QuotationLineItem,
+    WorkOrder,
+    WorkOrderTask,
+    WorkOrderPartUsage,
+    ChangeOrder,
+    ChangeOrderLineItem,
 )
 
 
@@ -31,13 +36,61 @@ class WorkshopProfileAdmin(admin.ModelAdmin):
         'contact_phone',
         'bay_capacity',
         'is_tax_registered',
+        'can_collect_tax',
         'default_tax_rate_percent',
         'is_accepting_bookings',
         'is_verified',
     )
-    list_filter = ('is_accepting_bookings', 'is_verified', 'is_tax_registered', 'city')
+    list_filter = ('is_accepting_bookings', 'is_verified', 'is_tax_registered', 'can_collect_tax', 'city')
     search_fields = ('business_name', 'slug', 'contact_email', 'organisation__name')
     inlines = [WorkshopOperatingHoursInline, WorkshopServiceInline]
+    actions = ['authorize_tax_collection', 'revoke_tax_collection']
+
+    @admin.action(description="Authorize tax collection for selected registered workshops")
+    def authorize_tax_collection(self, request, queryset):
+        from apps.workshops.services import WorkshopTaxAuthorizationService
+        authorized_count = 0
+        skipped_count = 0
+        for workshop in queryset:
+            if not workshop.is_tax_registered:
+                skipped_count += 1
+                continue
+            WorkshopTaxAuthorizationService.set_tax_collection_authorization(
+                workshop=workshop,
+                authorized=True,
+                actor=request.user,
+                reason="Django admin bulk action: authorize_tax_collection",
+            )
+            authorized_count += 1
+        if authorized_count:
+            self.message_user(request, f"Successfully authorized tax collection for {authorized_count} workshop(s).")
+        if skipped_count:
+            self.message_user(request, f"Skipped {skipped_count} workshop(s) because they are not tax registered.", level='warning')
+
+    @admin.action(description="Revoke tax collection authorization for selected workshops")
+    def revoke_tax_collection(self, request, queryset):
+        from apps.workshops.services import WorkshopTaxAuthorizationService
+        revoked_count = 0
+        for workshop in queryset:
+            WorkshopTaxAuthorizationService.set_tax_collection_authorization(
+                workshop=workshop,
+                authorized=False,
+                actor=request.user,
+                reason="Django admin bulk action: revoke_tax_collection",
+            )
+            revoked_count += 1
+        self.message_user(request, f"Successfully revoked tax collection authorization for {revoked_count} workshop(s).")
+
+    def save_model(self, request, obj, form, change):
+        if change and 'can_collect_tax' in form.changed_data:
+            from apps.workshops.services import WorkshopTaxAuthorizationService
+            WorkshopTaxAuthorizationService.set_tax_collection_authorization(
+                workshop=obj,
+                authorized=form.cleaned_data['can_collect_tax'],
+                actor=request.user,
+                reason="Django admin form save",
+            )
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(WorkshopOperatingHours)
@@ -149,4 +202,117 @@ class QuotationLineItemAdmin(admin.ModelAdmin):
     )
     list_filter = ('item_type',)
     search_fields = ('description', 'part_number', 'quotation__quotation_number')
+
+
+
+
+class WorkOrderTaskInline(admin.TabularInline):
+    model = WorkOrderTask
+    extra = 0
+
+
+class WorkOrderPartUsageInline(admin.TabularInline):
+    model = WorkOrderPartUsage
+    extra = 0
+
+
+@admin.register(WorkOrder)
+class WorkOrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'work_order_number',
+        'booking',
+        'workshop',
+        'buyer',
+        'vehicle_registration_plate',
+        'lead_technician',
+        'status',
+        'started_at',
+        'completed_at',
+        'created_at',
+    )
+    list_filter = ('status', 'workshop')
+    search_fields = (
+        'work_order_number',
+        'booking__booking_number',
+        'vehicle_registration_plate',
+        'vehicle_vin',
+        'buyer__email',
+        'lead_technician__email',
+    )
+    readonly_fields = ('work_order_number', 'created_at', 'updated_at')
+    inlines = [WorkOrderTaskInline, WorkOrderPartUsageInline]
+
+
+@admin.register(WorkOrderTask)
+class WorkOrderTaskAdmin(admin.ModelAdmin):
+    list_display = (
+        'work_order',
+        'description',
+        'assigned_technician',
+        'estimated_labour_minutes',
+        'actual_labour_minutes',
+        'status',
+        'completed_at',
+    )
+    list_filter = ('status',)
+    search_fields = ('description', 'work_order__work_order_number')
+
+
+@admin.register(WorkOrderPartUsage)
+class WorkOrderPartUsageAdmin(admin.ModelAdmin):
+    list_display = (
+        'work_order',
+        'part_name',
+        'part_number',
+        'quantity',
+        'unit_cost',
+        'total_cost',
+        'usage_date',
+        'added_by',
+    )
+    search_fields = ('part_name', 'part_number', 'work_order__work_order_number')
+
+class ChangeOrderLineItemInline(admin.TabularInline):
+    model = ChangeOrderLineItem
+    extra = 0
+
+
+@admin.register(ChangeOrder)
+class ChangeOrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'change_order_number',
+        'work_order',
+        'version',
+        'status',
+        'additional_amount',
+        'revised_authorized_total',
+        'currency',
+        'submitted_at',
+        'reviewed_by',
+        'reviewed_at',
+    )
+    list_filter = ('status', 'currency')
+    search_fields = (
+        'change_order_number',
+        'work_order__work_order_number',
+        'reason',
+        'reviewed_by__email',
+    )
+    readonly_fields = ('change_order_number', 'version', 'created_at', 'updated_at')
+    inlines = [ChangeOrderLineItemInline]
+
+
+@admin.register(ChangeOrderLineItem)
+class ChangeOrderLineItemAdmin(admin.ModelAdmin):
+    list_display = (
+        'change_order',
+        'item_type',
+        'description',
+        'part_number',
+        'quantity',
+        'unit_price',
+        'line_total',
+    )
+    list_filter = ('item_type',)
+    search_fields = ('description', 'part_number', 'change_order__change_order_number')
 

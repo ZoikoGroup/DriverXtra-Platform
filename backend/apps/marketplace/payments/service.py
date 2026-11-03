@@ -342,6 +342,7 @@ class PaymentService:
 
         # Record PaymentTransaction in PENDING state
         with transaction.atomic():
+            new_provider_order_id = session_data.get('provider_order_id', '')
             PaymentTransaction.objects.create(
                 order=order,
                 transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
@@ -349,12 +350,12 @@ class PaymentService:
                 amount=order.total_amount,
                 currency=order.currency,
                 status=PaymentTransaction.StatusChoices.PENDING,
-                provider_order_id=session_data.get('provider_order_id', ''),
+                provider_order_id=new_provider_order_id,
                 idempotency_key=order.idempotency_key,
                 raw_response=session_data,
             )
-            if not order.payment_reference:
-                order.payment_reference = session_data.get('provider_order_id', '')
+            if new_provider_order_id and order.payment_reference != new_provider_order_id:
+                order.payment_reference = new_provider_order_id
                 order.save(update_fields=['payment_reference', 'updated_at'])
 
         return session_data
@@ -372,6 +373,9 @@ class PaymentService:
         """
         if order.payment_method == PaymentMethodChoices.COD:
             return False, "Cannot verify online payment for a Cash on Delivery order.", {}
+
+        if order.status == OrderStatusChoices.CANCELLED:
+            return False, f"Cannot verify payment for cancelled order '{order.order_number}'.", {}
 
         if order.payment_status == PaymentStatusChoices.PAID:
             return True, order.payment_reference, {
@@ -579,6 +583,25 @@ class PaymentService:
                 'payment.authorized',
                 'checkout.session.completed',
             ):
+                # Guard against reviving or settling already cancelled orders
+                if locked_order and (
+                    locked_order.status == OrderStatusChoices.CANCELLED
+                    or locked_order.payment_status == PaymentStatusChoices.CANCELLED
+                ):
+                    logger.warning(
+                        "Payment success webhook %s received for cancelled order %s. Payment confirmation rejected.",
+                        event_id, locked_order.order_number
+                    )
+                    webhook_record.processed = True
+                    webhook_record.processed_at = timezone.now()
+                    webhook_record.save(update_fields=['processed', 'processed_at'])
+                    return True, 200, {
+                        "status": "ignored",
+                        "message": f"Order {locked_order.order_number} is cancelled. Payment confirmation ignored.",
+                        "order_status": locked_order.status,
+                        "event_id": event_id,
+                    }
+
                 if locked_order and p_name == 'RAZORPAY':
                     # Webhook amount and currency integrity check
                     payment_entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
@@ -598,6 +621,30 @@ class PaymentService:
                     if wb_currency and wb_currency.upper() != locked_order.currency.upper():
                         logger.error(
                             "Razorpay webhook currency mismatch for %s: expected %s, got %s",
+                            locked_order.order_number, locked_order.currency, wb_currency
+                        )
+                        return False, 400, {
+                            "status": "failed",
+                            "error": f"Webhook payment currency mismatch for order {locked_order.order_number}."
+                        }
+                elif locked_order and p_name == 'STRIPE':
+                    data_obj = payload.get('data', {}).get('object', {})
+                    wb_amount_pence = data_obj.get('amount')
+                    wb_currency = data_obj.get('currency')
+                    if wb_amount_pence is not None:
+                        expected_pence = int(round(Decimal(str(locked_order.total_amount)) * 100))
+                        if wb_amount_pence != expected_pence:
+                            logger.error(
+                                "Stripe webhook amount mismatch for %s: expected %s, got %s",
+                                locked_order.order_number, expected_pence, wb_amount_pence
+                            )
+                            return False, 400, {
+                                "status": "failed",
+                                "error": f"Webhook payment amount mismatch for order {locked_order.order_number}."
+                            }
+                    if wb_currency and wb_currency.upper() != locked_order.currency.upper():
+                        logger.error(
+                            "Stripe webhook currency mismatch for %s: expected %s, got %s",
                             locked_order.order_number, locked_order.currency, wb_currency
                         )
                         return False, 400, {
@@ -637,7 +684,7 @@ class PaymentService:
                 'payment.failed',
                 'charge.failed',
             ):
-                if locked_order and locked_order.payment_status != PaymentStatusChoices.PAID:
+                if locked_order and locked_order.payment_status != PaymentStatusChoices.PAID and locked_order.status != OrderStatusChoices.CANCELLED:
                     locked_order.payment_status = PaymentStatusChoices.FAILED
                     locked_order.save(update_fields=['payment_status', 'updated_at'])
 
@@ -648,6 +695,27 @@ class PaymentService:
                         amount=locked_order.total_amount,
                         currency=locked_order.currency,
                         status=PaymentTransaction.StatusChoices.FAILED,
+                        provider_transaction_id=event_id,
+                        provider_order_id=locked_order.payment_reference,
+                        raw_response=payload,
+                    )
+
+            # Process Cancellation Event
+            elif event_type in (
+                'payment_intent.canceled',
+                'order.cancelled',
+            ):
+                if locked_order and locked_order.payment_status != PaymentStatusChoices.PAID:
+                    locked_order.payment_status = PaymentStatusChoices.CANCELLED
+                    locked_order.save(update_fields=['payment_status', 'updated_at'])
+
+                    PaymentTransaction.objects.create(
+                        order=locked_order,
+                        transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
+                        provider=p_name,
+                        amount=locked_order.total_amount,
+                        currency=locked_order.currency,
+                        status=PaymentTransaction.StatusChoices.CANCELLED,
                         provider_transaction_id=event_id,
                         provider_order_id=locked_order.payment_reference,
                         raw_response=payload,

@@ -63,6 +63,44 @@ def generate_quotation_number() -> str:
     return f"QT-{date_str}-{suffix}"
 
 
+class WorkOrderStatusChoices(models.TextChoices):
+    ASSIGNED = 'ASSIGNED', 'Assigned'
+    IN_PROGRESS = 'IN_PROGRESS', 'In Progress'
+    AWAITING_PARTS = 'AWAITING_PARTS', 'Awaiting Parts'
+    QUALITY_CHECK = 'QUALITY_CHECK', 'Quality Check'
+    COMPLETED = 'COMPLETED', 'Completed'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class WorkOrderTaskStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    IN_PROGRESS = 'IN_PROGRESS', 'In Progress'
+    COMPLETED = 'COMPLETED', 'Completed'
+    BLOCKED = 'BLOCKED', 'Blocked'
+
+
+def generate_work_order_number() -> str:
+    """Generates unique work order reference formatted as WO-YYYYMMDD-XXXXXX."""
+    date_str = timezone.now().strftime('%Y%m%d')
+    suffix = uuid.uuid4().hex[:6].upper()
+    return f"WO-{date_str}-{suffix}"
+
+
+class ChangeOrderStatusChoices(models.TextChoices):
+    DRAFT = 'DRAFT', 'Draft'
+    SUBMITTED = 'SUBMITTED', 'Submitted (Awaiting Approval)'
+    APPROVED = 'APPROVED', 'Approved'
+    REJECTED = 'REJECTED', 'Rejected'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+def generate_change_order_number() -> str:
+    """Generates unique change order reference formatted as CO-YYYYMMDD-XXXXXX."""
+    date_str = timezone.now().strftime('%Y%m%d')
+    suffix = uuid.uuid4().hex[:6].upper()
+    return f"CO-{date_str}-{suffix}"
+
+
 class WorkshopProfile(BaseUUIDModel):
     """
     Profile and operational settings for a registered Workshop organisation.
@@ -96,7 +134,7 @@ class WorkshopProfile(BaseUUIDModel):
     country = models.CharField(max_length=50, default='GB')
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
-    currency = models.CharField(max_length=3, default='GBP')
+    currency = models.CharField(max_length=3, blank=True, default='')
     bay_capacity = models.PositiveIntegerField(
         default=2,
         validators=[MinValueValidator(1)],
@@ -107,8 +145,12 @@ class WorkshopProfile(BaseUUIDModel):
 
     # Tax configuration per workshop (not hardcoding UK 20% VAT platform-wide)
     is_tax_registered = models.BooleanField(
-        default=True,
-        help_text="Whether this workshop is registered for indirect taxes (e.g. VAT/GST).",
+        default=False,
+        help_text="Whether this workshop is recorded as registered for indirect taxes (e.g. VAT/GST). Structural tax ID validation is syntactic only and does not imply government portal verification.",
+    )
+    can_collect_tax = models.BooleanField(
+        default=False,
+        help_text="Explicit legal authorization to levy and collect indirect taxes (e.g. VAT/GST) from buyers.",
     )
     default_tax_rate_percent = models.DecimalField(
         max_digits=5,
@@ -137,12 +179,28 @@ class WorkshopProfile(BaseUUIDModel):
 
     def clean(self):
         super().clean()
-        if self.organisation_id and self.organisation.type != OrganisationTypeChoices.WORKSHOP:
-            raise ValidationError({
-                'organisation': f"Organisation must have type '{OrganisationTypeChoices.WORKSHOP}' to create a WorkshopProfile."
-            })
+        if self.organisation_id:
+            org = self.organisation
+            if org.type != OrganisationTypeChoices.WORKSHOP:
+                raise ValidationError({
+                    'organisation': f"Organisation must have type '{OrganisationTypeChoices.WORKSHOP}' to create a WorkshopProfile."
+                })
+            expected_currency = org.regional_specification.default_currency.value
+            if not self.currency:
+                self.currency = expected_currency
+            elif self.currency.strip().upper() != expected_currency:
+                raise ValidationError({
+                    'currency': f"Workshop currency '{self.currency}' conflicts with organisation's regional currency '{expected_currency}'."
+                })
+            if not self.country:
+                self.country = org.country
         if self.currency:
-            self.currency = self.currency.upper()
+            self.currency = self.currency.strip().upper()
+
+        if self.can_collect_tax and not self.is_tax_registered:
+            raise ValidationError({
+                'can_collect_tax': "Cannot authorize tax collection for a workshop that is not tax registered."
+            })
 
     def save(self, *args, **kwargs):
         if not self.business_name and self.organisation_id:
@@ -258,7 +316,7 @@ class WorkshopService(BaseUUIDModel):
         default=Decimal('0.00'),
         validators=[MinValueValidator(Decimal('0.00'))],
     )
-    currency = models.CharField(max_length=3, default='GBP')
+    currency = models.CharField(max_length=3, blank=True, default='')
     is_price_variable = models.BooleanField(
         default=False,
         help_text="If true, price is indicative or requires workshop inspection / quotation.",
@@ -278,10 +336,16 @@ class WorkshopService(BaseUUIDModel):
 
     def clean(self):
         super().clean()
-        if self.workshop_id and not self.currency:
-            self.currency = self.workshop.currency
+        if self.workshop_id:
+            expected_currency = self.workshop.currency
+            if not self.currency:
+                self.currency = expected_currency
+            elif self.currency.strip().upper() != expected_currency.upper():
+                raise ValidationError({
+                    'currency': f"Service currency '{self.currency}' conflicts with workshop currency '{expected_currency}'."
+                })
         if self.currency:
-            self.currency = self.currency.upper()
+            self.currency = self.currency.strip().upper()
 
     def save(self, *args, **kwargs):
         if self.workshop_id and not self.currency:
@@ -327,7 +391,7 @@ class WorkshopBooking(BaseUUIDModel):
     vehicle_registration_plate = models.CharField(max_length=30, blank=True)
     vehicle_vin = models.CharField(max_length=50, blank=True)
     current_odometer = models.PositiveIntegerField(null=True, blank=True)
-    odometer_unit = models.CharField(max_length=10, default='mi')
+    odometer_unit = models.CharField(max_length=10, blank=True, default='')
 
     # Appointment preferences & schedule
     preferred_date = models.DateField()
@@ -470,7 +534,7 @@ class BookingServiceItem(BaseUUIDModel):
         default=Decimal('0.00'),
         validators=[MinValueValidator(Decimal('0.00'))],
     )
-    currency = models.CharField(max_length=3, default='GBP')
+    currency = models.CharField(max_length=3, blank=True, default='')
 
     class Meta:
         verbose_name = 'Booking Service Item'
@@ -570,7 +634,12 @@ class WorkshopQuotation(BaseUUIDModel):
         default=Decimal('0.00'),
         validators=[MinValueValidator(Decimal('0.00'))],
     )
-    currency = models.CharField(max_length=3, default='GBP')
+    currency = models.CharField(max_length=3, blank=True, default='')
+    tax_breakdown = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Immutable statutory tax calculation snapshot (document type, rates, components, legal citations).",
+    )
 
     # Terms and Notes
     valid_until = models.DateField(null=True, blank=True)
@@ -627,8 +696,15 @@ class WorkshopQuotation(BaseUUIDModel):
                     'currency': f"Quotation currency ({self.currency}) must match workshop currency ({workshop.currency})."
                 })
 
-            # Inherit default workshop tax rate if new quotation has default 0.00 and workshop is tax registered
-            if self._state.adding and self.tax_rate_percent == Decimal('0.00') and workshop.is_tax_registered:
+            # Check tax collection authorization:
+            # Prevent unauthorized tax collection
+            if self.tax_rate_percent > Decimal('0.00') and not getattr(workshop, 'can_collect_tax', False):
+                raise ValidationError({
+                    'tax_rate_percent': f"Workshop '{workshop.display_name}' is not authorized to collect tax. Quotation tax rate must be 0.00%."
+                })
+
+            # Inherit default workshop tax rate if new quotation has default 0.00 and workshop is authorized to collect tax
+            if self._state.adding and self.tax_rate_percent == Decimal('0.00') and getattr(workshop, 'can_collect_tax', False) and workshop.is_tax_registered:
                 self.tax_rate_percent = workshop.default_tax_rate_percent
 
         if self.currency:
@@ -654,7 +730,8 @@ class WorkshopQuotation(BaseUUIDModel):
                     immutable_fields = [
                         'subtotal_labour', 'subtotal_parts', 'subtotal_other',
                         'discount_amount', 'tax_rate_percent', 'tax_amount',
-                        'total_amount', 'currency', 'version', 'booking_id'
+                        'total_amount', 'currency', 'version', 'booking_id',
+                        'tax_breakdown'
                     ]
                     for field in immutable_fields:
                         if getattr(self, field) != getattr(db_instance, field):
@@ -668,6 +745,17 @@ class WorkshopQuotation(BaseUUIDModel):
         """
         Recalculates financial subtotals and totals from attached line items using Decimal arithmetic.
         """
+        if self.pk and not self._state.adding:
+            db_status = WorkshopQuotation.objects.filter(pk=self.pk).values_list('status', flat=True).first()
+            if db_status == QuotationStatusChoices.ACCEPTED:
+                raise ValidationError(
+                    f"Quotation {self.quotation_number} has already been accepted and its totals cannot be recalculated."
+                )
+        elif self.status == QuotationStatusChoices.ACCEPTED:
+            raise ValidationError(
+                f"Quotation {self.quotation_number} has already been accepted and its totals cannot be recalculated."
+            )
+
         labour = Decimal('0.00')
         parts = Decimal('0.00')
         other = Decimal('0.00')
@@ -690,12 +778,92 @@ class WorkshopQuotation(BaseUUIDModel):
         if net_subtotal < Decimal('0.00'):
             net_subtotal = Decimal('0.00')
 
-        tax_mult = (self.tax_rate_percent / Decimal('100.00'))
-        self.tax_amount = (net_subtotal * tax_mult).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-        self.total_amount = (net_subtotal + self.tax_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        # Statutory Tax Engine Integration
+        booking_obj = getattr(self, 'booking', None)
+        if self.pk and booking_obj and self.line_items.exists():
+            workshop = getattr(booking_obj, 'workshop', None)
+            org = getattr(workshop, 'organisation', None) if workshop else None
+            country_code = getattr(workshop, 'country', 'GB') or 'GB'
+            supplier_jur = getattr(org, 'jurisdiction', None) or ('GB-ENG' if country_code == 'GB' else 'IN-TG')
+            supplier_tax_id = getattr(org, 'tax_id', '') or ''
+
+            from platform_core.tax.choices import SupplierRegistrationState
+            if not getattr(workshop, 'is_tax_registered', False):
+                supp_state = SupplierRegistrationState.NOT_LIABLE_TO_REGISTER
+            elif getattr(workshop, 'can_collect_tax', False):
+                supp_state = SupplierRegistrationState.ACTIVE_MANDATORY_REGISTRATION
+            else:
+                supp_state = SupplierRegistrationState.UNVERIFIED_REGISTRATION
+
+            buyer = getattr(booking_obj, 'buyer', None)
+            buyer_profile = getattr(buyer, 'profile', None) if buyer else None
+            buyer_addr = ""
+            if buyer_profile:
+                buyer_addr = f"{getattr(buyer_profile, 'city', '')} {getattr(buyer_profile, 'state_province', '')}".strip()
+
+            from platform_core.tax.models_data import TaxTransactionContext, TaxLineInput
+            from platform_core.tax.engine import TaxEngineService
+
+            tax_context = TaxTransactionContext(
+                country_code=country_code,
+                supplier_jurisdiction=supplier_jur,
+                supplier_tax_id=supplier_tax_id,
+                supplier_registration_state=supp_state,
+                can_collect_tax=getattr(workshop, 'can_collect_tax', False),
+                currency=self.currency or (workshop.currency if workshop else 'GBP'),
+                transaction_date=self.created_at.strftime('%Y-%m-%d') if self.created_at else timezone.now().strftime('%Y-%m-%d'),
+                customer_jurisdiction=getattr(buyer_profile, 'state_province', None) or None,
+                customer_address_on_record=buyer_addr or None,
+                physical_performance_jurisdiction=supplier_jur,
+            )
+
+            tax_lines = []
+            for item in self.line_items.all():
+                part_code = ""
+                if item.catalogue_part and getattr(item.catalogue_part, 'mpn', None):
+                    part_code = item.catalogue_part.mpn
+                elif item.part_number:
+                    part_code = item.part_number
+
+                tax_lines.append(
+                    TaxLineInput(
+                        line_id=str(item.id),
+                        item_type=item.item_type,
+                        description=item.description,
+                        taxable_amount=item.line_total,
+                        classification_code=part_code or None,
+                    )
+                )
+
+            tax_res = TaxEngineService.calculate_transaction_tax(
+                context=tax_context,
+                lines=tax_lines,
+                discount_amount=self.discount_amount,
+            )
+
+            self.tax_breakdown = tax_res.to_snapshot()
+            if not getattr(workshop, 'can_collect_tax', False):
+                self.tax_amount = Decimal('0.00')
+                self.total_amount = net_subtotal
+                self.tax_rate_percent = Decimal('0.00')
+            else:
+                self.tax_amount = tax_res.tax_amount
+                self.total_amount = tax_res.total_amount
+                self.tax_rate_percent = tax_res.effective_tax_rate
+        else:
+            booking_obj = getattr(self, 'booking', None)
+            workshop = getattr(booking_obj, 'workshop', None) if booking_obj else None
+            if not getattr(workshop, 'can_collect_tax', False):
+                self.tax_amount = Decimal('0.00')
+                self.total_amount = net_subtotal
+                self.tax_rate_percent = Decimal('0.00')
+            else:
+                tax_mult = (self.tax_rate_percent / Decimal('100.00'))
+                self.tax_amount = (net_subtotal * tax_mult).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                self.total_amount = (net_subtotal + self.tax_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
         if commit:
-            self.save(update_fields=['subtotal_labour', 'subtotal_parts', 'subtotal_other', 'tax_amount', 'total_amount', 'updated_at'])
+            self.save(update_fields=['subtotal_labour', 'subtotal_parts', 'subtotal_other', 'tax_amount', 'total_amount', 'tax_rate_percent', 'tax_breakdown', 'updated_at'])
 
     def save(self, *args, **kwargs):
         if not self.quotation_number:
@@ -791,4 +959,713 @@ class QuotationLineItem(BaseUUIDModel):
     def delete(self, *args, **kwargs):
         if self.quotation_id and self.quotation.status == QuotationStatusChoices.ACCEPTED:
             raise ValidationError("Cannot delete line items from an accepted quotation.")
+        super().delete(*args, **kwargs)
+
+
+class WorkOrder(BaseUUIDModel):
+    """
+    Operational repair and service execution record.
+    Generated automatically when a buyer accepts a WorkshopQuotation.
+    Links the booking, quotation, assigned technicians, tasks, and consumed spare parts.
+    """
+    work_order_number = models.CharField(
+        max_length=50,
+        unique=True,
+        default=generate_work_order_number,
+        db_index=True,
+        help_text="Unique work order reference number (e.g. WO-20261102-ABC123).",
+    )
+    booking = models.OneToOneField(
+        'workshops.WorkshopBooking',
+        on_delete=models.PROTECT,
+        related_name='work_order',
+        help_text="The parent booking. Exactly one work order per booking.",
+    )
+    quotation = models.ForeignKey(
+        'workshops.WorkshopQuotation',
+        on_delete=models.PROTECT,
+        related_name='work_orders',
+        help_text="The approved quotation authorizing this work order.",
+    )
+    workshop = models.ForeignKey(
+        'workshops.WorkshopProfile',
+        on_delete=models.CASCADE,
+        related_name='work_orders',
+    )
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='buyer_work_orders',
+    )
+    vehicle = models.ForeignKey(
+        'garage.GarageVehicle',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='work_orders',
+    )
+
+    # Immutable vehicle snapshot fields (frozen from booking)
+    vehicle_make = models.CharField(max_length=100, blank=True)
+    vehicle_model = models.CharField(max_length=150, blank=True)
+    vehicle_year = models.PositiveIntegerField(null=True, blank=True)
+    vehicle_registration_plate = models.CharField(max_length=30, blank=True)
+    vehicle_vin = models.CharField(max_length=50, blank=True)
+    current_odometer = models.PositiveIntegerField(null=True, blank=True)
+    odometer_unit = models.CharField(max_length=10, blank=True, default='')
+
+    # Lead technician assignment
+    lead_technician = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_work_orders',
+        help_text="Technician responsible for supervising and performing work on this vehicle.",
+    )
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='technician_assigned_work_orders',
+    )
+    assigned_at = models.DateTimeField(null=True, blank=True)
+
+    # Status tracking
+    status = models.CharField(
+        max_length=30,
+        choices=WorkOrderStatusChoices.choices,
+        default=WorkOrderStatusChoices.ASSIGNED,
+        db_index=True,
+    )
+
+    # Operational timestamps
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    quality_inspected_at = models.DateTimeField(null=True, blank=True)
+    quality_inspected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='inspected_work_orders',
+    )
+
+    # Notes & quality audit
+    internal_notes = models.TextField(blank=True, help_text="Workshop-only operational notes.")
+    quality_notes = models.TextField(blank=True, help_text="Notes from quality inspection.")
+    cancellation_reason = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = 'Work Order'
+        verbose_name_plural = 'Work Orders'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workshop', 'status']),
+            models.Index(fields=['lead_technician', 'status']),
+            models.Index(fields=['booking']),
+            models.Index(fields=['created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.work_order_number} ({self.get_status_display()}) - {self.vehicle_registration_plate}"
+
+    @property
+    def total_parts_cost(self) -> Decimal:
+        return sum(
+            (p.total_cost for p in self.parts_used.all()),
+            Decimal('0.00'),
+        )
+
+    @property
+    def total_actual_labour_minutes(self) -> int:
+        return sum(
+            (t.actual_labour_minutes for t in self.tasks.all()),
+            0,
+        )
+
+    @property
+    def total_estimated_labour_minutes(self) -> int:
+        return sum(
+            (t.estimated_labour_minutes for t in self.tasks.all()),
+            0,
+        )
+
+    @property
+    def authorized_total_amount(self) -> Decimal:
+        base = self.quotation.total_amount if self.quotation else Decimal('0.00')
+        approved_additions = sum(
+            (co.additional_amount for co in self.change_orders.filter(status=ChangeOrderStatusChoices.APPROVED)),
+            Decimal('0.00'),
+        )
+        return (base + approved_additions).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    @property
+    def approved_change_orders_amount(self) -> Decimal:
+        return sum(
+            (co.additional_amount for co in self.change_orders.filter(status=ChangeOrderStatusChoices.APPROVED)),
+            Decimal('0.00'),
+        ).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    @property
+    def has_pending_change_orders(self) -> bool:
+        return self.change_orders.filter(status=ChangeOrderStatusChoices.SUBMITTED).exists()
+
+    def clean(self):
+        super().clean()
+        # Work order must only be linked to an accepted quotation
+        if self.quotation_id and self.quotation.status != QuotationStatusChoices.ACCEPTED:
+            raise ValidationError("Work orders can only be created for accepted quotations.")
+        # Work order quotation must belong to the linked booking
+        if self.booking_id and self.quotation_id and self.quotation.booking_id != self.booking_id:
+            raise ValidationError("Quotation must belong to the linked booking.")
+        # If lead technician is set, validate they belong to the workshop organisation
+        if self.lead_technician_id and self.workshop_id:
+            org = self.workshop.organisation
+            is_member = org.memberships.filter(user_id=self.lead_technician_id, is_active=True).exists()
+            if not is_member and not (self.lead_technician.is_staff or self.lead_technician.is_superuser):
+                raise ValidationError("Lead technician must be an active member of this workshop organisation.")
+
+
+class WorkOrderTask(BaseUUIDModel):
+    """
+    Individual repair or service task assigned to a technician on a work order.
+    """
+    work_order = models.ForeignKey(
+        WorkOrder,
+        on_delete=models.CASCADE,
+        related_name='tasks',
+    )
+    description = models.CharField(max_length=255)
+    assigned_technician = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='work_order_tasks',
+    )
+    estimated_labour_minutes = models.PositiveIntegerField(
+        default=60,
+        help_text="Estimated task duration in minutes.",
+    )
+    actual_labour_minutes = models.PositiveIntegerField(
+        default=0,
+        help_text="Actual tracked technician labour time in minutes.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=WorkOrderTaskStatusChoices.choices,
+        default=WorkOrderTaskStatusChoices.PENDING,
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    order_index = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = 'Work Order Task'
+        verbose_name_plural = 'Work Order Tasks'
+        ordering = ['order_index', 'created_at']
+
+    def __str__(self):
+        return f"{self.work_order.work_order_number} - {self.description} ({self.get_status_display()})"
+
+    def clean(self):
+        super().clean()
+        if self.assigned_technician_id and self.work_order_id:
+            org = self.work_order.workshop.organisation
+            is_member = org.memberships.filter(user_id=self.assigned_technician_id, is_active=True).exists()
+            if not is_member and not (self.assigned_technician.is_staff or self.assigned_technician.is_superuser):
+                raise ValidationError("Assigned technician must belong to this workshop organisation.")
+
+
+class WorkOrderPartUsage(BaseUUIDModel):
+    """
+    Record of physical spare parts consumed during execution of a work order.
+    Calculates cost using Decimal arithmetic.
+    """
+    work_order = models.ForeignKey(
+        WorkOrder,
+        on_delete=models.CASCADE,
+        related_name='parts_used',
+    )
+    part_name = models.CharField(max_length=255)
+    part_number = models.CharField(max_length=100, blank=True)
+    description = models.TextField(blank=True)
+    catalogue_part = models.ForeignKey(
+        'catalogue.Part',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='work_order_usages',
+        help_text="Optional link to DriverXtra global catalogue part.",
+    )
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('1.00'),
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    total_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    usage_date = models.DateField(default=timezone.now)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='recorded_part_usages',
+    )
+
+    class Meta:
+        verbose_name = 'Work Order Part Usage'
+        verbose_name_plural = 'Work Order Part Usages'
+        ordering = ['-usage_date', '-created_at']
+
+    def __str__(self):
+        return f"{self.part_name} x {self.quantity} (£{self.total_cost})"
+
+    def clean(self):
+        super().clean()
+        if self.quantity is not None and self.quantity <= Decimal('0.00'):
+            raise ValidationError({'quantity': "Quantity must be greater than zero."})
+        if self.unit_cost is not None and self.unit_cost < Decimal('0.00'):
+            raise ValidationError({'unit_cost': "Unit cost cannot be negative."})
+
+    def save(self, *args, **kwargs):
+        if self.quantity is not None and self.unit_cost is not None:
+            self.total_cost = (self.quantity * self.unit_cost).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+class ChangeOrder(BaseUUIDModel):
+    """
+    Formal change order / additional repair authorization request raised during work order execution.
+    Requires explicit buyer approval before additional repairs or parts are executed.
+    Preserves original quotation and prior change orders in an immutable audit trail.
+    """
+    change_order_number = models.CharField(
+        max_length=50,
+        unique=True,
+        default=generate_change_order_number,
+        db_index=True,
+        help_text="Unique change order reference (e.g. CO-20261102-ABC123).",
+    )
+    work_order = models.ForeignKey(
+        'workshops.WorkOrder',
+        on_delete=models.PROTECT,
+        related_name='change_orders',
+        help_text="The work order this change order applies to.",
+    )
+    version = models.PositiveIntegerField(
+        default=1,
+        help_text="Sequential change order revision number for this work order.",
+    )
+    status = models.CharField(
+        max_length=30,
+        choices=ChangeOrderStatusChoices.choices,
+        default=ChangeOrderStatusChoices.DRAFT,
+        db_index=True,
+    )
+    reason = models.TextField(
+        help_text="Detailed diagnosis and justification explaining why additional repairs/parts are required.",
+    )
+
+    # Financial breakdown of additional work
+    subtotal_labour = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    subtotal_parts = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    subtotal_other = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    discount_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    tax_rate_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))],
+    )
+    tax_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    additional_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+        help_text="Net additional cost of this change order (net subtotal + tax).",
+    )
+    revised_authorized_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+        help_text="Cumulative authorized total for the work order if this change order is approved.",
+    )
+    currency = models.CharField(max_length=3, blank=True, default='')
+    tax_breakdown = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Immutable statutory tax calculation snapshot for this change order.",
+    )
+
+    # Attribution & Timestamps
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_change_orders',
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_change_orders',
+        help_text="Buyer who approved or rejected this change order.",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    buyer_notes = models.TextField(
+        blank=True,
+        help_text="Buyer decision comments or rejection explanation.",
+    )
+    workshop_notes = models.TextField(
+        blank=True,
+        help_text="Internal workshop remarks regarding this change order.",
+    )
+
+    class Meta:
+        verbose_name = 'Change Order'
+        verbose_name_plural = 'Change Orders'
+        ordering = ['work_order', 'version']
+        indexes = [
+            models.Index(fields=['work_order', 'status']),
+            models.Index(fields=['status']),
+            models.Index(fields=['change_order_number']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['work_order', 'version'],
+                name='unique_change_order_version_per_work_order',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.change_order_number} (Rev {self.version}) - {self.work_order.work_order_number} [{self.get_status_display()}]"
+
+    def clean(self):
+        super().clean()
+        if self.work_order_id:
+            wo = self.work_order
+            if not self.currency:
+                self.currency = wo.quotation.currency if wo.quotation else wo.workshop.currency
+            elif wo.quotation and self.currency.upper() != wo.quotation.currency.upper():
+                raise ValidationError({
+                    'currency': f"Change order currency ({self.currency}) must match work order currency ({wo.quotation.currency})."
+                })
+
+            if self._state.adding and wo.status in (WorkOrderStatusChoices.COMPLETED, WorkOrderStatusChoices.CANCELLED):
+                raise ValidationError(f"Cannot create a change order for a {wo.get_status_display().lower()} work order.")
+
+            if self._state.adding and self.version == 1:
+                existing_max = ChangeOrder.objects.filter(work_order_id=wo.id).aggregate(models.Max('version'))['version__max']
+                if existing_max is not None:
+                    self.version = existing_max + 1
+
+        if self.currency:
+            self.currency = self.currency.upper()
+
+        # Enforce immutability of APPROVED / REJECTED change orders
+        if not self._state.adding and self.pk:
+            try:
+                db_instance = ChangeOrder.objects.get(pk=self.pk)
+                if db_instance.status in (ChangeOrderStatusChoices.APPROVED, ChangeOrderStatusChoices.REJECTED):
+                    if self.status != db_instance.status:
+                        raise ValidationError(
+                            f"Change Order {self.change_order_number} is in terminal status '{db_instance.status}' and cannot be modified."
+                        )
+                    immutable_fields = [
+                        'subtotal_labour', 'subtotal_parts', 'subtotal_other',
+                        'discount_amount', 'tax_rate_percent', 'tax_amount',
+                        'additional_amount', 'revised_authorized_total', 'currency', 'version', 'work_order_id',
+                        'tax_breakdown'
+                    ]
+                    for field in immutable_fields:
+                        if getattr(self, field) != getattr(db_instance, field):
+                            raise ValidationError(
+                                f"Change Order {self.change_order_number} is immutable. Field '{field}' cannot be modified."
+                            )
+            except ChangeOrder.DoesNotExist:
+                pass
+
+    def recalculate_totals(self, commit=False):
+        """
+        Recalculates financial subtotals, tax, additional amount and cumulative authorized total.
+        """
+        if self.pk and not self._state.adding:
+            db_status = ChangeOrder.objects.filter(pk=self.pk).values_list('status', flat=True).first()
+            if db_status in (ChangeOrderStatusChoices.APPROVED, ChangeOrderStatusChoices.REJECTED):
+                raise ValidationError(
+                    f"Change Order {self.change_order_number} is in terminal status '{db_status}' and cannot be recalculated."
+                )
+        elif self.status in (ChangeOrderStatusChoices.APPROVED, ChangeOrderStatusChoices.REJECTED):
+            raise ValidationError(
+                f"Change Order {self.change_order_number} is in terminal status '{self.status}' and cannot be recalculated."
+            )
+
+        labour = Decimal('0.00')
+        parts = Decimal('0.00')
+        other = Decimal('0.00')
+
+        if self.pk and not self._state.adding:
+            for item in self.line_items.all():
+                if item.item_type == LineItemTypeChoices.LABOUR:
+                    labour += item.line_total
+                elif item.item_type == LineItemTypeChoices.PART:
+                    parts += item.line_total
+                else:
+                    other += item.line_total
+
+        self.subtotal_labour = labour.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        self.subtotal_parts = parts.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        self.subtotal_other = other.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        gross = self.subtotal_labour + self.subtotal_parts + self.subtotal_other
+        net_subtotal = gross - self.discount_amount
+        if net_subtotal < Decimal('0.00'):
+            net_subtotal = Decimal('0.00')
+
+        # Statutory Tax Engine Integration
+        wo = getattr(self, 'work_order', None)
+        if self.pk and wo and self.line_items.exists():
+            workshop = getattr(wo, 'workshop', None)
+            org = getattr(workshop, 'organisation', None) if workshop else None
+            country_code = getattr(workshop, 'country', 'GB') or 'GB'
+            supplier_jur = getattr(org, 'jurisdiction', None) or ('GB-ENG' if country_code == 'GB' else 'IN-TG')
+            supplier_tax_id = getattr(org, 'tax_id', '') or ''
+
+            from platform_core.tax.choices import SupplierRegistrationState
+            if not getattr(workshop, 'is_tax_registered', False):
+                supp_state = SupplierRegistrationState.NOT_LIABLE_TO_REGISTER
+            elif getattr(workshop, 'can_collect_tax', False):
+                supp_state = SupplierRegistrationState.ACTIVE_MANDATORY_REGISTRATION
+            else:
+                supp_state = SupplierRegistrationState.UNVERIFIED_REGISTRATION
+
+            booking_obj = getattr(wo, 'booking', None) or (wo.quotation.booking if (getattr(wo, 'quotation', None) and getattr(wo.quotation, 'booking', None)) else None)
+            buyer = getattr(booking_obj, 'buyer', None)
+            buyer_profile = getattr(buyer, 'profile', None) if buyer else None
+            buyer_addr = ""
+            if buyer_profile:
+                buyer_addr = f"{getattr(buyer_profile, 'city', '')} {getattr(buyer_profile, 'state_province', '')}".strip()
+
+            from platform_core.tax.models_data import TaxTransactionContext, TaxLineInput
+            from platform_core.tax.engine import TaxEngineService
+
+            tax_context = TaxTransactionContext(
+                country_code=country_code,
+                supplier_jurisdiction=supplier_jur,
+                supplier_tax_id=supplier_tax_id,
+                supplier_registration_state=supp_state,
+                can_collect_tax=getattr(workshop, 'can_collect_tax', False),
+                currency=self.currency or (workshop.currency if workshop else 'GBP'),
+                transaction_date=self.created_at.strftime('%Y-%m-%d') if self.created_at else timezone.now().strftime('%Y-%m-%d'),
+                customer_jurisdiction=getattr(buyer_profile, 'state_province', None) or None,
+                customer_address_on_record=buyer_addr or None,
+                physical_performance_jurisdiction=supplier_jur,
+            )
+
+            tax_lines = []
+            for item in self.line_items.all():
+                part_code = ""
+                if item.catalogue_part and getattr(item.catalogue_part, 'mpn', None):
+                    part_code = item.catalogue_part.mpn
+                elif item.part_number:
+                    part_code = item.part_number
+
+                tax_lines.append(
+                    TaxLineInput(
+                        line_id=str(item.id),
+                        item_type=item.item_type,
+                        description=item.description,
+                        taxable_amount=item.line_total,
+                        classification_code=part_code or None,
+                    )
+                )
+
+            tax_res = TaxEngineService.calculate_transaction_tax(
+                context=tax_context,
+                lines=tax_lines,
+                discount_amount=self.discount_amount,
+            )
+
+            self.tax_breakdown = tax_res.to_snapshot()
+            if not getattr(workshop, 'can_collect_tax', False):
+                self.tax_amount = Decimal('0.00')
+                self.tax_rate_percent = Decimal('0.00')
+                self.additional_amount = net_subtotal
+            else:
+                self.tax_amount = tax_res.tax_amount
+                self.tax_rate_percent = tax_res.effective_tax_rate
+                self.additional_amount = (net_subtotal + self.tax_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        else:
+            wo = getattr(self, 'work_order', None)
+            workshop = getattr(wo, 'workshop', None) if wo else None
+            if not getattr(workshop, 'can_collect_tax', False):
+                self.tax_amount = Decimal('0.00')
+                self.tax_rate_percent = Decimal('0.00')
+                self.additional_amount = net_subtotal
+            else:
+                tax_mult = (self.tax_rate_percent / Decimal('100.00'))
+                self.tax_amount = (net_subtotal * tax_mult).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                self.additional_amount = (net_subtotal + self.tax_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        base_quote_total = Decimal('0.00')
+        prior_approved = Decimal('0.00')
+        if self.work_order_id:
+            wo = self.work_order
+            base_quote_total = wo.quotation.total_amount if wo.quotation else Decimal('0.00')
+            prior_approved = sum(
+                (co.additional_amount for co in wo.change_orders.filter(status=ChangeOrderStatusChoices.APPROVED).exclude(id=self.id)),
+                Decimal('0.00'),
+            )
+        self.revised_authorized_total = (base_quote_total + prior_approved + self.additional_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        if commit:
+            self.save(update_fields=[
+                'subtotal_labour', 'subtotal_parts', 'subtotal_other',
+                'tax_amount', 'additional_amount', 'revised_authorized_total',
+                'tax_rate_percent', 'tax_breakdown', 'updated_at'
+            ])
+
+    def save(self, *args, **kwargs):
+        if not self.change_order_number:
+            self.change_order_number = generate_change_order_number()
+        if self._state.adding and self.work_order_id and self.version == 1:
+            existing_max = ChangeOrder.objects.filter(work_order_id=self.work_order_id).aggregate(models.Max('version'))['version__max']
+            if existing_max is not None:
+                self.version = existing_max + 1
+
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status in (ChangeOrderStatusChoices.APPROVED, ChangeOrderStatusChoices.SUBMITTED):
+            raise ValidationError(
+                f"Change Order {self.change_order_number} is in '{self.status}' status and cannot be deleted."
+            )
+        super().delete(*args, **kwargs)
+
+
+class ChangeOrderLineItem(BaseUUIDModel):
+    """
+    Detailed cost and scope line item inside a change order.
+    """
+    change_order = models.ForeignKey(
+        ChangeOrder,
+        on_delete=models.CASCADE,
+        related_name='line_items',
+    )
+    item_type = models.CharField(
+        max_length=30,
+        choices=LineItemTypeChoices.choices,
+        default=LineItemTypeChoices.LABOUR,
+    )
+    description = models.CharField(max_length=255)
+    part_number = models.CharField(max_length=100, blank=True)
+    catalogue_part = models.ForeignKey(
+        'catalogue.Part',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='change_order_line_items',
+    )
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('1.00'),
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    line_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    estimated_labour_minutes = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Estimated minutes for labour/diagnostic items.",
+    )
+
+    class Meta:
+        verbose_name = 'Change Order Line Item'
+        verbose_name_plural = 'Change Order Line Items'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.get_item_type_display()}: {self.description} ({self.line_total})"
+
+    def clean(self):
+        super().clean()
+        if self.change_order_id and self.change_order.status in (ChangeOrderStatusChoices.APPROVED, ChangeOrderStatusChoices.REJECTED):
+            raise ValidationError("Cannot add or modify line items on a resolved change order.")
+
+    def save(self, *args, **kwargs):
+        if self.quantity is not None and self.unit_price is not None:
+            qty = Decimal(str(self.quantity))
+            price = Decimal(str(self.unit_price))
+            self.line_total = (qty * price).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        if self.catalogue_part_id and not self.part_number:
+            self.part_number = self.catalogue_part.mpn
+        if self.catalogue_part_id and not self.description:
+            self.description = f"{self.catalogue_part.brand} {self.catalogue_part.name}"
+        if self.item_type in (LineItemTypeChoices.LABOUR, LineItemTypeChoices.DIAGNOSTIC) and not self.estimated_labour_minutes:
+            quantity = Decimal(str(self.quantity)) if self.quantity is not None else Decimal('1.00')
+            self.estimated_labour_minutes = int((quantity * Decimal('60')).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.change_order_id and self.change_order.status in (ChangeOrderStatusChoices.APPROVED, ChangeOrderStatusChoices.REJECTED):
+            raise ValidationError("Cannot delete line items from a resolved change order.")
         super().delete(*args, **kwargs)

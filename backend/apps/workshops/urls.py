@@ -19,6 +19,24 @@ from apps.workshops.views import (
     WorkshopQuotationIssueView,
     WorkshopQuotationDetailView,
     AdminWorkshopBookingListView,
+    AdminWorkshopTaxAuthorizationView,
+    WorkOrderManageListView,
+    WorkOrderManageDetailView,
+    WorkOrderAssignTechnicianView,
+    WorkOrderStatusUpdateView,
+    WorkOrderTaskCreateView,
+    WorkOrderTaskDetailView,
+    WorkOrderPartUsageListCreateView,
+    WorkOrderPartUsageDetailView,
+    WorkshopTechnicianListView,
+    BuyerWorkOrderDetailView,
+    WorkOrderChangeOrderListCreateView,
+    ChangeOrderDetailView,
+    ChangeOrderSubmitView,
+    ChangeOrderCancelView,
+    BuyerChangeOrderListView,
+    BuyerChangeOrderApproveView,
+    BuyerChangeOrderRejectView,
 )
 
 urlpatterns = [
@@ -49,8 +67,34 @@ urlpatterns = [
     path('manage/quotations/<uuid:id>/', WorkshopQuotationDetailView.as_view(), name='workshop-manage-quotation-detail-staff'),
     path('manage/quotations/<uuid:id>/issue/', WorkshopQuotationIssueView.as_view(), name='workshop-manage-quotation-issue'),
 
+    # Work Orders & Workshop Execution
+    path('manage/work-orders/', WorkOrderManageListView.as_view(), name='workshop-work-orders-list'),
+    path('manage/work-orders/<uuid:id>/', WorkOrderManageDetailView.as_view(), name='workshop-work-order-detail'),
+    path('manage/work-orders/<uuid:id>/assign-technician/', WorkOrderAssignTechnicianView.as_view(), name='workshop-work-order-assign-technician'),
+    path('manage/work-orders/<uuid:id>/status/', WorkOrderStatusUpdateView.as_view(), name='workshop-work-order-status-update'),
+    path('manage/work-orders/<uuid:id>/tasks/', WorkOrderTaskCreateView.as_view(), name='workshop-work-order-tasks'),
+    path('manage/work-orders/<uuid:id>/tasks/<uuid:task_id>/', WorkOrderTaskDetailView.as_view(), name='workshop-work-order-task-detail'),
+    path('manage/work-orders/<uuid:id>/parts/', WorkOrderPartUsageListCreateView.as_view(), name='workshop-work-order-parts'),
+    path('manage/work-orders/<uuid:id>/parts/<uuid:part_id>/', WorkOrderPartUsageDetailView.as_view(), name='workshop-work-order-part-detail'),
+    path('manage/technicians/', WorkshopTechnicianListView.as_view(), name='workshop-technicians-list'),
+
+    # Buyer Work Order inspection
+    path('bookings/my/<uuid:id>/work-order/', BuyerWorkOrderDetailView.as_view(), name='workshop-buyer-work-order'),
+
+    # Change Orders (Workshop Management)
+    path('manage/work-orders/<uuid:id>/change-orders/', WorkOrderChangeOrderListCreateView.as_view(), name='workshop-work-order-change-orders'),
+    path('manage/change-orders/<uuid:id>/', ChangeOrderDetailView.as_view(), name='workshop-change-order-detail'),
+    path('manage/change-orders/<uuid:id>/submit/', ChangeOrderSubmitView.as_view(), name='workshop-change-order-submit'),
+    path('manage/change-orders/<uuid:id>/cancel/', ChangeOrderCancelView.as_view(), name='workshop-change-order-cancel'),
+
+    # Change Orders (Buyer Authorization)
+    path('bookings/my/<uuid:id>/change-orders/', BuyerChangeOrderListView.as_view(), name='workshop-buyer-change-orders-list'),
+    path('change-orders/<uuid:id>/approve/', BuyerChangeOrderApproveView.as_view(), name='workshop-change-order-approve'),
+    path('change-orders/<uuid:id>/reject/', BuyerChangeOrderRejectView.as_view(), name='workshop-change-order-reject'),
+
     # Platform administrator oversight
     path('admin/bookings/', AdminWorkshopBookingListView.as_view(), name='workshop-admin-bookings-list'),
+    path('admin/<uuid:id>/tax-authorization/', AdminWorkshopTaxAuthorizationView.as_view(), name='workshop-admin-tax-authorization'),
 
     # Workshop detail lookup by UUID or slug (placed last to prevent collision with reserved endpoints)
     path('<str:id_or_slug>/', WorkshopDetailPublicView.as_view(), name='workshop-public-detail'),

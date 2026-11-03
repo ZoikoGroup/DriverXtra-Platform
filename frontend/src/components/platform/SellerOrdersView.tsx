@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import Image from "next/image";
 import {
   api,
   SellerOrder,
@@ -8,7 +9,6 @@ import {
   PlatformShipment,
   CarrierOption,
   PlatformReturnRequest,
-  PlatformRefund,
   PlatformDispute,
   PlatformDisputeEvent,
 } from "@/lib/api/client";
@@ -121,7 +121,7 @@ export default function SellerOrdersView({
 
   useEffect(() => {
     if (initialMainTab) {
-      setActiveMainTab(initialMainTab);
+      queueMicrotask(() => setActiveMainTab(initialMainTab));
     }
   }, [initialMainTab]);
 
@@ -442,7 +442,7 @@ export default function SellerOrdersView({
         (o) => o.id === initialOrderId || o.order_number === initialOrderId
       );
       if (found) {
-        setSelectedOrder(found);
+        queueMicrotask(() => setSelectedOrder(found));
       }
     }
   }, [initialOrderId, orders]);
@@ -632,11 +632,13 @@ export default function SellerOrdersView({
   }, [user]);
 
   useEffect(() => {
-    if (activeMainTab === "returns") {
-      loadSellerReturns();
-    } else if (activeMainTab === "disputes") {
-      loadSellerDisputes();
-    }
+    queueMicrotask(() => {
+      if (activeMainTab === "returns") {
+        void loadSellerReturns();
+      } else if (activeMainTab === "disputes") {
+        void loadSellerDisputes();
+      }
+    });
   }, [activeMainTab, loadSellerReturns, loadSellerDisputes]);
 
   const pendingReturnsCount = useMemo(() => {
@@ -1399,7 +1401,7 @@ export default function SellerOrdersView({
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity block shrink-0"
                             title="Click to view full image"
                           >
-                            <img src={url} alt={`Evidence ${eIdx + 1}`} className="w-full h-full object-cover" />
+                            <Image src={url} alt={`Evidence ${eIdx + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -1630,7 +1632,7 @@ export default function SellerOrdersView({
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity block shrink-0"
                             title="Click to view full image"
                           >
-                            <img src={url} alt={`Evidence ${eIdx + 1}`} className="w-full h-full object-cover" />
+                            <Image src={url} alt={`Evidence ${eIdx + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -3170,7 +3172,7 @@ export default function SellerOrdersView({
                         rel="noopener noreferrer"
                         className="w-14 h-14 rounded-lg border border-slate-200 overflow-hidden block bg-slate-100 shrink-0"
                       >
-                        <img src={url} alt="Evidence" className="w-full h-full object-cover" />
+                        <Image src={url} alt="Evidence" width={56} height={56} unoptimized className="w-full h-full object-cover" />
                       </a>
                     ))}
                   </div>

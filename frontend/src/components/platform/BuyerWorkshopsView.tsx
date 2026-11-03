@@ -1,51 +1,44 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   api,
   WorkshopProfilePublic,
   WorkshopBooking,
-  WorkshopQuotation,
   GarageVehicle,
-  WorkshopServiceCategory,
+  ChangeOrder,
 } from "@/lib/api/client";
-import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
   Wrench,
   Search,
   MapPin,
   Calendar,
   Clock,
-  Car,
   CheckCircle2,
-  XCircle,
   AlertCircle,
+  AlertTriangle,
   ChevronRight,
-  FileText,
-  DollarSign,
-  Filter,
-  Plus,
   RefreshCw,
   Shield,
-  Layers,
-  Sparkles,
 } from "lucide-react";
 
+function getDefaultBookingDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 2);
+  return d.toISOString().split("T")[0];
+}
+
 export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateToGarage?: () => void }) {
-  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<"browse" | "my_bookings">("browse");
 
   // Workshop Browsing State
   const [workshops, setWorkshops] = useState<WorkshopProfilePublic[]>([]);
-  const [categories, setCategories] = useState<WorkshopServiceCategory[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [cityFilter, setCityFilter] = useState("");
   const [loadingWorkshops, setLoadingWorkshops] = useState(true);
-  const [selectedWorkshop, setSelectedWorkshop] = useState<WorkshopProfilePublic | null>(null);
 
   // Garage Vehicles
   const [vehicles, setVehicles] = useState<GarageVehicle[]>([]);
-  const [loadingVehicles, setLoadingVehicles] = useState(false);
 
   // Booking Modal State
   const [bookingModalOpen, setBookingModalOpen] = useState(false);
@@ -63,7 +56,6 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
   // My Bookings State
   const [myBookings, setMyBookings] = useState<WorkshopBooking[]>([]);
   const [loadingBookings, setLoadingBookings] = useState(false);
-  const [selectedBooking, setSelectedBooking] = useState<WorkshopBooking | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("");
 
   // Quotation Response State
@@ -72,71 +64,130 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
   const [rejectReason, setRejectReason] = useState("");
   const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null);
 
-  // Load workshops & categories
-  useEffect(() => {
-    fetchWorkshops();
-    api.workshops.getCategories().then(setCategories).catch(() => {});
-  }, [searchQuery, cityFilter]);
+  // Change Orders State for Bookings
+  const [bookingChangeOrders, setBookingChangeOrders] = useState<Record<string, ChangeOrder[]>>({});
+  const [activeChangeOrderModal, setActiveChangeOrderModal] = useState<ChangeOrder | null>(null);
+  const [coActionLoading, setCoActionLoading] = useState(false);
+  const [coApprovalNotes, setCoApprovalNotes] = useState("");
+  const [coRejectReasonModal, setCoRejectReasonModal] = useState<string | null>(null);
+  const [coRejectReason, setCoRejectReason] = useState("");
 
-  // Load vehicles and my bookings when tab changes
-  useEffect(() => {
-    if (activeTab === "my_bookings") {
-      fetchMyBookings();
-    }
-  }, [activeTab, statusFilter]);
-
-  useEffect(() => {
-    fetchGarageVehicles();
-  }, []);
-
-  const fetchWorkshops = async () => {
-    setLoadingWorkshops(true);
-    try {
-      const res = await api.workshops.list({
-        q: searchQuery || undefined,
-        city: cityFilter || undefined,
-        accepting_only: true,
-      });
-      setWorkshops(res.results || []);
-    } catch (err) {
-      console.error("Failed to load workshops:", err);
-    } finally {
-      setLoadingWorkshops(false);
-    }
-  };
-
-  const fetchGarageVehicles = async () => {
-    setLoadingVehicles(true);
-    try {
-      const res = await api.garage.listVehicles();
-      const active = (res || []).filter((v: GarageVehicle) => !v.is_archived);
-      setVehicles(active);
-      if (active.length > 0 && !selectedVehicleId) {
-        setSelectedVehicleId(active[0].id);
-      }
-    } catch (err) {
-      console.error("Failed to load garage vehicles:", err);
-    } finally {
-      setLoadingVehicles(false);
-    }
-  };
-
-  const fetchMyBookings = async () => {
+  const fetchMyBookings = useCallback(async () => {
     setLoadingBookings(true);
     try {
       const res = await api.workshops.listMyBookings({ status: statusFilter || undefined });
-      setMyBookings(res.results || []);
+      const bookings = res.results || [];
+      setMyBookings(bookings);
+      const coMap: Record<string, ChangeOrder[]> = {};
+      await Promise.all(
+        bookings.map(async (b) => {
+          try {
+            const coRes = await api.workshops.listBuyerChangeOrders(b.id);
+            if (coRes.results && coRes.results.length > 0) {
+              coMap[b.id] = coRes.results;
+            }
+          } catch {
+            // ignore
+          }
+        })
+      );
+      setBookingChangeOrders(coMap);
     } catch (err) {
       console.error("Failed to load my bookings:", err);
     } finally {
       setLoadingBookings(false);
     }
-  };
+  }, [statusFilter]);
+
+  // Load workshops
+  useEffect(() => {
+    let ignore = false;
+    api.workshops
+      .list({
+        q: searchQuery || undefined,
+        city: cityFilter || undefined,
+        accepting_only: true,
+      })
+      .then((res) => {
+        if (!ignore) {
+          setWorkshops(res.results || []);
+          setLoadingWorkshops(false);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to load workshops:", err);
+        if (!ignore) setLoadingWorkshops(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [searchQuery, cityFilter]);
+
+  // Load vehicles
+  useEffect(() => {
+    let ignore = false;
+    api.garage
+      .listVehicles()
+      .then((res) => {
+        if (!ignore) {
+          const active = (res || []).filter((v: GarageVehicle) => !v.is_archived);
+          setVehicles(active);
+          if (active.length > 0) {
+            setSelectedVehicleId((prev) => prev || active[0].id);
+          }
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to load garage vehicles:", err);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  // Load my bookings when tab changes
+  useEffect(() => {
+    if (activeTab === "my_bookings") {
+      let ignore = false;
+      api.workshops
+        .listMyBookings({ status: statusFilter || undefined })
+        .then(async (res) => {
+          if (!ignore) {
+            const bookings = res.results || [];
+            setMyBookings(bookings);
+            const coMap: Record<string, ChangeOrder[]> = {};
+            await Promise.all(
+              bookings.map(async (b) => {
+                try {
+                  const coRes = await api.workshops.listBuyerChangeOrders(b.id);
+                  if (coRes.results && coRes.results.length > 0) {
+                    coMap[b.id] = coRes.results;
+                  }
+                } catch {
+                  // ignore
+                }
+              })
+            );
+            if (!ignore) {
+              setBookingChangeOrders(coMap);
+              setLoadingBookings(false);
+            }
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to load my bookings:", err);
+          if (!ignore) setLoadingBookings(false);
+        });
+      return () => {
+        ignore = true;
+      };
+    }
+  }, [activeTab, statusFilter]);
 
   const openBookingModal = (ws: WorkshopProfilePublic) => {
     setTargetWorkshop(ws);
     setSelectedServiceIds([]);
-    setPreferredDate(new Date(Date.now() + 86400000 * 2).toISOString().split("T")[0]);
+    setPreferredDate(getDefaultBookingDate());
     setPreferredTimeSlot("09:00 - 11:00");
     setCustomerNotes("");
     setReportedFaults("");
@@ -179,8 +230,8 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
 
       setBookingSuccessNumber(booking.booking_number);
       fetchMyBookings();
-    } catch (err: any) {
-      setBookingError(err.message || "Failed to submit booking request.");
+    } catch (err: unknown) {
+      setBookingError(err instanceof Error ? err.message : "Failed to submit booking request.");
     } finally {
       setSubmittingBooking(false);
     }
@@ -193,8 +244,8 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
       setActionSuccessMessage("Quotation accepted successfully! Your appointment is confirmed.");
       fetchMyBookings();
       setTimeout(() => setActionSuccessMessage(null), 4000);
-    } catch (err: any) {
-      alert(err.message || "Failed to accept quotation.");
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to accept quotation.");
     } finally {
       setRespondingQuoteId(null);
     }
@@ -210,8 +261,8 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
       setRejectReason("");
       fetchMyBookings();
       setTimeout(() => setActionSuccessMessage(null), 4000);
-    } catch (err: any) {
-      alert(err.message || "Failed to reject quotation.");
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to reject quotation.");
     } finally {
       setRespondingQuoteId(null);
     }
@@ -226,8 +277,42 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
       setActionSuccessMessage("Booking cancelled successfully.");
       fetchMyBookings();
       setTimeout(() => setActionSuccessMessage(null), 4000);
-    } catch (err: any) {
-      alert(err.message || "Failed to cancel booking.");
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to cancel booking.");
+    }
+  };
+
+  const handleApproveChangeOrder = async (coId: string) => {
+    setCoActionLoading(true);
+    try {
+      await api.workshops.approveChangeOrder(coId, coApprovalNotes);
+      setActionSuccessMessage("Change order authorized successfully.");
+      setActiveChangeOrderModal(null);
+      setCoApprovalNotes("");
+      fetchMyBookings();
+      setTimeout(() => setActionSuccessMessage(null), 4000);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to approve change order.");
+    } finally {
+      setCoActionLoading(false);
+    }
+  };
+
+  const handleRejectChangeOrder = async () => {
+    if (!coRejectReasonModal) return;
+    setCoActionLoading(true);
+    try {
+      await api.workshops.rejectChangeOrder(coRejectReasonModal, coRejectReason);
+      setActionSuccessMessage("Change order declined.");
+      setCoRejectReasonModal(null);
+      setActiveChangeOrderModal(null);
+      setCoRejectReason("");
+      fetchMyBookings();
+      setTimeout(() => setActionSuccessMessage(null), 4000);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to decline change order.");
+    } finally {
+      setCoActionLoading(false);
     }
   };
 
@@ -469,7 +554,7 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                         <Wrench className="w-5 h-5" />
                       </div>
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-xs font-black text-slate-900">{bk.booking_number}</span>
                           <span
                             className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${getStatusBadge(
@@ -478,6 +563,17 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                           >
                             {bk.status}
                           </span>
+                          {bk.active_quotation?.status === "ISSUED" && (
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1.5 shadow-xs">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                              Quotation Ready for Review
+                            </span>
+                          )}
+                          {bk.active_quotation?.status === "ACCEPTED" && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              Quote Accepted
+                            </span>
+                          )}
                         </div>
                         <h4 className="text-sm font-black text-slate-950 mt-0.5">{bk.workshop_name}</h4>
                       </div>
@@ -535,7 +631,96 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                     </div>
                   )}
 
-                  {/* Quotation Review Card (If Quotation Available) */}
+                  {/* Change Orders & Additional Scope Requests (Buyer Review) */}
+                  {bookingChangeOrders[bk.id] && bookingChangeOrders[bk.id].length > 0 && (
+                    <div className="space-y-3">
+                      {/* Pending Change Orders Requiring Buyer Decision */}
+                      {bookingChangeOrders[bk.id].filter(c => c.status === "SUBMITTED").map((co) => (
+                        <div
+                          key={co.id}
+                          className="p-4 rounded-2xl bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-300 text-amber-950 space-y-3 shadow-xs"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="flex items-start gap-2.5">
+                              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] font-black uppercase tracking-wider bg-amber-200 text-amber-900 px-2 py-0.5 rounded border border-amber-300">
+                                    Action Required
+                                  </span>
+                                  <span className="font-mono text-xs font-bold text-slate-700">
+                                    Change Order #{co.change_order_number}
+                                  </span>
+                                </div>
+                                <h5 className="font-black text-sm text-slate-900 mt-0.5">
+                                  Workshop Requested Additional Repair Authorization
+                                </h5>
+                                <p className="text-xs text-slate-700 mt-1">
+                                  <strong className="text-slate-900">Diagnosis: </strong>
+                                  {co.reason}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="text-right sm:border-l sm:border-amber-200 sm:pl-4 shrink-0">
+                              <span className="text-[10px] text-slate-500 block uppercase font-bold">Additional Cost</span>
+                              <span className="text-lg font-black text-purple-700">
+                                +{co.currency} {parseFloat(co.additional_amount).toFixed(2)}
+                              </span>
+                              <span className="text-[10px] text-slate-500 block font-mono">
+                                Revised Total: {co.currency} {parseFloat(co.revised_authorized_total).toFixed(2)}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setActiveChangeOrderModal(co)}
+                                className="mt-2 w-full px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs rounded-xl transition shadow-xs flex items-center justify-center gap-1.5"
+                              >
+                                <span>Review & Authorize</span>
+                                <ChevronRight className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Historical Decided Change Orders */}
+                      {bookingChangeOrders[bk.id].filter(c => c.status !== "SUBMITTED").length > 0 && (
+                        <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200 space-y-2 text-xs">
+                          <span className="font-bold text-slate-700 block text-[11px] uppercase tracking-wider">
+                            Additional Repair Authorization History
+                          </span>
+                          <div className="space-y-1.5">
+                            {bookingChangeOrders[bk.id].filter(c => c.status !== "SUBMITTED").map((co) => (
+                              <div
+                                key={co.id}
+                                className="flex items-center justify-between p-2 rounded-xl bg-white border border-slate-200"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                      co.status === "APPROVED"
+                                        ? "bg-emerald-100 text-emerald-800"
+                                        : "bg-rose-100 text-rose-800"
+                                    }`}
+                                  >
+                                    {co.status === "APPROVED" ? "Authorized" : "Declined"}
+                                  </span>
+                                  <span className="font-mono font-bold text-slate-800">#{co.change_order_number}</span>
+                                  <span className="text-slate-600 truncate max-w-xs">{co.reason}</span>
+                                </div>
+                                <div className="text-right">
+                                  <span className="font-bold text-slate-900 font-mono">
+                                    {co.status === "APPROVED" ? `+${co.currency} ${co.additional_amount}` : "Declined"}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                                    {/* Quotation Review Card (If Quotation Available) */}
                   {bk.active_quotation && (
                     <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-purple-950 text-white space-y-4 shadow-sm border border-slate-800">
                       <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-white/10">
@@ -685,6 +870,16 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                         <div className="pt-2 text-xs text-emerald-400 font-bold flex items-center gap-1.5">
                           <CheckCircle2 className="w-4 h-4" />
                           <span>You accepted this quotation on {bk.active_quotation.accepted_at?.split("T")[0]}.</span>
+                        </div>
+                      )}
+
+                      {bk.active_quotation.status === "REJECTED" && (
+                        <div className="pt-2 text-xs text-rose-400 font-bold flex items-center gap-1.5">
+                          <AlertTriangle className="w-4 h-4" />
+                          <span>
+                            You declined this quotation on {bk.active_quotation.rejected_at?.split("T")[0] || "record"}.
+                            {bk.active_quotation.customer_rejection_reason && ` Reason: ${bk.active_quotation.customer_rejection_reason}`}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -926,6 +1121,109 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
               <button
                 onClick={handleRejectQuotation}
                 disabled={respondingQuoteId !== null}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl"
+              >
+                Confirm Decline
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: REVIEW CHANGE ORDER */}
+      {/* ========================================================================= */}
+      {activeChangeOrderModal && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200">
+            <h3 className="text-base font-black text-slate-950">
+              Review Additional Work Authorization (Change Order #{activeChangeOrderModal.change_order_number})
+            </h3>
+            <p className="text-xs text-slate-600">
+              <strong>Diagnosis / Reason:</strong> {activeChangeOrderModal.reason}
+            </p>
+            <div className="bg-amber-50 rounded-xl p-3 border border-amber-200 text-xs space-y-1">
+              <div className="flex justify-between">
+                <span className="text-slate-600">Additional Cost:</span>
+                <span className="font-bold text-slate-900">
+                  +{activeChangeOrderModal.currency} {parseFloat(activeChangeOrderModal.additional_amount).toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between font-bold">
+                <span className="text-slate-900">Revised Authorized Total:</span>
+                <span className="text-purple-700">
+                  {activeChangeOrderModal.currency} {parseFloat(activeChangeOrderModal.revised_authorized_total).toFixed(2)}
+                </span>
+              </div>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-900 block">Approval Notes (Optional)</label>
+              <textarea
+                rows={2}
+                value={coApprovalNotes}
+                onChange={(e) => setCoApprovalNotes(e.target.value)}
+                placeholder="E.g., Approved with OEM parts..."
+                className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-400"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setActiveChangeOrderModal(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => setCoRejectReasonModal(activeChangeOrderModal.id)}
+                className="px-4 py-2 bg-rose-50 text-rose-700 hover:bg-rose-100 font-bold text-xs rounded-xl"
+              >
+                Decline
+              </button>
+              <button
+                type="button"
+                onClick={() => handleApproveChangeOrder(activeChangeOrderModal.id)}
+                disabled={coActionLoading}
+                className="px-5 py-2 bg-slate-950 hover:bg-slate-900 text-white font-bold text-xs rounded-xl flex items-center gap-2"
+              >
+                {coActionLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>Authorize & Approve</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: DECLINE CHANGE ORDER */}
+      {/* ========================================================================= */}
+      {coRejectReasonModal && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200">
+            <h3 className="text-base font-black text-slate-950">Decline Additional Work</h3>
+            <p className="text-xs text-slate-600">
+              Please provide a reason for declining this additional repair authorization:
+            </p>
+            <textarea
+              rows={3}
+              value={coRejectReason}
+              onChange={(e) => setCoRejectReason(e.target.value)}
+              placeholder="E.g., Prefer to defer this repair or get alternative parts..."
+              className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-400"
+            />
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setCoRejectReasonModal(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRejectChangeOrder}
+                disabled={coActionLoading}
                 className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl"
               >
                 Confirm Decline

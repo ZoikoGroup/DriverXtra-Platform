@@ -186,10 +186,12 @@ function NotificationDrawerPanel({ onClose, onUnreadCountChange, onNavigateTab }
 
   useEffect(() => {
     let ignore = false;
-    setLoading(true);
-    setError(null);
     Promise.resolve().then(() => {
-      if (!ignore) void fetchPage(1, unreadOnly);
+      if (!ignore) {
+        setLoading(true);
+        setError(null);
+        void fetchPage(1, unreadOnly);
+      }
     });
     return () => {
       ignore = true;

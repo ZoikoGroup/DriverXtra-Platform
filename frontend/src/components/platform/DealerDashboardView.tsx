@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Image from "next/image";
 import { MOCK_DEALER_INVENTORY, InventoryItem } from "@/lib/mock-data/inventory";
 import {
   RefreshCw,
@@ -187,9 +188,12 @@ export default function DealerDashboardView({ activeTab }: { activeTab: string }
                   <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3.5 px-4 font-bold text-slate-950">
                       <div className="flex items-center gap-3">
-                        <img
+                        <Image
                           src={item.primaryImageUrl}
                           alt={item.model}
+                          width={40}
+                          height={40}
+                          unoptimized
                           className="w-10 h-10 rounded-lg object-cover bg-slate-100"
                         />
                         <div>

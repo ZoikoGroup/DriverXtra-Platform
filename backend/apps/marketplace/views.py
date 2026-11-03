@@ -2012,6 +2012,7 @@ class OrderCheckoutView(views.APIView):
 
                     calculated_items.append({
                         "listing": listing,
+                        "seller_id": str(listing.seller_id) if getattr(listing, 'seller_id', None) else None,
                         "item_type": "PART",
                         "title": listing.name,
                         "brand": listing.brand,
@@ -2027,6 +2028,7 @@ class OrderCheckoutView(views.APIView):
                         "igst_amount": line_igst,
                         "tax_amount": line_gst,
                         "total_amount": line_total,
+                        "tax_calc": tax_calc,
                     })
 
                 available_payment_methods = PaymentService.get_available_payment_methods(
@@ -2034,6 +2036,106 @@ class OrderCheckoutView(views.APIView):
                     currency=currency,
                     amount=grand_total,
                 )
+
+                # Authoritative statutory order-level tax engine determination & immutable snapshot
+                from platform_core.tax.models_data import TaxTransactionContext, TaxLineInput
+                from platform_core.tax.engine import TaxEngineService
+                from platform_core.tax.choices import DocumentType, TaxScheme, TaxType
+                from platform_core.tax.supplier_resolver import resolve_marketplace_supplier_tax_context
+
+                # Check if order contains items from multiple distinct sellers with differing tax profiles
+                distinct_seller_contexts = {
+                    (
+                        ci["seller_id"],
+                        ci["tax_calc"]["context"].supplier_jurisdiction,
+                        ci["tax_calc"]["context"].supplier_registration_state,
+                        ci["tax_calc"]["context"].can_collect_tax,
+                    )
+                    for ci in calculated_items
+                }
+                is_multi_seller = len(distinct_seller_contexts) > 1
+
+                if not is_multi_seller and calculated_items:
+                    # Single seller order: compute transaction tax using seller's authoritative context
+                    primary_context = calculated_items[0]["tax_calc"]["context"]
+                    order_tax_lines = [
+                        TaxLineInput(
+                            line_id=str(ci["listing"].id),
+                            item_type=ci["item_type"],
+                            description=ci["title"],
+                            taxable_amount=ci["taxable_amount"],
+                            classification_code=ci["hsn_code"] or None,
+                            candidate_rate=ci["gst_rate"],
+                        )
+                        for ci in calculated_items
+                    ]
+                    order_tax_res = TaxEngineService.calculate_transaction_tax(
+                        context=primary_context,
+                        lines=order_tax_lines,
+                    )
+                    order_tax_breakdown = order_tax_res.to_snapshot()
+                else:
+                    # Multi-seller order: aggregate individual line determinations into composite order breakdown
+                    any_blocked = any(ci["tax_calc"]["document_type"] == DocumentType.BLOCKED.value for ci in calculated_items)
+                    all_bos = all(ci["tax_calc"]["document_type"] == DocumentType.BILL_OF_SUPPLY.value for ci in calculated_items)
+                    all_ci = all(ci["tax_calc"]["document_type"] == DocumentType.COMMERCIAL_INVOICE.value for ci in calculated_items)
+
+                    if any_blocked:
+                        overall_doc = DocumentType.BLOCKED.value
+                    elif all_bos:
+                        overall_doc = DocumentType.BILL_OF_SUPPLY.value
+                    elif all_ci:
+                        overall_doc = DocumentType.COMMERCIAL_INVOICE.value
+                    else:
+                        overall_doc = DocumentType.TAX_INVOICE.value
+
+                    any_review = any(ci["tax_calc"]["requires_tax_review"] for ci in calculated_items)
+                    review_reasons = list(filter(None, [ci["tax_calc"]["review_reason"] for ci in calculated_items]))
+
+                    effective_rate = (
+                        quantize_currency((tax_total / subtotal_taxable) * Decimal('100.00'))
+                        if subtotal_taxable > Decimal('0.00')
+                        else Decimal('0.00')
+                    )
+
+                    all_lines_snapshots = []
+                    for ci in calculated_items:
+                        line_snap = ci["tax_calc"]["snapshot"]["lines"][0] if ci["tax_calc"]["snapshot"].get("lines") else {}
+                        line_snap["seller_id"] = ci["seller_id"]
+                        line_snap["seller_jurisdiction"] = ci["tax_calc"]["context"].supplier_jurisdiction
+                        line_snap["seller_registration_state"] = ci["tax_calc"]["context"].supplier_registration_state.value
+                        line_snap["can_collect_tax"] = ci["tax_calc"]["context"].can_collect_tax
+                        all_lines_snapshots.append(line_snap)
+
+                    order_tax_breakdown = {
+                        "document_type": overall_doc,
+                        "tax_scheme": "GST" if country_code == "IN" else "VAT",
+                        "tax_type": "MULTI_SELLER",
+                        "place_of_supply": effective_place_of_supply,
+                        "legal_place_of_supply_basis": "Multi-seller transaction with line-level statutory supplier attribution",
+                        "supplier_jurisdiction": "MULTI",
+                        "supplier_registration_state": "MULTI_SELLER",
+                        "can_collect_tax": all(ci["tax_calc"]["context"].can_collect_tax for ci in calculated_items),
+                        "currency": currency,
+                        "taxable_amount": str(subtotal_taxable),
+                        "effective_tax_rate": str(effective_rate),
+                        "tax_amount": str(tax_total),
+                        "total_amount": str(grand_total),
+                        "requires_tax_review": any_review,
+                        "review_reason": "; ".join(review_reasons),
+                        "is_multi_seller": True,
+                        "components": {
+                            "cgst_rate": str(effective_rate / Decimal('2.00')) if cgst_total > Decimal('0.00') else "0.00",
+                            "cgst_amount": str(cgst_total),
+                            "sgst_rate": str(effective_rate / Decimal('2.00')) if sgst_total > Decimal('0.00') else "0.00",
+                            "sgst_amount": str(sgst_total),
+                            "igst_rate": str(effective_rate) if igst_total > Decimal('0.00') else "0.00",
+                            "igst_amount": str(igst_total),
+                            "vat_rate": str(effective_rate) if country_code == "GB" else "0.00",
+                            "vat_amount": str(tax_total) if country_code == "GB" else "0.00",
+                        },
+                        "lines": all_lines_snapshots,
+                    }
 
                 if preview_only:
                     return Response({
@@ -2049,6 +2151,7 @@ class OrderCheckoutView(views.APIView):
                         "igst_amount": str(igst_total),
                         "total_tax_amount": str(tax_total),
                         "total_amount": str(grand_total),
+                        "tax_breakdown": order_tax_breakdown,
                         "available_payment_methods": available_payment_methods,
                         "items": [
                             {
@@ -2161,6 +2264,7 @@ class OrderCheckoutView(views.APIView):
                     igst_amount=igst_total,
                     total_tax_amount=tax_total,
                     total_amount=grand_total,
+                    tax_breakdown=order_tax_breakdown,
                 )
 
                 for ci in calculated_items:
