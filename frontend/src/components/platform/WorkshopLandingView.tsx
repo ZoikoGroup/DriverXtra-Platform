@@ -86,6 +86,7 @@ export default function WorkshopLandingView() {
   const [technicians, setTechnicians] = useState<WorkshopTechnicianMember[]>([]);
   const [workOrderFilter, setWorkOrderFilter] = useState<string>("ALL");
   const [workOrderSearchQuery, setWorkOrderSearchQuery] = useState("");
+  const [technicianOnlyFilter, setTechnicianOnlyFilter] = useState(false);
 
   // Work Order Detail Modal
   const [selectedWorkOrder, setSelectedWorkOrder] = useState<WorkOrderDetail | null>(null);
@@ -405,6 +406,18 @@ export default function WorkshopLandingView() {
           ? true
           : wo.status.toUpperCase() === workOrderFilter.toUpperCase();
 
+      if (technicianOnlyFilter) {
+        const userEmail = user?.email?.toLowerCase() || "";
+        const userFullName = user?.fullName?.toLowerCase() || "";
+        const matchesTech =
+          (wo.lead_technician && user?.id && wo.lead_technician === user.id) ||
+          (wo.lead_technician_name && (
+            (userEmail && wo.lead_technician_name.toLowerCase().includes(userEmail)) ||
+            (userFullName && wo.lead_technician_name.toLowerCase().includes(userFullName))
+          ));
+        if (!matchesTech) return false;
+      }
+
       const q = workOrderSearchQuery.toLowerCase().trim();
       const matchesSearch =
         !q ||
@@ -417,7 +430,7 @@ export default function WorkshopLandingView() {
 
       return matchesFilter && matchesSearch;
     });
-  }, [workOrders, workOrderFilter, workOrderSearchQuery]);
+  }, [workOrders, workOrderFilter, workOrderSearchQuery, technicianOnlyFilter, user]);
 
   // Work Order Action Handlers
   const handleOpenWorkOrder = async (id: string) => {
@@ -1633,6 +1646,18 @@ export default function WorkshopLandingView() {
                   </span>
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={() => setTechnicianOnlyFilter(!technicianOnlyFilter)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap flex items-center gap-1.5 ${
+                  technicianOnlyFilter
+                    ? "bg-amber-400 text-slate-950 shadow-sm"
+                    : "bg-slate-50 text-slate-600 hover:bg-slate-100 border border-slate-200"
+                }`}
+              >
+                <Wrench className="w-3.5 h-3.5" />
+                <span>My Assigned Jobs</span>
+              </button>
             </div>
 
             <div className="relative min-w-[240px]">
@@ -2702,6 +2727,26 @@ export default function WorkshopLandingView() {
                   </div>
                 </div>
               </div>
+
+              {/* Customer Reported Faults & Notes */}
+              {(selectedWorkOrder.reported_faults || selectedWorkOrder.customer_notes) && (
+                <div className="bg-amber-50/60 border border-amber-200/70 rounded-2xl p-4 space-y-2">
+                  <span className="text-[10px] font-black uppercase text-amber-800 tracking-wider flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                    Customer Reported Faults & Booking Instructions
+                  </span>
+                  {selectedWorkOrder.reported_faults && (
+                    <div className="text-xs text-amber-950 font-medium">
+                      <strong>Reported Symptoms / Faults:</strong> {selectedWorkOrder.reported_faults}
+                    </div>
+                  )}
+                  {selectedWorkOrder.customer_notes && (
+                    <div className="text-xs text-slate-700">
+                      <strong>Customer Notes:</strong> {selectedWorkOrder.customer_notes}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Odometer Unit Mismatch Warning */}
               {selectedWorkOrder.odometer_unit_mismatch && (

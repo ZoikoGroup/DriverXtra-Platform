@@ -32,6 +32,7 @@ import {
   FileText,
   User,
   Check,
+  Download,
 } from "lucide-react";
 
 interface Phase2GarageViewProps {
@@ -65,6 +66,7 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
   // Service History States
   const [serviceRecords, setServiceRecords] = useState<VehicleServiceRecord[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isDownloadingPassport, setIsDownloadingPassport] = useState(false);
   const [isAddServiceModalOpen, setIsAddServiceModalOpen] = useState(false);
   const [serviceToEdit, setServiceToEdit] = useState<VehicleServiceRecord | null>(null);
   const [serviceToDelete, setServiceToDelete] = useState<VehicleServiceRecord | null>(null);
@@ -182,6 +184,30 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
     setServiceFormNotes("");
     setServiceFormError(null);
     setIsAddServiceModalOpen(true);
+  };
+
+  const handleDownloadPassportPdf = async () => {
+    if (!selectedVehicle) return;
+    setIsDownloadingPassport(true);
+    try {
+      const blob = await api.garage.downloadVehiclePassportPdf(selectedVehicle.id);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const plate = selectedVehicle.registration_plate
+        ? selectedVehicle.registration_plate.replace(/\s+/g, "_")
+        : selectedVehicle.id.slice(0, 8);
+      link.download = `Service_Passport_${plate}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to download service passport PDF.";
+      setErrorMsg(msg);
+    } finally {
+      setIsDownloadingPassport(false);
+    }
   };
 
   const handleOpenEditServiceModal = (rec: VehicleServiceRecord) => {
@@ -842,6 +868,21 @@ export default function Phase2GarageView({ initialVehicleId }: Phase2GarageViewP
                 </span>
               </div>
               <button
+                type="button"
+                onClick={handleDownloadPassportPdf}
+                disabled={isDownloadingPassport}
+                className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-2 shadow-sm transition-all"
+                title="Download official DriverXtra Digital Service Passport PDF"
+              >
+                {isDownloadingPassport ? (
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4 text-emerald-200" />
+                )}
+                <span>Download Passport (PDF)</span>
+              </button>
+              <button
+                type="button"
                 onClick={handleOpenAddServiceModal}
                 className="bg-slate-950 hover:bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-2 shadow-sm transition-all"
               >

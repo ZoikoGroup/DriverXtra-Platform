@@ -13,6 +13,8 @@ from apps.workshops.models import (
     WorkOrderPartUsage,
     ChangeOrder,
     ChangeOrderLineItem,
+    WorkshopReview,
+    WorkshopDepositWebhookEvent,
 )
 
 
@@ -315,4 +317,47 @@ class ChangeOrderLineItemAdmin(admin.ModelAdmin):
     )
     list_filter = ('item_type',)
     search_fields = ('description', 'part_number', 'change_order__change_order_number')
+
+
+@admin.register(WorkshopReview)
+class WorkshopReviewAdmin(admin.ModelAdmin):
+    list_display = (
+        'workshop',
+        'buyer',
+        'rating',
+        'status',
+        'is_verified_service',
+        'title',
+        'created_at',
+    )
+    list_filter = ('status', 'rating', 'is_verified_service')
+    search_fields = (
+        'workshop__business_name',
+        'buyer__email',
+        'title',
+        'comment',
+        'booking__booking_number',
+    )
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(WorkshopDepositWebhookEvent)
+class WorkshopDepositWebhookEventAdmin(admin.ModelAdmin):
+    list_display = (
+        'event_id',
+        'provider',
+        'event_type',
+        'quotation',
+        'processed',
+        'created_at',
+    )
+    list_filter = ('provider', 'processed', 'event_type')
+    search_fields = (
+        'event_id',
+        'quotation__quotation_number',
+        'quotation__booking__booking_number',
+    )
+    readonly_fields = ('created_at', 'updated_at')
+
+
 

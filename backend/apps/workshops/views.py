@@ -1,3 +1,4 @@
+from decimal import Decimal
 from apps.identity.models import User
 from apps.catalogue.models import Part
 from django.shortcuts import get_object_or_404
@@ -17,6 +18,7 @@ from apps.workshops.models import (
     DayOfWeekChoices,
     BookingStatusChoices,
     QuotationStatusChoices,
+    DepositStatusChoices,
     WorkOrder,
     WorkOrderTask,
     WorkOrderPartUsage,
@@ -25,6 +27,10 @@ from apps.workshops.models import (
     ChangeOrder,
     ChangeOrderLineItem,
     ChangeOrderStatusChoices,
+    WorkshopReview,
+    ReviewStatusChoices,
+    WorkshopConversation,
+    WorkshopMessage,
 )
 from apps.workshops.serializers import (
     WorkshopProfilePublicSerializer,
@@ -39,6 +45,8 @@ from apps.workshops.serializers import (
     WorkshopQuotationSerializer,
     QuotationCreateUpdateSerializer,
     QuotationResponseSerializer,
+    QuotationDepositSessionCreateSerializer,
+    QuotationDepositVerifySerializer,
     WorkOrderSerializer,
     WorkOrderListSerializer,
     WorkOrderTaskSerializer,
@@ -54,6 +62,13 @@ from apps.workshops.serializers import (
     ChangeOrderCreateSerializer,
     ChangeOrderDecisionSerializer,
     AdminWorkshopTaxAuthorizationSerializer,
+    WorkshopReviewSerializer,
+    WorkshopReviewCreateSerializer,
+    WorkshopReviewReplySerializer,
+    WorkshopReviewModerationSerializer,
+    WorkshopConversationSerializer,
+    WorkshopMessageSerializer,
+    CreateWorkshopMessageSerializer,
 )
 from apps.workshops.services import (
     BookingService,
@@ -62,7 +77,9 @@ from apps.workshops.services import (
     ChangeOrderService,
     CapacityExceededError,
     WorkshopTaxAuthorizationService,
+    WorkshopReviewService,
 )
+from apps.workshops.deposit_service import WorkshopDepositPaymentService
 from apps.workshops.permissions import (
     IsWorkshopOwnerOrAdmin,
     IsWorkshopStaffOrMember,
@@ -136,10 +153,14 @@ class WorkshopListPublicView(generics.ListAPIView):
     serializer_class = WorkshopProfilePublicSerializer
 
     def get_queryset(self):
+        from django.db.models import Avg, Count
         qs = WorkshopProfile.objects.filter(
             is_verified=True,
             organisation__is_active=True,
-        ).select_related('organisation').prefetch_related('services', 'operating_hours')
+        ).select_related('organisation').prefetch_related('services', 'operating_hours').annotate(
+            avg_rating=Avg('reviews__rating', filter=Q(reviews__status=ReviewStatusChoices.APPROVED)),
+            total_reviews=Count('reviews', filter=Q(reviews__status=ReviewStatusChoices.APPROVED), distinct=True),
+        )
 
         city = self.request.query_params.get('city')
         if city:
@@ -157,6 +178,19 @@ class WorkshopListPublicView(generics.ListAPIView):
         accepting = self.request.query_params.get('accepting_only')
         if accepting and accepting.lower() in ('1', 'true', 'yes'):
             qs = qs.filter(is_accepting_bookings=True)
+
+        min_rating = self.request.query_params.get('min_rating')
+        if min_rating:
+            try:
+                qs = qs.filter(avg_rating__gte=float(min_rating))
+            except ValueError:
+                pass
+
+        ordering = self.request.query_params.get('ordering')
+        if ordering in ('-rating', '-avg_rating'):
+            return qs.order_by('-avg_rating', 'business_name')
+        elif ordering in ('rating', 'avg_rating'):
+            return qs.order_by('avg_rating', 'business_name')
 
         return qs.order_by('business_name')
 
@@ -334,6 +368,134 @@ class BuyerQuotationRejectView(views.APIView):
         except DjangoValidationError as exc:
             msg = exc.message if hasattr(exc, 'message') else str(exc)
             return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class QuotationDepositSessionCreateView(views.APIView):
+    """
+    Buyer initiates an authoritative payment session for a quotation deposit.
+    POST /api/v1/workshops/quotations/<id>/deposit/create/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        quotation = get_object_or_404(
+            WorkshopQuotation.objects.select_related('booking', 'booking__buyer', 'booking__workshop__organisation'),
+            id=id,
+        )
+        if quotation.booking.buyer_id != request.user.id:
+            raise PermissionDenied("You can only pay deposits for quotations issued for your own bookings.")
+
+        serializer = QuotationDepositSessionCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            session_data = WorkshopDepositPaymentService.create_deposit_session(
+                quotation=quotation,
+                buyer=request.user,
+                preferred_provider=serializer.validated_data.get('preferred_provider'),
+                return_url=serializer.validated_data.get('return_url'),
+                cancel_url=serializer.validated_data.get('cancel_url'),
+            )
+            return Response(session_data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+        except RuntimeError as exc:
+            return Response({'status': 'error', 'message': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class QuotationDepositVerifyView(views.APIView):
+    """
+    Buyer verifies payment gateway confirmation payload for quotation deposit.
+    Cryptographically validates HMAC signature or gateway intent status,
+    transitions deposit to PAID, quotation to ACCEPTED, and creates WorkOrder.
+    POST /api/v1/workshops/quotations/<id>/deposit/verify/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        quotation = get_object_or_404(
+            WorkshopQuotation.objects.select_related('booking', 'booking__buyer', 'booking__workshop__organisation'),
+            id=id,
+        )
+        if quotation.booking.buyer_id != request.user.id:
+            raise PermissionDenied("You can only verify deposits for quotations issued for your own bookings.")
+
+        serializer = QuotationDepositVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            verified_quotation = WorkshopDepositPaymentService.verify_deposit_payment(
+                quotation_id=quotation.id,
+                payload=serializer.validated_data,
+                actor=request.user,
+                preferred_provider=serializer.validated_data.get('preferred_provider'),
+            )
+            return Response({
+                'status': 'success',
+                'message': 'Deposit verified successfully. Quotation accepted and booking confirmed.',
+                'quotation': WorkshopQuotationSerializer(verified_quotation).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class QuotationDepositDetailView(views.APIView):
+    """
+    Inspect deposit status and payment details for a quotation.
+    GET /api/v1/workshops/quotations/<id>/deposit/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        quotation = get_object_or_404(
+            WorkshopQuotation.objects.select_related('booking', 'booking__buyer', 'booking__workshop'),
+            id=id,
+        )
+        is_buyer = quotation.booking.buyer_id == request.user.id
+        from apps.workshops.permissions import is_platform_admin_or_staff, is_workshop_staff_or_admin
+        is_staff = is_platform_admin_or_staff(request.user) or is_workshop_staff_or_admin(request.user, quotation.booking.workshop)
+        if not (is_buyer or is_staff):
+            raise PermissionDenied("You do not have permission to view deposit details for this quotation.")
+
+        return Response({
+            'quotation_id': str(quotation.id),
+            'quotation_number': quotation.quotation_number,
+            'booking_number': quotation.booking.booking_number,
+            'requires_deposit': quotation.requires_deposit,
+            'deposit_percentage': str(quotation.deposit_percentage),
+            'deposit_amount': str(quotation.deposit_amount),
+            'deposit_status': quotation.deposit_status,
+            'deposit_provider': quotation.deposit_provider,
+            'deposit_order_id': quotation.deposit_order_id,
+            'deposit_transaction_id': quotation.deposit_transaction_id,
+            'deposit_paid_at': quotation.deposit_paid_at.isoformat() if quotation.deposit_paid_at else None,
+            'total_amount': str(quotation.total_amount),
+            'currency': quotation.currency,
+        })
+
+
+class QuotationDepositWebhookView(views.APIView):
+    """
+    Public webhook receiver for payment gateway callbacks (Razorpay/Stripe).
+    No authentication required as it is signed by the payment gateway.
+    POST /api/v1/workshops/deposit/webhook/<str:provider>/
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request, provider):
+        headers = {k: v for k, v in request.headers.items()}
+        success, message = WorkshopDepositPaymentService.process_deposit_webhook(
+            provider_name=provider,
+            request_body=request.body,
+            headers=headers,
+        )
+        if success:
+            return Response({'status': 'success', 'message': message}, status=status.HTTP_200_OK)
+        return Response({'status': 'error', 'message': message}, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 # =========================================================
@@ -1014,6 +1176,15 @@ class WorkOrderPartUsageListCreateView(views.APIView):
         if data.get('catalogue_part_id'):
             catalogue_part = get_object_or_404(Part, id=data['catalogue_part_id'])
 
+        inventory_item = None
+        if data.get('inventory_item_id'):
+            from apps.marketplace.models import SparePartListing
+            inventory_item = get_object_or_404(
+                SparePartListing,
+                id=data['inventory_item_id'],
+                organisation=work_order.workshop.organisation,
+            )
+
         try:
             part_usage = WorkOrderService.record_part_usage(
                 work_order=work_order,
@@ -1023,6 +1194,7 @@ class WorkOrderPartUsageListCreateView(views.APIView):
                 part_number=data.get('part_number', ''),
                 description=data.get('description', ''),
                 catalogue_part=catalogue_part,
+                inventory_item=inventory_item,
                 actor=request.user,
             )
             return Response(WorkOrderPartUsageSerializer(part_usage).data, status=status.HTTP_201_CREATED)
@@ -1250,3 +1422,555 @@ class BuyerChangeOrderRejectView(views.APIView):
             return Response(BuyerChangeOrderSerializer(rejected).data)
         except DjangoValidationError as e:
             return Response({'status': 'error', 'message': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def _resolve_workshop(id_or_slug):
+    """Resolves a WorkshopProfile by UUID primary key or unique slug."""
+    try:
+        return WorkshopProfile.objects.select_related('organisation').get(id=id_or_slug)
+    except (WorkshopProfile.DoesNotExist, ValueError, DjangoValidationError):
+        return WorkshopProfile.objects.select_related('organisation').filter(slug=id_or_slug).first()
+
+
+class BuyerBookingReviewEligibilityView(views.APIView):
+    """
+    Check if a booking is eligible for customer review.
+    GET /api/v1/workshops/bookings/<id>/review-eligibility/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        booking = get_object_or_404(
+            WorkshopBooking.objects.select_related('workshop', 'work_order'),
+            id=id,
+        )
+        if booking.buyer_id != request.user.id and not request.user.is_staff:
+            raise PermissionDenied("You can only check review eligibility for your own bookings.")
+
+        is_eligible, reason, work_order = WorkshopReviewService.check_review_eligibility(booking, request.user)
+        existing_review = getattr(booking, 'review', None)
+
+        return Response({
+            "is_eligible": is_eligible,
+            "reason": reason,
+            "booking_id": str(booking.id),
+            "booking_number": booking.booking_number,
+            "workshop_id": str(booking.workshop_id),
+            "workshop_name": booking.workshop.business_name if booking.workshop else "",
+            "work_order_id": str(work_order.id) if work_order else None,
+            "work_order_status": work_order.status if work_order else None,
+            "completed_at": work_order.completed_at.isoformat() if (work_order and work_order.completed_at) else None,
+            "already_reviewed": bool(existing_review),
+            "existing_review_id": str(existing_review.id) if existing_review else None,
+            "existing_review_rating": existing_review.rating if existing_review else None,
+        }, status=status.HTTP_200_OK)
+
+
+class BuyerBookingReviewCreateView(views.APIView):
+    """
+    Submit a review for a completed workshop service booking.
+    POST /api/v1/workshops/bookings/<id>/review/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        booking = get_object_or_404(
+            WorkshopBooking.objects.select_related('workshop', 'work_order', 'workshop__organisation'),
+            id=id,
+        )
+        if booking.buyer_id != request.user.id:
+            raise PermissionDenied("You can only submit reviews for your own bookings.")
+
+        serializer = WorkshopReviewCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            review = WorkshopReviewService.create_review(
+                booking=booking,
+                buyer=request.user,
+                data=serializer.validated_data,
+                actor=request.user,
+            )
+            return Response(WorkshopReviewSerializer(review).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkshopReviewsListView(views.APIView):
+    """
+    Public listing of approved customer reviews and reputation summary for a workshop.
+    GET /api/v1/workshops/<id_or_slug>/reviews/
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, id_or_slug):
+        workshop = _resolve_workshop(id_or_slug)
+        if not workshop:
+            return Response({'error': f"Workshop '{id_or_slug}' not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reputation = WorkshopReviewService.get_workshop_reputation_summary(workshop)
+
+        qs = workshop.reviews.filter(
+            status=ReviewStatusChoices.APPROVED
+        ).select_related('buyer', 'workshop', 'booking', 'work_order', 'workshop_replied_by')
+
+        rating = request.query_params.get('rating')
+        if rating:
+            try:
+                qs = qs.filter(rating=int(rating))
+            except ValueError:
+                pass
+
+        ordering = request.query_params.get('ordering', '-created_at')
+        if ordering in ('-created_at', 'created_at', '-rating', 'rating'):
+            qs = qs.order_by(ordering)
+        else:
+            qs = qs.order_by('-created_at')
+
+        from rest_framework.pagination import PageNumberPagination
+        paginator = PageNumberPagination()
+        paginator.page_size = 10
+        page = paginator.paginate_queryset(qs, request)
+        serialized_reviews = WorkshopReviewSerializer(page, many=True).data
+
+        response_data = paginator.get_paginated_response(serialized_reviews).data
+        response_data['reputation'] = reputation
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+class WorkshopReviewReplyView(views.APIView):
+    """
+    Workshop management reply to a customer review.
+    POST /api/v1/workshops/manage/reviews/<id>/reply/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        review = get_object_or_404(
+            WorkshopReview.objects.select_related('workshop', 'workshop__organisation', 'buyer'),
+            id=id,
+        )
+        serializer = WorkshopReviewReplySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            updated = WorkshopReviewService.reply_to_review(
+                review=review,
+                user=request.user,
+                reply_text=serializer.validated_data['reply'],
+            )
+            return Response(WorkshopReviewSerializer(updated).data, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminWorkshopReviewListView(generics.ListAPIView):
+    """
+    Platform admin oversight of all workshop reviews across all statuses.
+    GET /api/v1/workshops/admin/reviews/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = WorkshopReviewSerializer
+
+    def get_queryset(self):
+        from apps.workshops.permissions import is_platform_admin_or_staff
+        if not is_platform_admin_or_staff(self.request.user):
+            raise PermissionDenied("Only authorized platform administrators and staff can view review moderation lists.")
+
+        qs = WorkshopReview.objects.select_related('workshop', 'buyer', 'booking', 'work_order', 'workshop_replied_by').all()
+
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter.strip().upper())
+
+        workshop_id = self.request.query_params.get('workshop_id')
+        if workshop_id:
+            qs = qs.filter(workshop_id=workshop_id)
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(comment__icontains=search)
+                | Q(title__icontains=search)
+                | Q(workshop__business_name__icontains=search)
+                | Q(buyer__email__icontains=search)
+            )
+
+        return qs.order_by('-created_at')
+
+
+class AdminWorkshopReviewModerationView(views.APIView):
+    """
+    Platform admin review status moderation.
+    POST /api/v1/workshops/admin/reviews/<id>/moderate/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        from apps.workshops.permissions import is_platform_admin_or_staff
+        if not is_platform_admin_or_staff(request.user):
+            raise PermissionDenied("Only authorized platform administrators and staff can moderate reviews.")
+
+        review = get_object_or_404(WorkshopReview, id=id)
+        serializer = WorkshopReviewModerationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            moderated = WorkshopReviewService.moderate_review(
+                review=review,
+                user=request.user,
+                status=serializer.validated_data['status'],
+                reason=serializer.validated_data.get('reason', ''),
+            )
+            return Response(WorkshopReviewSerializer(moderated).data, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BookingConversationDetailView(views.APIView):
+    """
+    Retrieve or create the conversation thread associated with a workshop booking.
+    GET /api/v1/workshops/bookings/<identifier>/conversation/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, identifier):
+        booking = None
+        try:
+            import uuid
+            uuid_obj = uuid.UUID(str(identifier))
+            booking = WorkshopBooking.objects.select_related('workshop', 'buyer').filter(id=uuid_obj).first()
+        except ValueError:
+            pass
+
+        if not booking:
+            booking = WorkshopBooking.objects.select_related('workshop', 'buyer').filter(booking_number=identifier).first()
+
+        if not booking:
+            return Response({'status': 'error', 'message': 'Booking not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            from apps.workshops.messaging_service import get_or_create_conversation_for_booking
+            conversation = get_or_create_conversation_for_booking(booking, request.user)
+            serializer = WorkshopConversationSerializer(conversation, context={'request': request})
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response({'status': 'error', 'message': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class WorkshopConversationListView(views.APIView):
+    """
+    List conversation threads accessible to the authenticated user.
+    GET /api/v1/workshops/conversations/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.workshops.messaging_service import get_user_conversations
+        conversations = get_user_conversations(request.user)
+        serializer = WorkshopConversationSerializer(conversations, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ConversationMessageListCreateView(views.APIView):
+    """
+    List messages or post a new message in a conversation.
+    GET /api/v1/workshops/conversations/<id>/messages/
+    POST /api/v1/workshops/conversations/<id>/messages/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        from apps.workshops.messaging_service import check_user_can_access_conversation
+        conversation = get_object_or_404(WorkshopConversation.objects.select_related('workshop', 'buyer'), id=id)
+
+        if not check_user_can_access_conversation(request.user, conversation):
+            raise PermissionDenied("You are not authorized to view messages for this conversation.")
+
+        messages = conversation.messages.select_related('sender').order_by('created_at')
+        serializer = WorkshopMessageSerializer(messages, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, id):
+        from apps.workshops.messaging_service import check_user_can_access_conversation, create_message
+        conversation = get_object_or_404(WorkshopConversation.objects.select_related('workshop', 'buyer'), id=id)
+
+        if not check_user_can_access_conversation(request.user, conversation):
+            raise PermissionDenied("You are not authorized to send messages in this conversation.")
+
+        serializer = CreateWorkshopMessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            message = create_message(
+                conversation=conversation,
+                sender=request.user,
+                content=serializer.validated_data.get('content', ''),
+                attachment_url=serializer.validated_data.get('attachment_url', ''),
+            )
+            return Response(WorkshopMessageSerializer(message).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as exc:
+            return Response({'status': 'error', 'message': str(exc)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class ConversationMarkReadView(views.APIView):
+    """
+    Mark unread messages in a conversation as read.
+    POST /api/v1/workshops/conversations/<id>/read/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        from apps.workshops.messaging_service import check_user_can_access_conversation, mark_messages_as_read
+        conversation = get_object_or_404(WorkshopConversation.objects.select_related('workshop', 'buyer'), id=id)
+
+        if not check_user_can_access_conversation(request.user, conversation):
+            raise PermissionDenied("You are not authorized to update messages in this conversation.")
+
+        count = mark_messages_as_read(conversation, request.user)
+        return Response({'status': 'success', 'marked_read': count}, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# TECHNICIAN MOBILE WORKFLOW VIEWS
+# =============================================================================
+
+def check_technician_work_order_access(user, work_order) -> bool:
+    """
+    Validates that user is authorized to view or work on this work order.
+    Authorized if:
+    - User is staff / superuser
+    - User is the lead technician on the work order
+    - User is assigned to at least one task on the work order
+    - User is the owner or active member of the workshop organisation
+    """
+    if user.is_staff or user.is_superuser:
+        return True
+    if work_order.lead_technician_id == user.id:
+        return True
+    if work_order.tasks.filter(assigned_technician=user).exists():
+        return True
+    org = work_order.workshop.organisation
+    if org.created_by_id == user.id:
+        return True
+    try:
+        from apps.organisations.models import OrganisationMembership
+        return OrganisationMembership.objects.filter(
+            user=user,
+            organisation=org,
+            is_active=True,
+        ).exists()
+    except Exception:
+        return False
+
+
+class TechnicianWorkOrderListView(views.APIView):
+    """
+    Mobile-friendly assigned work order list for technicians.
+    GET /api/v1/workshops/technician/work-orders/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        profile = get_user_workshop_profile(request.user)
+        is_owner_or_staff = (profile.organisation.created_by_id == request.user.id) or request.user.is_staff
+        show_all = request.query_params.get('all', '').lower() in ('true', '1') and is_owner_or_staff
+
+        base_qs = WorkOrder.objects.filter(workshop=profile).select_related(
+            'booking', 'quotation', 'buyer', 'lead_technician', 'workshop'
+        ).prefetch_related('tasks', 'parts_used')
+
+        if not show_all:
+            base_qs = base_qs.filter(
+                Q(lead_technician=request.user) | Q(tasks__assigned_technician=request.user)
+            ).distinct()
+
+        status_param = request.query_params.get('status')
+        if status_param and status_param != 'ALL':
+            base_qs = base_qs.filter(status=status_param.upper())
+
+        search_query = request.query_params.get('q')
+        if search_query:
+            q = search_query.strip()
+            base_qs = base_qs.filter(
+                Q(work_order_number__icontains=q)
+                | Q(booking__booking_number__icontains=q)
+                | Q(vehicle_registration_plate__icontains=q)
+                | Q(vehicle_vin__icontains=q)
+                | Q(buyer__first_name__icontains=q)
+                | Q(buyer__last_name__icontains=q)
+                | Q(buyer__email__icontains=q)
+            )
+
+        serializer = WorkOrderListSerializer(base_qs, many=True)
+        return Response({
+            'status': 'success',
+            'count': base_qs.count(),
+            'results': serializer.data,
+        })
+
+
+class TechnicianWorkOrderDetailView(views.APIView):
+    """
+    Retrieve mobile technician work order details including vehicle, customer,
+    quotation planned parts, tasks, and parts used.
+    GET /api/v1/workshops/technician/work-orders/<id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        work_order = get_object_or_404(
+            WorkOrder.objects.select_related(
+                'booking', 'quotation', 'buyer', 'lead_technician', 'assigned_by', 'quality_inspected_by', 'workshop'
+            ).prefetch_related('tasks', 'parts_used', 'change_orders'),
+            id=id,
+        )
+
+        if not check_technician_work_order_access(request.user, work_order):
+            raise PermissionDenied("You are not authorized to view this work order.")
+
+        serializer = WorkOrderSerializer(work_order)
+        data = serializer.data
+
+        # Add customer notes & reported faults from booking
+        booking = work_order.booking
+        data['customer_notes'] = booking.customer_notes if booking else ''
+        data['reported_faults'] = booking.reported_faults if booking else ''
+
+        # Add available transitions
+        valid_transitions = {
+            WorkOrderStatusChoices.ASSIGNED: [WorkOrderStatusChoices.IN_PROGRESS, WorkOrderStatusChoices.CANCELLED],
+            WorkOrderStatusChoices.IN_PROGRESS: [WorkOrderStatusChoices.AWAITING_PARTS, WorkOrderStatusChoices.QUALITY_CHECK, WorkOrderStatusChoices.CANCELLED],
+            WorkOrderStatusChoices.AWAITING_PARTS: [WorkOrderStatusChoices.IN_PROGRESS, WorkOrderStatusChoices.CANCELLED],
+            WorkOrderStatusChoices.QUALITY_CHECK: [WorkOrderStatusChoices.IN_PROGRESS, WorkOrderStatusChoices.COMPLETED, WorkOrderStatusChoices.CANCELLED],
+            WorkOrderStatusChoices.COMPLETED: [],
+            WorkOrderStatusChoices.CANCELLED: [],
+        }
+        data['available_transitions'] = valid_transitions.get(work_order.status, [])
+
+        return Response(data)
+
+
+class TechnicianWorkOrderStatusUpdateView(views.APIView):
+    """
+    Update work order progress status from technician mobile interface.
+    POST /api/v1/workshops/technician/work-orders/<id>/status/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        work_order = get_object_or_404(WorkOrder, id=id)
+        if not check_technician_work_order_access(request.user, work_order):
+            raise PermissionDenied("You are not authorized to update this work order.")
+
+        serializer = WorkOrderStatusUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated = WorkOrderService.update_status(
+                work_order=work_order,
+                new_status=data['status'],
+                actor=request.user,
+                internal_notes=data.get('internal_notes', ''),
+                quality_notes=data.get('quality_notes', ''),
+                cancellation_reason=data.get('cancellation_reason', ''),
+            )
+            resp_data = {
+                'status': 'success',
+                'message': f"Work order transitioned to {updated.get_status_display()}.",
+                'work_order': WorkOrderSerializer(updated).data,
+            }
+            warnings = getattr(updated, '_status_update_warnings', [])
+            if warnings:
+                resp_data['warnings'] = warnings
+            return Response(resp_data)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TechnicianWorkOrderTaskUpdateView(views.APIView):
+    """
+    Technician updates task progress, actual labour minutes, and status.
+    PATCH /api/v1/workshops/technician/work-orders/<id>/tasks/<task_id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request, id, task_id):
+        work_order = get_object_or_404(WorkOrder, id=id)
+        if not check_technician_work_order_access(request.user, work_order):
+            raise PermissionDenied("You are not authorized to update tasks on this work order.")
+
+        task = get_object_or_404(WorkOrderTask, id=task_id, work_order=work_order)
+        serializer = WorkOrderTaskCreateUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            updated = WorkOrderService.update_task(
+                task=task,
+                status=data.get('status'),
+                actual_labour_minutes=data.get('actual_labour_minutes'),
+                notes=data.get('notes'),
+                actor=request.user,
+            )
+            return Response(WorkOrderTaskSerializer(updated).data)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TechnicianWorkOrderPartUsageView(views.APIView):
+    """
+    Record spare part consumption from technician mobile interface, automatically
+    validating and decrementing workshop inventory.
+    POST /api/v1/workshops/technician/work-orders/<id>/parts/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        from apps.marketplace.models import SparePartListing
+        from apps.catalogue.models import Part
+
+        work_order = get_object_or_404(WorkOrder, id=id)
+        if not check_technician_work_order_access(request.user, work_order):
+            raise PermissionDenied("You are not authorized to record part usage on this work order.")
+
+        serializer = WorkOrderPartUsageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        catalogue_part = None
+        if data.get('catalogue_part_id'):
+            catalogue_part = get_object_or_404(Part, id=data['catalogue_part_id'])
+
+        inventory_item = None
+        if data.get('inventory_item_id'):
+            inventory_item = get_object_or_404(SparePartListing, id=data['inventory_item_id'])
+
+        try:
+            part_usage = WorkOrderService.record_part_usage(
+                work_order=work_order,
+                part_name=data['part_name'],
+                quantity=data.get('quantity', Decimal('1.00')),
+                unit_cost=data.get('unit_cost', Decimal('0.00')),
+                part_number=data.get('part_number', ''),
+                description=data.get('description', ''),
+                catalogue_part=catalogue_part,
+                inventory_item=inventory_item,
+                actor=request.user,
+            )
+            return Response(WorkOrderPartUsageSerializer(part_usage).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+

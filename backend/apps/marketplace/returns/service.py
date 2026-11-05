@@ -604,27 +604,28 @@ class RefundService:
         if amt <= Decimal('0.00'):
             raise DjangoValidationError("Refund amount must be greater than zero.")
 
-        summary = cls.get_order_refund_summary(order)
-        if not summary['is_paid']:
-            if order.payment_method == 'COD':
-                raise DjangoValidationError(
-                    "Cannot issue refund for Cash on Delivery order because payment has not been collected."
-                )
-            raise DjangoValidationError(
-                f"Cannot issue refund for order with payment status '{order.payment_status}'. Order must be PAID."
-            )
-
-        if amt > summary['available_refundable']:
-            raise DjangoValidationError(
-                f"Requested refund amount ({order.currency} {amt}) exceeds maximum available refundable balance ({order.currency} {summary['available_refundable']})."
-            )
-
         with transaction.atomic():
+            locked_order = Order.objects.select_for_update().get(id=order.id)
+            summary = cls.get_order_refund_summary(locked_order)
+            if not summary['is_paid']:
+                if locked_order.payment_method == 'COD':
+                    raise DjangoValidationError(
+                        "Cannot issue refund for Cash on Delivery order because payment has not been collected."
+                    )
+                raise DjangoValidationError(
+                    f"Cannot issue refund for order with payment status '{locked_order.payment_status}'. Order must be PAID."
+                )
+
+            if amt > summary['available_refundable']:
+                raise DjangoValidationError(
+                    f"Requested refund amount ({locked_order.currency} {amt}) exceeds maximum available refundable balance ({locked_order.currency} {summary['available_refundable']})."
+                )
+
             refund_num = f"REF-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
             # Method resolution
             if not refund_method:
-                if order.payment_method == 'COD':
+                if locked_order.payment_method == 'COD':
                     resolved_method = RefundMethodChoices.BANK_TRANSFER
                 else:
                     resolved_method = RefundMethodChoices.ORIGINAL_PAYMENT
@@ -632,18 +633,18 @@ class RefundService:
                 resolved_method = refund_method
 
             # Provider resolution
-            if order.payment_method == 'COD':
+            if locked_order.payment_method == 'COD':
                 provider = 'COD_MANUAL'
             else:
-                provider = 'RAZORPAY' if order.currency == 'INR' else 'STRIPE'
+                provider = 'RAZORPAY' if locked_order.currency == 'INR' else 'STRIPE'
 
             refund = Refund.objects.create(
                 refund_number=refund_num,
-                order=order,
+                order=locked_order,
                 return_request=return_request,
                 dispute=dispute,
                 amount=amt,
-                currency=order.currency,
+                currency=locked_order.currency,
                 status=RefundStatusChoices.PENDING,
                 refund_method=resolved_method,
                 gateway_provider=provider,
@@ -658,21 +659,22 @@ class RefundService:
                 action="marketplace:refund.create",
                 resource_type="Refund",
                 resource_id=str(refund.id),
-                actor_id=actor.id,
+                actor_id=actor.id if actor else None,
                 metadata={
                     "refund_number": refund.refund_number,
-                    "order_number": order.order_number,
+                    "order_number": locked_order.order_number,
                     "amount": str(amt),
-                    "currency": order.currency,
+                    "currency": locked_order.currency,
                     "reason": reason,
                     "method": resolved_method,
                 },
             )
 
-            if auto_process:
-                # If test mode or manual processing flag is active
-                simulated_ref = f"sim_rfnd_{uuid.uuid4().hex[:12]}"
-                cls.process_refund(refund, actor, gateway_reference=simulated_ref, notes="Auto-processed via test gateway adapter.")
+        if auto_process:
+            if resolved_method == RefundMethodChoices.ORIGINAL_PAYMENT:
+                refund = cls.dispatch_gateway_refund(refund, actor)
+            else:
+                refund = cls.process_refund(refund, actor, notes="Auto-processed settlement.")
 
         return refund
 
@@ -787,6 +789,287 @@ class RefundService:
             )
 
         return refund
+
+    @classmethod
+    def dispatch_gateway_refund(
+        cls,
+        refund: Refund,
+        actor: Any,
+    ) -> Refund:
+        """
+        Dispatches an authoritative refund request to the external payment gateway (Razorpay/Stripe).
+        Guards idempotency and creates immutable ledger records.
+        """
+        has_perm = (
+            _is_staff_or_admin(actor)
+            or _has_permission(actor, 'order.refund')
+            or _has_permission(actor, 'finance.payout')
+        )
+        if not has_perm:
+            raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
+
+        with transaction.atomic():
+            locked_refund = Refund.objects.select_for_update().select_related('order').get(id=refund.id)
+
+            # Idempotency check: if already succeeded, do not dispatch again
+            if locked_refund.status == RefundStatusChoices.SUCCEEDED:
+                return locked_refund
+
+            if locked_refund.status == RefundStatusChoices.CANCELLED:
+                raise DjangoValidationError(f"Cannot dispatch cancelled refund {locked_refund.refund_number}.")
+
+            if locked_refund.refund_method != RefundMethodChoices.ORIGINAL_PAYMENT:
+                return cls.process_refund(locked_refund, actor, notes="Settled non-gateway refund.")
+
+            # Resolve payment reference for the gateway
+            order = locked_refund.order
+            from apps.marketplace.payments.service import PaymentService
+            provider = PaymentService.get_provider_for_order(order)
+
+            # Look for payment transaction
+            pay_tx = PaymentTransaction.objects.filter(
+                order=order,
+                status=PaymentTransaction.StatusChoices.SUCCESS,
+                transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
+            ).order_by('-created_at').first()
+
+            payment_reference = ''
+            if locked_refund.currency == 'INR':
+                # Razorpay needs pay_xxx
+                if pay_tx and pay_tx.provider_transaction_id and str(pay_tx.provider_transaction_id).startswith('pay_'):
+                    payment_reference = pay_tx.provider_transaction_id
+                elif order.payment_reference and str(order.payment_reference).startswith('pay_'):
+                    payment_reference = order.payment_reference
+                elif pay_tx and pay_tx.provider_transaction_id:
+                    payment_reference = pay_tx.provider_transaction_id
+                else:
+                    payment_reference = order.payment_reference or ''
+            else:
+                # Stripe needs pi_xxx
+                if order.payment_reference and str(order.payment_reference).startswith('pi_'):
+                    payment_reference = order.payment_reference
+                elif pay_tx and pay_tx.provider_order_id and str(pay_tx.provider_order_id).startswith('pi_'):
+                    payment_reference = pay_tx.provider_order_id
+                elif pay_tx and pay_tx.provider_transaction_id and str(pay_tx.provider_transaction_id).startswith('pi_'):
+                    payment_reference = pay_tx.provider_transaction_id
+                else:
+                    payment_reference = order.payment_reference or (pay_tx.provider_transaction_id if pay_tx else '')
+
+            if not payment_reference:
+                if getattr(settings, 'IS_TESTING', False) or getattr(settings, 'PAYMENT_TEST_MODE', False):
+                    payment_reference = (
+                        f"pay_test_{order.order_number}"
+                        if locked_refund.currency == 'INR'
+                        else f"pi_test_{order.order_number}"
+                    )
+                else:
+                    raise DjangoValidationError(
+                        f"Cannot dispatch gateway refund: Order {order.order_number} has no recorded payment reference."
+                    )
+
+            locked_refund.status = RefundStatusChoices.PROCESSING
+            locked_refund.gateway_provider = provider.provider_name
+            locked_refund.save(update_fields=['status', 'gateway_provider', 'updated_at'])
+
+            rfnd_id_copy = locked_refund.id
+            amount_copy = locked_refund.amount
+            currency_copy = locked_refund.currency
+            reason_copy = locked_refund.reason
+            refund_num_copy = locked_refund.refund_number
+            order_num_copy = order.order_number
+
+        # Decouple external network gateway call from the initial database lock
+        success, ref_id_or_err, extra = provider.issue_refund(
+            payment_reference=payment_reference,
+            amount=amount_copy,
+            currency=currency_copy,
+            reason=reason_copy,
+            refund_number=refund_num_copy,
+            notes={
+                "order_number": order_num_copy,
+                "refund_number": refund_num_copy,
+            },
+        )
+
+        with transaction.atomic():
+            locked_refund = Refund.objects.select_for_update().select_related('order').get(id=rfnd_id_copy)
+            order = locked_refund.order
+
+            if success:
+                locked_refund.status = RefundStatusChoices.SUCCEEDED
+                locked_refund.gateway_refund_id = ref_id_or_err
+                locked_refund.processed_at = timezone.now()
+                locked_refund.save(update_fields=['status', 'gateway_refund_id', 'processed_at', 'updated_at'])
+
+                PaymentTransaction.objects.create(
+                    order=order,
+                    transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                    provider=provider.provider_name,
+                    amount=locked_refund.amount,
+                    currency=locked_refund.currency,
+                    status=PaymentTransaction.StatusChoices.SUCCESS,
+                    provider_transaction_id=ref_id_or_err,
+                    provider_order_id=payment_reference,
+                    raw_response=extra,
+                )
+
+                # Check if total refunded covers order total
+                total_succeeded = order.refunds.filter(
+                    status=RefundStatusChoices.SUCCEEDED
+                ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+
+                if total_succeeded >= order.total_amount:
+                    order.payment_status = PaymentStatusChoices.REFUNDED
+                    order.save(update_fields=['payment_status', 'updated_at'])
+
+                record_audit_entry(
+                    event_type="marketplace.refund.processed",
+                    action="marketplace:refund.process",
+                    resource_type="Refund",
+                    resource_id=str(locked_refund.id),
+                    actor_id=actor.id if actor else None,
+                    metadata={
+                        "refund_number": locked_refund.refund_number,
+                        "order_number": order.order_number,
+                        "amount": str(locked_refund.amount),
+                        "currency": locked_refund.currency,
+                        "gateway_refund_id": ref_id_or_err,
+                        "provider": provider.provider_name,
+                    },
+                )
+                return locked_refund
+            else:
+                locked_refund.status = RefundStatusChoices.FAILED
+                locked_refund.failure_reason = ref_id_or_err
+                locked_refund.save(update_fields=['status', 'failure_reason', 'updated_at'])
+
+                PaymentTransaction.objects.create(
+                    order=order,
+                    transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                    provider=provider.provider_name,
+                    amount=locked_refund.amount,
+                    currency=locked_refund.currency,
+                    status=PaymentTransaction.StatusChoices.FAILED,
+                    error_message=ref_id_or_err,
+                    provider_order_id=payment_reference,
+                    raw_response=extra,
+                )
+
+                record_audit_entry(
+                    event_type="marketplace.refund.failed",
+                    action="marketplace:refund.fail",
+                    resource_type="Refund",
+                    resource_id=str(locked_refund.id),
+                    actor_id=actor.id if actor else None,
+                    metadata={
+                        "refund_number": locked_refund.refund_number,
+                        "order_number": order.order_number,
+                        "amount": str(locked_refund.amount),
+                        "failure_reason": ref_id_or_err,
+                        "provider": provider.provider_name,
+                    },
+                )
+
+        raise DjangoValidationError(f"Payment gateway refund failed: {ref_id_or_err}")
+
+    @classmethod
+    def approve_refund(
+        cls,
+        refund: Refund,
+        actor: Any,
+        notes: str = '',
+    ) -> Refund:
+        """
+        Approves a pending refund and dispatches gateway refund or marks manual payout as settled.
+        """
+        has_perm = (
+            _is_staff_or_admin(actor)
+            or _has_permission(actor, 'order.refund')
+            or _has_permission(actor, 'finance.payout')
+        )
+        if not has_perm:
+            raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
+
+        with transaction.atomic():
+            locked = Refund.objects.select_for_update().get(id=refund.id)
+            if locked.status not in (RefundStatusChoices.PENDING, RefundStatusChoices.FAILED):
+                raise DjangoValidationError(
+                    f"Cannot approve refund {locked.refund_number} with status '{locked.status}'."
+                )
+
+            locked.approved_by = actor
+            if notes:
+                locked.notes = f"{locked.notes}\n[Approved]: {notes}".strip()
+            locked.save(update_fields=['approved_by', 'notes', 'updated_at'])
+
+            record_audit_entry(
+                event_type="marketplace.refund.approved",
+                action="marketplace:refund.approve",
+                resource_type="Refund",
+                resource_id=str(locked.id),
+                actor_id=actor.id if actor else None,
+                metadata={
+                    "refund_number": locked.refund_number,
+                    "order_number": locked.order.order_number,
+                    "amount": str(locked.amount),
+                    "method": locked.refund_method,
+                },
+            )
+
+            if locked.refund_method == RefundMethodChoices.ORIGINAL_PAYMENT:
+                return cls.dispatch_gateway_refund(locked, actor)
+            else:
+                return cls.process_refund(locked, actor, notes=notes)
+
+    @classmethod
+    def reject_refund(
+        cls,
+        refund: Refund,
+        actor: Any,
+        reason: str,
+    ) -> Refund:
+        """
+        Rejects a refund request, recording cancellation and failure reason.
+        """
+        has_perm = (
+            _is_staff_or_admin(actor)
+            or _has_permission(actor, 'order.refund')
+            or _has_permission(actor, 'finance.payout')
+        )
+        if not has_perm:
+            raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
+
+        rejection_reason = (reason or '').strip()
+        if not rejection_reason:
+            raise DjangoValidationError("A rejection reason must be provided.")
+
+        with transaction.atomic():
+            locked = Refund.objects.select_for_update().get(id=refund.id)
+            if locked.status not in (RefundStatusChoices.PENDING, RefundStatusChoices.FAILED):
+                raise DjangoValidationError(
+                    f"Cannot reject refund {locked.refund_number} with status '{locked.status}'."
+                )
+
+            locked.status = RefundStatusChoices.CANCELLED
+            locked.failure_reason = rejection_reason
+            locked.approved_by = actor
+            locked.save(update_fields=['status', 'failure_reason', 'approved_by', 'updated_at'])
+
+            record_audit_entry(
+                event_type="marketplace.refund.rejected",
+                action="marketplace:refund.reject",
+                resource_type="Refund",
+                resource_id=str(locked.id),
+                actor_id=actor.id if actor else None,
+                metadata={
+                    "refund_number": locked.refund_number,
+                    "order_number": locked.order.order_number,
+                    "amount": str(locked.amount),
+                    "rejection_reason": rejection_reason,
+                },
+            )
+
+        return locked
 
 
 # =============================================================================

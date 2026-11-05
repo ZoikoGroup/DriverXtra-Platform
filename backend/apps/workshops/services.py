@@ -13,6 +13,7 @@ from apps.workshops.models import (
     QuotationLineItem,
     BookingStatusChoices,
     QuotationStatusChoices,
+    DepositStatusChoices,
     LineItemTypeChoices,
     WorkOrder,
     WorkOrderTask,
@@ -22,12 +23,16 @@ from apps.workshops.models import (
     ChangeOrder,
     ChangeOrderLineItem,
     ChangeOrderStatusChoices,
+    WorkshopReview,
+    ReviewStatusChoices,
+    WorkshopDepositWebhookEvent,
 )
 from apps.garage.models import GarageVehicle
 from apps.catalogue.models import Part
 from apps.identity.models import User
 from platform_core.audit.writer import record_audit_entry
 from apps.notifications.services import create_notification
+from apps.workshops.deposit_service import WorkshopDepositPaymentService
 
 logger = logging.getLogger(__name__)
 
@@ -343,10 +348,18 @@ class QuotationService:
         valid_until = data.get('valid_until')
         workshop_notes = data.get('workshop_notes', '')
         terms_and_conditions = data.get('terms_and_conditions', '')
+        requires_deposit = data.get('requires_deposit')
+        deposit_percentage = data.get('deposit_percentage')
+        deposit_amount = data.get('deposit_amount')
 
         with transaction.atomic():
             # Lock booking row to prevent concurrent version assignment races
             booking = WorkshopBooking.objects.select_for_update().get(id=booking.id)
+
+            if requires_deposit is None and getattr(booking.workshop, 'requires_deposit', False):
+                requires_deposit = True
+                if deposit_percentage is None:
+                    deposit_percentage = getattr(booking.workshop, 'default_deposit_percentage', Decimal('0.00'))
 
             # Check if an existing unissued DRAFT quotation exists for this booking
             draft_quotation = WorkshopQuotation.objects.filter(
@@ -364,6 +377,18 @@ class QuotationService:
                 quotation.valid_until = valid_until
                 quotation.workshop_notes = workshop_notes
                 quotation.terms_and_conditions = terms_and_conditions
+                if requires_deposit:
+                    quotation.requires_deposit = True
+                    if deposit_percentage is not None:
+                        quotation.deposit_percentage = Decimal(str(deposit_percentage))
+                    if deposit_amount is not None:
+                        quotation.deposit_amount = Decimal(str(deposit_amount))
+                    quotation.deposit_status = DepositStatusChoices.NOT_REQUIRED
+                elif requires_deposit is False:
+                    quotation.requires_deposit = False
+                    quotation.deposit_percentage = Decimal('0.00')
+                    quotation.deposit_amount = Decimal('0.00')
+                    quotation.deposit_status = DepositStatusChoices.NOT_REQUIRED
                 quotation.save()
             else:
                 # Create next version
@@ -384,6 +409,18 @@ class QuotationService:
                 )
                 if tax_rate_percent is not None:
                     quotation.tax_rate_percent = tax_rate_percent
+                if requires_deposit:
+                    quotation.requires_deposit = True
+                    if deposit_percentage is not None:
+                        quotation.deposit_percentage = Decimal(str(deposit_percentage))
+                    if deposit_amount is not None:
+                        quotation.deposit_amount = Decimal(str(deposit_amount))
+                    quotation.deposit_status = DepositStatusChoices.NOT_REQUIRED
+                elif requires_deposit is False:
+                    quotation.requires_deposit = False
+                    quotation.deposit_percentage = Decimal('0.00')
+                    quotation.deposit_amount = Decimal('0.00')
+                    quotation.deposit_status = DepositStatusChoices.NOT_REQUIRED
                 quotation.save()
 
             # Insert line items
@@ -441,7 +478,9 @@ class QuotationService:
 
             quotation.status = QuotationStatusChoices.ISSUED
             quotation.issued_at = timezone.now()
-            quotation.save(update_fields=['status', 'issued_at', 'updated_at'])
+            if quotation.requires_deposit and quotation.deposit_status == DepositStatusChoices.NOT_REQUIRED:
+                quotation.deposit_status = DepositStatusChoices.PENDING
+            quotation.save(update_fields=['status', 'issued_at', 'deposit_status', 'updated_at'])
 
             # Update booking status to QUOTED if still pending or confirmed without an active work order
             if booking.status in (
@@ -497,6 +536,12 @@ class QuotationService:
                 raise DjangoValidationError("Only the customer who placed this booking can accept this quotation.")
             if quotation.status != QuotationStatusChoices.ISSUED:
                 raise DjangoValidationError(f"Cannot accept quotation in '{quotation.status}' status (must be ISSUED).")
+
+            if quotation.requires_deposit and quotation.deposit_status != DepositStatusChoices.PAID:
+                raise DjangoValidationError(
+                    f"Quotation #{quotation.quotation_number} requires an upfront deposit payment of "
+                    f"{quotation.currency} {quotation.deposit_amount} before it can be accepted."
+                )
 
             # Mark quotation as ACCEPTED
             quotation.status = QuotationStatusChoices.ACCEPTED
@@ -874,6 +919,28 @@ class WorkOrderService:
                 work_order.cancellation_reason = cancellation_reason or 'Work order cancelled by workshop.'
                 update_fields.append('cancellation_reason')
 
+                # Automatically restock any parts consumed on this work order
+                import math
+                from apps.marketplace.models import SparePartListing, StockMovement, StockMovementReasonChoices
+
+                for pu in work_order.parts_used.filter(is_stock_deducted=True, inventory_item__isnull=False).select_related('inventory_item'):
+                    listing = SparePartListing.objects.select_for_update().filter(id=pu.inventory_item_id).first()
+                    if listing:
+                        qty_restore = max(1, int(math.ceil(pu.quantity)))
+                        listing.stock_quantity += qty_restore
+                        listing.save(update_fields=['stock_quantity', 'updated_at'])
+
+                        StockMovement.objects.create(
+                            listing=listing,
+                            delta=qty_restore,
+                            resulting_quantity=listing.stock_quantity,
+                            reason=StockMovementReasonChoices.WORK_ORDER_RESTOCK,
+                            actor=actor,
+                            note=f"Restocked upon cancellation of Work Order {work_order.work_order_number}",
+                        )
+                        pu.is_stock_deducted = False
+                        pu.save(update_fields=['is_stock_deducted', 'updated_at'])
+
             work_order.save(update_fields=update_fields)
 
             # Generate platform-verified vehicle service history record upon successful completion
@@ -1054,22 +1121,70 @@ class WorkOrderService:
         part_number: str = '',
         description: str = '',
         catalogue_part=None,
+        inventory_item=None,
         actor: User | None = None,
     ) -> WorkOrderPartUsage:
-        """Records physical spare part usage on a work order."""
+        """
+        Records physical spare part usage on a work order.
+        If linked to workshop inventory (SparePartListing), atomically validates
+        and decrements stock, creating a StockMovement ledger audit entry.
+        """
+        import math
+        from apps.marketplace.models import SparePartListing, StockMovement, StockMovementReasonChoices
+
         if work_order.status in (WorkOrderStatusChoices.COMPLETED, WorkOrderStatusChoices.CANCELLED):
             raise DjangoValidationError("Cannot add parts to a completed or cancelled work order.")
 
-        part_usage = WorkOrderPartUsage.objects.create(
-            work_order=work_order,
-            part_name=part_name,
-            part_number=part_number,
-            description=description,
-            catalogue_part=catalogue_part,
-            quantity=quantity,
-            unit_cost=unit_cost,
-            added_by=actor,
-        )
+        org = getattr(work_order.workshop, 'organisation', None)
+        if not inventory_item and org:
+            if part_number:
+                inventory_item = SparePartListing.objects.filter(
+                    organisation=org,
+                    mpn__iexact=part_number,
+                ).first()
+            if not inventory_item and catalogue_part:
+                inventory_item = SparePartListing.objects.filter(
+                    organisation=org,
+                    catalogue_part=catalogue_part,
+                ).first()
+
+        with transaction.atomic():
+            is_deducted = False
+            qty_units = max(1, int(math.ceil(quantity)))
+
+            if inventory_item:
+                listing = SparePartListing.objects.select_for_update().filter(id=inventory_item.id).first()
+                if listing:
+                    if listing.stock_quantity < qty_units:
+                        raise DjangoValidationError(
+                            f"Insufficient inventory stock for '{listing.name}'. Available: {listing.stock_quantity}, requested: {qty_units}."
+                        )
+                    listing.stock_quantity -= qty_units
+                    listing.save(update_fields=['stock_quantity', 'updated_at'])
+
+                    StockMovement.objects.create(
+                        listing=listing,
+                        delta=-qty_units,
+                        resulting_quantity=listing.stock_quantity,
+                        reason=StockMovementReasonChoices.WORK_ORDER,
+                        actor=actor,
+                        note=f"Consumed in Work Order {work_order.work_order_number}",
+                    )
+                    is_deducted = True
+                    inventory_item = listing
+
+            part_usage = WorkOrderPartUsage.objects.create(
+                work_order=work_order,
+                part_name=part_name,
+                part_number=part_number,
+                description=description,
+                catalogue_part=catalogue_part,
+                inventory_item=inventory_item,
+                is_stock_deducted=is_deducted,
+                quantity=quantity,
+                unit_cost=unit_cost,
+                added_by=actor,
+            )
 
         record_audit_entry(
             event_type="workshop.workorder.part_recorded",
@@ -1082,6 +1197,7 @@ class WorkOrderService:
                 "part_name": part_name,
                 "quantity": str(quantity),
                 "total_cost": str(part_usage.total_cost),
+                "stock_deducted": is_deducted,
             },
         )
         return part_usage
@@ -1113,16 +1229,37 @@ class WorkOrderService:
 
     @classmethod
     def delete_part_usage(cls, part_usage: WorkOrderPartUsage, actor: User) -> None:
-        """Removes a recorded part usage entry from an active work order with audit logging."""
+        """Removes a recorded part usage entry from an active work order with audit logging and stock restoration."""
+        import math
+        from apps.marketplace.models import SparePartListing, StockMovement, StockMovementReasonChoices
+
         work_order = part_usage.work_order
         if work_order.status in (WorkOrderStatusChoices.COMPLETED, WorkOrderStatusChoices.CANCELLED):
             raise DjangoValidationError("Cannot delete parts on a completed or cancelled work order.")
 
-        part_id = str(part_usage.id)
-        part_name = part_usage.part_name
-        quantity = str(part_usage.quantity)
-        total_cost = str(part_usage.total_cost)
-        part_usage.delete()
+        with transaction.atomic():
+            if part_usage.is_stock_deducted and part_usage.inventory_item_id:
+                listing = SparePartListing.objects.select_for_update().filter(id=part_usage.inventory_item_id).first()
+                if listing:
+                    qty_restore = max(1, int(math.ceil(part_usage.quantity)))
+                    listing.stock_quantity += qty_restore
+                    listing.save(update_fields=['stock_quantity', 'updated_at'])
+
+                    StockMovement.objects.create(
+                        listing=listing,
+                        delta=qty_restore,
+                        resulting_quantity=listing.stock_quantity,
+                        reason=StockMovementReasonChoices.WORK_ORDER_RESTOCK,
+                        actor=actor,
+                        note=f"Restocked from deleted part usage on Work Order {work_order.work_order_number}",
+                    )
+                    part_usage.is_stock_deducted = False
+
+            part_id = str(part_usage.id)
+            part_name = part_usage.part_name
+            quantity = str(part_usage.quantity)
+            total_cost = str(part_usage.total_cost)
+            part_usage.delete()
 
         record_audit_entry(
             event_type="workshop.workorder.part_deleted",
@@ -1535,4 +1672,331 @@ class WorkshopTaxAuthorizationService:
             )
 
         return workshop
+
+
+class WorkshopReviewService:
+    """
+    Orchestrates review eligibility checks, verified review submissions,
+    workshop public responses, and reputation metrics calculation.
+    """
+
+    @classmethod
+    def check_review_eligibility(cls, booking: WorkshopBooking, user: User) -> tuple[bool, str, WorkOrder | None]:
+        """
+        Validates whether user is eligible to submit a review for the booking.
+        Eligibility rules:
+        1. User must be authenticated.
+        2. Authenticated user must be the actual booking buyer (booking.buyer_id == user.id).
+        3. Booking must not be cancelled.
+        4. WorkOrder must exist and belong to this booking and workshop.
+        5. WorkOrder status must be COMPLETED.
+        6. WorkOrder completed_at must be populated.
+        7. Booking must not already have a review submitted.
+        """
+        if not user or not user.is_authenticated:
+            return False, "Authentication required to review workshop services.", None
+
+        if booking.buyer_id != user.id:
+            from apps.workshops.permissions import is_platform_admin_or_staff
+            if not is_platform_admin_or_staff(user):
+                return False, "You can only review bookings placed by your account.", None
+
+        if booking.status == BookingStatusChoices.CANCELLED:
+            return False, f"Booking {booking.booking_number} is cancelled. Cancelled bookings cannot be reviewed.", None
+
+        if not hasattr(booking, 'work_order') or not booking.work_order:
+            return False, f"No work order found for booking {booking.booking_number}. Services must have an operational work order to be reviewed.", None
+
+        work_order = booking.work_order
+        if work_order.workshop_id != booking.workshop_id:
+            return False, "Work order does not match the booking workshop.", None
+
+        if work_order.status != WorkOrderStatusChoices.COMPLETED:
+            return False, f"Work order {work_order.work_order_number} is currently '{work_order.get_status_display()}'. Reviews can only be submitted after work is marked COMPLETED.", work_order
+
+        if not work_order.completed_at:
+            return False, f"Work order {work_order.work_order_number} has no recorded completion date.", work_order
+
+        if hasattr(booking, 'review') and booking.review:
+            return False, "A review has already been submitted for this service booking.", work_order
+
+        if WorkshopReview.objects.filter(booking=booking).exists():
+            return False, "A review has already been submitted for this service booking.", work_order
+
+        return True, "Eligible to review.", work_order
+
+    @classmethod
+    def create_review(
+        cls,
+        booking: WorkshopBooking,
+        buyer: User,
+        data: dict,
+        actor: User | None = None,
+    ) -> WorkshopReview:
+        """
+        Creates a verified workshop review.
+        Enforces eligibility, database transactions, locking, and audit/notification dispatch.
+        """
+        is_eligible, err_msg, work_order = cls.check_review_eligibility(booking, buyer)
+        if not is_eligible:
+            raise DjangoValidationError(err_msg)
+
+        # Validate rating
+        raw_rating = data.get('rating')
+        if raw_rating is None:
+            raise DjangoValidationError("Overall rating is required.")
+        try:
+            rating = int(raw_rating)
+        except (ValueError, TypeError):
+            raise DjangoValidationError("Rating must be an integer between 1 and 5.")
+
+        if not (1 <= rating <= 5):
+            raise DjangoValidationError("Rating must be between 1 and 5 stars.")
+
+        # Validate dimensional ratings if provided
+        dimensional = {}
+        for field in ('communication_rating', 'workmanship_rating', 'pricing_transparency_rating'):
+            val = data.get(field)
+            if val is not None and str(val).strip() != '':
+                try:
+                    int_val = int(val)
+                    if not (1 <= int_val <= 5):
+                        raise DjangoValidationError(f"{field.replace('_', ' ').capitalize()} must be between 1 and 5.")
+                    dimensional[field] = int_val
+                except (ValueError, TypeError):
+                    raise DjangoValidationError(f"{field.replace('_', ' ').capitalize()} must be an integer between 1 and 5.")
+
+        # Validate comment
+        comment = (data.get('comment') or '').strip()
+        if len(comment) < 5:
+            raise DjangoValidationError("Review comment must be at least 5 characters long.")
+
+        title = (data.get('title') or '').strip()
+
+        with transaction.atomic():
+            # Lock booking to prevent race conditions
+            locked_booking = WorkshopBooking.objects.select_for_update().get(id=booking.id)
+            if hasattr(locked_booking, 'review') or WorkshopReview.objects.filter(booking=locked_booking).exists():
+                raise DjangoValidationError("A review has already been submitted for this booking.")
+
+            workshop = locked_booking.workshop
+            actual_work_order = locked_booking.work_order
+
+            try:
+                review = WorkshopReview.objects.create(
+                    workshop=workshop,
+                    booking=locked_booking,
+                    work_order=actual_work_order,
+                    buyer=buyer,
+                    rating=rating,
+                    title=title,
+                    comment=comment,
+                    status=ReviewStatusChoices.APPROVED,
+                    is_verified_service=True,
+                    **dimensional,
+                )
+            except IntegrityError:
+                raise DjangoValidationError("A review has already been submitted for this booking.")
+
+            # Record audit entry
+            audit = record_audit_entry(
+                event_type="workshop.review.created",
+                action="workshop:review.create",
+                resource_type="WorkshopReview",
+                resource_id=str(review.id),
+                actor_id=buyer.id,
+                operating_org_id=workshop.organisation_id,
+                metadata={
+                    "review_id": str(review.id),
+                    "workshop_id": str(workshop.id),
+                    "workshop_name": workshop.business_name,
+                    "booking_id": str(locked_booking.id),
+                    "booking_number": locked_booking.booking_number,
+                    "work_order_id": str(actual_work_order.id),
+                    "work_order_number": actual_work_order.work_order_number,
+                    "rating": rating,
+                    "buyer_id": str(buyer.id),
+                },
+            )
+
+            # Send in-app notification to workshop owner/admin
+            try:
+                org_owner = workshop.organisation.created_by if workshop.organisation else None
+                if org_owner and audit:
+                    create_notification(
+                        recipient=org_owner,
+                        audit_entry=audit,
+                        title=f"New Customer Review for {workshop.display_name}",
+                        message=f"{buyer.full_name or buyer.email} left a {rating}★ review for service on {locked_booking.vehicle_make} {locked_booking.vehicle_model}.",
+                        link="/platform?tab=workshop_landing",
+                        resource_type="WorkshopReview",
+                        resource_id=str(review.id),
+                        event_type="workshop.review.created",
+                    )
+            except Exception as e:
+                logger.warning("Failed to dispatch workshop review notification: %s", e)
+
+        return review
+
+    @classmethod
+    def reply_to_review(cls, review: WorkshopReview, user: User, reply_text: str) -> WorkshopReview:
+        """
+        Allows authorized workshop staff or organisation members to post a public response.
+        """
+        from apps.workshops.permissions import is_platform_admin_or_staff
+        from apps.organisations.models import OrganisationMembership
+        workshop = review.workshop
+        is_org_member = False
+        if workshop.organisation_id:
+            is_org_member = OrganisationMembership.objects.filter(
+                organisation_id=workshop.organisation_id,
+                user=user,
+                is_active=True,
+            ).exists()
+        if not is_org_member and workshop.organisation and workshop.organisation.created_by_id == user.id:
+            is_org_member = True
+
+        if not (is_org_member or is_platform_admin_or_staff(user)):
+            raise PermissionDenied("You do not have permission to reply on behalf of this workshop.")
+
+        text = (reply_text or '').strip()
+        if len(text) < 2:
+            raise DjangoValidationError("Reply message cannot be empty.")
+
+        with transaction.atomic():
+            locked_review = WorkshopReview.objects.select_for_update().get(id=review.id)
+            if locked_review.workshop_reply:
+                raise DjangoValidationError("A reply has already been posted for this review.")
+
+            locked_review.workshop_reply = text
+            locked_review.workshop_reply_at = timezone.now()
+            locked_review.workshop_replied_by = user
+            locked_review.save(update_fields=['workshop_reply', 'workshop_reply_at', 'workshop_replied_by', 'updated_at'])
+            review = locked_review
+
+            audit = record_audit_entry(
+                event_type="workshop.review.replied",
+                action="workshop:review.reply",
+                resource_type="WorkshopReview",
+                resource_id=str(review.id),
+                actor_id=user.id,
+                operating_org_id=workshop.organisation_id,
+                metadata={
+                    "review_id": str(review.id),
+                    "workshop_id": str(workshop.id),
+                    "reply_preview": text[:100],
+                },
+            )
+
+            # Notify the customer
+            try:
+                if review.buyer and audit:
+                    create_notification(
+                        recipient=review.buyer,
+                        audit_entry=audit,
+                        title=f"{workshop.display_name} replied to your review",
+                        message=f"{workshop.display_name} has posted an official response to your service review.",
+                        link="/platform?tab=workshops",
+                        resource_type="WorkshopReview",
+                        resource_id=str(review.id),
+                        event_type="workshop.review.replied",
+                    )
+            except Exception as e:
+                logger.warning("Failed to dispatch review reply notification: %s", e)
+
+        return review
+
+    @classmethod
+    def moderate_review(cls, review: WorkshopReview, user: User, status: str, reason: str = "") -> WorkshopReview:
+        """
+        Allows platform staff/admin to moderate review status (APPROVED, REJECTED, FLAGGED).
+        """
+        from apps.workshops.permissions import is_platform_admin_or_staff
+        if not is_platform_admin_or_staff(user):
+            raise PermissionDenied("Only authorized platform administrators and staff can moderate reviews.")
+
+        target_status = status.strip().upper()
+        if target_status not in ReviewStatusChoices.values:
+            raise DjangoValidationError(f"Invalid moderation status '{target_status}'. Must be one of {ReviewStatusChoices.values}.")
+
+        with transaction.atomic():
+            review = WorkshopReview.objects.select_for_update().get(id=review.id)
+            previous_status = review.status
+            review.status = target_status
+            review.save(update_fields=['status', 'updated_at'])
+
+            record_audit_entry(
+                event_type="workshop.review.moderated",
+                action="workshop:review.moderate",
+                resource_type="WorkshopReview",
+                resource_id=str(review.id),
+                actor_id=user.id,
+                metadata={
+                    "review_id": str(review.id),
+                    "workshop_id": str(review.workshop_id),
+                    "previous_status": previous_status,
+                    "new_status": target_status,
+                    "reason": reason,
+                },
+            )
+
+        return review
+
+    @classmethod
+    def get_workshop_reputation_summary(cls, workshop: WorkshopProfile) -> dict:
+        """
+        Computes average rating, count, star distribution, and sub-ratings for approved reviews.
+        """
+        approved_qs = workshop.reviews.filter(status=ReviewStatusChoices.APPROVED)
+        total_reviews = approved_qs.count()
+
+        if total_reviews == 0:
+            return {
+                "average_rating": 0.0,
+                "total_reviews": 0,
+                "verified_reviews_count": 0,
+                "distribution": {"5": 0, "4": 0, "3": 0, "2": 0, "1": 0},
+                "sub_ratings": {
+                    "communication": 0.0,
+                    "workmanship": 0.0,
+                    "pricing_transparency": 0.0,
+                },
+            }
+
+        agg = approved_qs.aggregate(
+            avg_rating=models.Avg('rating'),
+            avg_comm=models.Avg('communication_rating'),
+            avg_work=models.Avg('workmanship_rating'),
+            avg_price=models.Avg('pricing_transparency_rating'),
+        )
+
+        avg_rating = round(float(agg['avg_rating'] or 0.0), 2)
+        avg_comm = round(float(agg['avg_comm'] or 0.0), 1) if agg['avg_comm'] is not None else None
+        avg_work = round(float(agg['avg_work'] or 0.0), 1) if agg['avg_work'] is not None else None
+        avg_price = round(float(agg['avg_price'] or 0.0), 1) if agg['avg_price'] is not None else None
+
+        distribution = {
+            "5": approved_qs.filter(rating=5).count(),
+            "4": approved_qs.filter(rating=4).count(),
+            "3": approved_qs.filter(rating=3).count(),
+            "2": approved_qs.filter(rating=2).count(),
+            "1": approved_qs.filter(rating=1).count(),
+        }
+
+        sub_ratings = {}
+        if avg_comm is not None:
+            sub_ratings["communication"] = avg_comm
+        if avg_work is not None:
+            sub_ratings["workmanship"] = avg_work
+        if avg_price is not None:
+            sub_ratings["pricing_transparency"] = avg_price
+
+        return {
+            "average_rating": avg_rating,
+            "total_reviews": total_reviews,
+            "verified_reviews_count": approved_qs.filter(is_verified_service=True).count(),
+            "distribution": distribution,
+            "sub_ratings": sub_ratings,
+        }
+
 

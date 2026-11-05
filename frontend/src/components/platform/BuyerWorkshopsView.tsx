@@ -5,8 +5,12 @@ import {
   api,
   WorkshopProfilePublic,
   WorkshopBooking,
+  WorkshopQuotation,
+  WorkshopDepositSessionResponse,
   GarageVehicle,
   ChangeOrder,
+  PlatformWorkshopReview,
+  WorkshopReputationSummary,
 } from "@/lib/api/client";
 import {
   Wrench,
@@ -20,7 +24,100 @@ import {
   ChevronRight,
   RefreshCw,
   Shield,
+  Star,
+  MessageSquare,
+  X,
+  CreditCard,
+  Lock,
 } from "lucide-react";
+import { useAuth } from "@/lib/prototype-auth/auth-context";
+import { WorkshopChatModal } from "./WorkshopChatModal";
+
+export type WorkshopDepositUIState =
+  | "required"
+  | "initiated"
+  | "processing"
+  | "paid_and_verified"
+  | "failed"
+  | "cancelled";
+
+interface RazorpaySuccessResponse {
+  razorpay_payment_id: string;
+  razorpay_order_id: string;
+  razorpay_signature: string;
+}
+
+interface RazorpayErrorResponse {
+  error?: {
+    code?: string;
+    description?: string;
+    source?: string;
+    step?: string;
+    reason?: string;
+    metadata?: {
+      payment_id?: string;
+      order_id?: string;
+    };
+  };
+}
+
+interface RazorpayOptions {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill?: {
+    name?: string;
+    email?: string;
+    contact?: string;
+  };
+  notes?: Record<string, string>;
+  theme?: {
+    color?: string;
+  };
+  modal?: {
+    confirm_close?: boolean;
+    ondismiss?: () => void;
+  };
+  handler?: (response: RazorpaySuccessResponse) => void | Promise<void>;
+}
+
+export interface RazorpayInstance {
+  open: () => void;
+  on: (event: string, handler: (resp: RazorpayErrorResponse) => void) => void;
+}
+
+function loadRazorpayScript(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined") {
+      resolve(false);
+      return;
+    }
+    if (window.Razorpay) {
+      resolve(true);
+      return;
+    }
+    const existing = document.getElementById("razorpay-checkout-js");
+    if (existing) {
+      if (window.Razorpay) {
+        resolve(true);
+      } else {
+        existing.addEventListener("load", () => resolve(true));
+        existing.addEventListener("error", () => resolve(false));
+      }
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "razorpay-checkout-js";
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
 
 function getDefaultBookingDate(): string {
   const d = new Date();
@@ -29,6 +126,7 @@ function getDefaultBookingDate(): string {
 }
 
 export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateToGarage?: () => void }) {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<"browse" | "my_bookings">("browse");
 
   // Workshop Browsing State
@@ -72,6 +170,78 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
   const [coRejectReasonModal, setCoRejectReasonModal] = useState<string | null>(null);
   const [coRejectReason, setCoRejectReason] = useState("");
 
+  // Workshop Reviews Drawer state
+  const [reviewsDrawerOpen, setReviewsDrawerOpen] = useState(false);
+  const [selectedWorkshopForReviews, setSelectedWorkshopForReviews] = useState<WorkshopProfilePublic | null>(null);
+  const [workshopReviewsList, setWorkshopReviewsList] = useState<PlatformWorkshopReview[]>([]);
+  const [workshopReputation, setWorkshopReputation] = useState<WorkshopReputationSummary | null>(null);
+  const [loadingWorkshopReviews, setLoadingWorkshopReviews] = useState(false);
+  const [workshopReviewsError, setWorkshopReviewsError] = useState<string | null>(null);
+
+  // Review Submission Modal state
+  const [reviewModalOpen, setReviewModalOpen] = useState(false);
+  const [targetBookingForReview, setTargetBookingForReview] = useState<WorkshopBooking | null>(null);
+  const [reviewRating, setReviewRating] = useState<number>(5);
+  const [reviewHoverRating, setReviewHoverRating] = useState<number>(0);
+  const [reviewCommRating, setReviewCommRating] = useState<number>(5);
+  const [reviewWorkRating, setReviewWorkRating] = useState<number>(5);
+  const [reviewPriceRating, setReviewPriceRating] = useState<number>(5);
+  const [reviewTitle, setReviewTitle] = useState("");
+  const [reviewComment, setReviewComment] = useState("");
+  const [submittingReview, setSubmittingReview] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewSuccess, setReviewSuccess] = useState<string | null>(null);
+
+  // Authoritative Deposit Payment Modal & UI State
+  const [depositModalOpen, setDepositModalOpen] = useState(false);
+  const [targetBookingForDeposit, setTargetBookingForDeposit] = useState<WorkshopBooking | null>(null);
+  const [targetQuotationForDeposit, setTargetQuotationForDeposit] = useState<WorkshopQuotation | null>(null);
+  const [depositSession, setDepositSession] = useState<WorkshopDepositSessionResponse | null>(null);
+  const [depositUIState, setDepositUIState] = useState<WorkshopDepositUIState>("required");
+  const [depositError, setDepositError] = useState<string | null>(null);
+  const [depositSuccess, setDepositSuccess] = useState<string | null>(null);
+
+  // Workshop Messaging State
+  const [chatModalOpen, setChatModalOpen] = useState(false);
+  const [targetBookingForChat, setTargetBookingForChat] = useState<WorkshopBooking | null>(null);
+
+  const openChatModal = (bk: WorkshopBooking) => {
+    setTargetBookingForChat(bk);
+    setChatModalOpen(true);
+  };
+
+  const depositLoading = depositUIState === "initiated" && !depositSession;
+
+  const openWorkshopReviews = async (ws: WorkshopProfilePublic) => {
+    setSelectedWorkshopForReviews(ws);
+    setReviewsDrawerOpen(true);
+    setLoadingWorkshopReviews(true);
+    setWorkshopReviewsError(null);
+    try {
+      const res = await api.workshops.reviews.list(ws.slug || ws.id);
+      setWorkshopReviewsList(res.results || []);
+      setWorkshopReputation(res.reputation || null);
+    } catch (err) {
+      setWorkshopReviewsError(err instanceof Error ? err.message : "Failed to load customer reviews.");
+    } finally {
+      setLoadingWorkshopReviews(false);
+    }
+  };
+
+  const openReviewModal = (bk: WorkshopBooking) => {
+    setTargetBookingForReview(bk);
+    setReviewRating(5);
+    setReviewHoverRating(0);
+    setReviewCommRating(5);
+    setReviewWorkRating(5);
+    setReviewPriceRating(5);
+    setReviewTitle("");
+    setReviewComment("");
+    setReviewError(null);
+    setReviewSuccess(null);
+    setReviewModalOpen(true);
+  };
+
   const fetchMyBookings = useCallback(async () => {
     setLoadingBookings(true);
     try {
@@ -98,6 +268,338 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
       setLoadingBookings(false);
     }
   }, [statusFilter]);
+
+  // =========================================================================
+  // REAL GATEWAY DEPOSIT CHECKOUT ORCHESTRATION (RAZORPAY & STRIPE)
+  // =========================================================================
+
+  const openDepositModal = async (bk: WorkshopBooking, quote: WorkshopQuotation) => {
+    // 1. Prevent duplicate checkout initiation while payment is in-flight
+    if (depositUIState === "initiated" || depositUIState === "processing") {
+      return;
+    }
+
+    setTargetBookingForDeposit(bk);
+    setTargetQuotationForDeposit(quote);
+    setDepositModalOpen(true);
+    setDepositUIState("initiated");
+    setDepositError(null);
+    setDepositSuccess(null);
+    setDepositSession(null);
+
+    try {
+      const returnUrl =
+        typeof window !== "undefined"
+          ? `${window.location.origin}/platform?tab=workshops&deposit_quote_id=${quote.id}`
+          : undefined;
+      const cancelUrl =
+        typeof window !== "undefined"
+          ? `${window.location.origin}/platform?tab=workshops&deposit_cancelled=true`
+          : undefined;
+
+      const session = await api.workshops.createDepositSession(quote.id, {
+        return_url: returnUrl,
+        cancel_url: cancelUrl,
+      });
+      setDepositSession(session);
+
+      const provider = (
+        session.payment_session?.provider ||
+        (quote.currency === "GBP" ? "STRIPE" : "RAZORPAY")
+      ).toUpperCase();
+
+      if (provider === "RAZORPAY") {
+        const loaded = await loadRazorpayScript();
+        if (!loaded || !window.Razorpay) {
+          setDepositUIState("failed");
+          setDepositError("Unable to load Razorpay Checkout SDK. Please check your network connection and retry.");
+          return;
+        }
+
+        const RazorpayClass = window.Razorpay;
+        const options: RazorpayOptions = {
+          key:
+            session.payment_session.key_id ||
+            process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID ||
+            "rzp_test_placeholder_key",
+          amount:
+            session.payment_session.amount_minor ||
+            Math.round(parseFloat(quote.deposit_amount || "0") * 100),
+          currency: session.currency || quote.currency || "INR",
+          name: "DriverXtra Platform",
+          description: `Quotation Deposit #${quote.quotation_number} (${bk.workshop_name})`,
+          order_id: session.payment_session.provider_order_id,
+          prefill: {
+            name: user?.fullName || "",
+            email: user?.email || "",
+          },
+          notes: {
+            quotation_id: quote.id,
+            quotation_number: quote.quotation_number,
+            booking_number: bk.booking_number,
+          },
+          theme: {
+            color: "#f59e0b",
+          },
+          handler: async function (response: RazorpaySuccessResponse) {
+            setDepositUIState("processing");
+            setDepositError(null);
+            try {
+              const verifyRes = await api.workshops.verifyDeposit(quote.id, {
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                amount: quote.deposit_amount,
+                currency: quote.currency,
+              });
+
+              if (verifyRes.status === "success" || verifyRes.quotation?.deposit_status === "PAID") {
+                setDepositUIState("paid_and_verified");
+                setDepositSuccess("Deposit payment verified! Your quotation is accepted and booking is confirmed.");
+                setActionSuccessMessage("Deposit paid successfully! Your workshop booking is confirmed.");
+                await fetchMyBookings();
+              } else {
+                setDepositUIState("failed");
+                setDepositError(verifyRes.message || "Deposit verification failed.");
+              }
+            } catch (vErr: unknown) {
+              setDepositUIState("failed");
+              setDepositError(vErr instanceof Error ? vErr.message : "Deposit verification failed.");
+            }
+          },
+          modal: {
+            confirm_close: true,
+            ondismiss: function () {
+              setDepositUIState("cancelled");
+              setDepositError("Payment checkout was cancelled or dismissed. Your quotation remains reserved and ready.");
+            },
+          },
+        };
+
+        const rzp = new RazorpayClass(options);
+        rzp.on("payment.failed", function (resp: RazorpayErrorResponse) {
+          setDepositUIState("failed");
+          const desc = resp?.error?.description || "Payment failed or was declined.";
+          setDepositError(`Payment failed: ${desc}. Please retry or choose another payment method.`);
+        });
+        rzp.open();
+      } else if (provider === "STRIPE") {
+        if (session.payment_session?.checkout_url) {
+          setDepositUIState("processing");
+          window.location.assign(session.payment_session.checkout_url);
+        }
+      }
+    } catch (err: unknown) {
+      setDepositUIState("failed");
+      setDepositError(err instanceof Error ? err.message : "Failed to initiate deposit payment session.");
+    }
+  };
+
+  const handleConfirmDepositPayment = async () => {
+    if (!targetQuotationForDeposit || !depositSession) return;
+    if (depositUIState === "processing") return;
+
+    setDepositUIState("processing");
+    setDepositError(null);
+
+    try {
+      const pSession = depositSession.payment_session;
+      const provider = (
+        pSession.provider ||
+        (targetQuotationForDeposit.currency === "GBP" ? "STRIPE" : "RAZORPAY")
+      ).toUpperCase();
+
+      if (provider === "STRIPE") {
+        const verifyPayload = {
+          payment_intent_id: pSession.provider_order_id,
+          stripe_payment_intent_id: pSession.provider_order_id,
+          client_secret: pSession.client_secret,
+          amount: targetQuotationForDeposit.deposit_amount,
+          currency: targetQuotationForDeposit.currency,
+        };
+
+        const res = await api.workshops.verifyDeposit(targetQuotationForDeposit.id, verifyPayload);
+        if (res.status === "success" || res.quotation?.deposit_status === "PAID") {
+          setDepositUIState("paid_and_verified");
+          setDepositSuccess("Stripe deposit confirmed & verified! Your quotation is accepted and booking is confirmed.");
+          setActionSuccessMessage("Deposit paid successfully! Your workshop booking is confirmed.");
+          await fetchMyBookings();
+        } else {
+          setDepositUIState("failed");
+          setDepositError(res.message || "Stripe deposit verification failed.");
+        }
+      } else {
+        const loaded = await loadRazorpayScript();
+        if (!loaded || !window.Razorpay) {
+          setDepositUIState("failed");
+          setDepositError("Unable to load Razorpay Checkout SDK. Please check your network connection.");
+          return;
+        }
+        const RazorpayClass = window.Razorpay;
+        const options: RazorpayOptions = {
+          key: pSession.key_id || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "rzp_test_placeholder_key",
+          amount: pSession.amount_minor || Math.round(parseFloat(targetQuotationForDeposit.deposit_amount || "0") * 100),
+          currency: targetQuotationForDeposit.currency,
+          name: "DriverXtra Platform",
+          description: `Quotation Deposit #${targetQuotationForDeposit.quotation_number}`,
+          order_id: pSession.provider_order_id,
+          prefill: {
+            name: user?.fullName || "",
+            email: user?.email || "",
+          },
+          notes: {
+            quotation_id: targetQuotationForDeposit.id,
+            quotation_number: targetQuotationForDeposit.quotation_number,
+          },
+          theme: { color: "#f59e0b" },
+          handler: async function (response: RazorpaySuccessResponse) {
+            setDepositUIState("processing");
+            try {
+              const res = await api.workshops.verifyDeposit(targetQuotationForDeposit.id, {
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                amount: targetQuotationForDeposit.deposit_amount,
+                currency: targetQuotationForDeposit.currency,
+              });
+              if (res.status === "success" || res.quotation?.deposit_status === "PAID") {
+                setDepositUIState("paid_and_verified");
+                setDepositSuccess("Deposit payment verified! Your quotation is accepted and booking is confirmed.");
+                setActionSuccessMessage("Deposit paid successfully! Your workshop booking is confirmed.");
+                await fetchMyBookings();
+              } else {
+                setDepositUIState("failed");
+                setDepositError(res.message || "Deposit verification failed.");
+              }
+            } catch (vErr: unknown) {
+              setDepositUIState("failed");
+              setDepositError(vErr instanceof Error ? vErr.message : "Deposit verification failed.");
+            }
+          },
+          modal: {
+            confirm_close: true,
+            ondismiss: function () {
+              setDepositUIState("cancelled");
+              setDepositError("Payment checkout was cancelled or dismissed. Quotation remains pending deposit.");
+            },
+          },
+        };
+        const rzp = new RazorpayClass(options);
+        rzp.on("payment.failed", function (resp: RazorpayErrorResponse) {
+          setDepositUIState("failed");
+          const desc = resp?.error?.description || "Payment failed.";
+          setDepositError(`Payment failed: ${desc}`);
+        });
+        rzp.open();
+      }
+    } catch (err: unknown) {
+      setDepositUIState("failed");
+      setDepositError(err instanceof Error ? err.message : "Deposit payment failed.");
+    }
+  };
+
+  // Authoritative URL Return Handler (Stripe Return / Callback / Cancelled)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const searchParams = new URLSearchParams(window.location.search);
+    const depositQuoteId = searchParams.get("deposit_quote_id");
+    const paymentIntent = searchParams.get("payment_intent") || searchParams.get("payment_intent_id");
+    const depositCancelled = searchParams.get("deposit_cancelled");
+
+    if (depositCancelled === "true") {
+      const cleanUrl = window.location.pathname + (window.location.hash || "");
+      window.history.replaceState({}, document.title, cleanUrl);
+      queueMicrotask(() => {
+        setDepositUIState("cancelled");
+        setDepositError("Stripe checkout was cancelled. You can retry payment whenever you are ready.");
+      });
+      return;
+    }
+
+    if (depositQuoteId) {
+      // NEVER trust URL query parameters alone as confirmation!
+      // Must query backend verification endpoint authoritatively.
+      queueMicrotask(() => {
+        setDepositUIState("processing");
+        setDepositModalOpen(true);
+      });
+
+      api.workshops
+        .verifyDeposit(depositQuoteId, {
+          payment_intent_id: paymentIntent || undefined,
+        })
+        .then((res) => {
+          if (res.status === "success" || res.quotation?.deposit_status === "PAID") {
+            setDepositUIState("paid_and_verified");
+            setDepositSuccess("Stripe deposit confirmed & verified! Your booking is confirmed.");
+            setActionSuccessMessage("Stripe deposit confirmed! Your booking is confirmed.");
+            fetchMyBookings();
+          } else {
+            setDepositUIState("failed");
+            setDepositError(res.message || "Failed to authoritatively confirm payment with Stripe.");
+          }
+        })
+        .catch((err) => {
+          api.workshops
+            .getDepositDetails(depositQuoteId)
+            .then((details) => {
+              if (details.deposit_status === "PAID") {
+                setDepositUIState("paid_and_verified");
+                setDepositSuccess("Deposit verified! Your booking is confirmed.");
+                fetchMyBookings();
+              } else {
+                setDepositUIState("failed");
+                setDepositError(err instanceof Error ? err.message : "Authoritative payment verification failed.");
+              }
+            })
+            .catch(() => {
+              setDepositUIState("failed");
+              setDepositError(err instanceof Error ? err.message : "Authoritative payment verification failed.");
+            });
+        })
+        .finally(() => {
+          const cleanUrl = window.location.pathname + (window.location.hash || "");
+          window.history.replaceState({}, document.title, cleanUrl);
+        });
+    }
+  }, [fetchMyBookings]);
+
+  const handleSubmitReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetBookingForReview) return;
+    if (reviewRating < 1 || reviewRating > 5) {
+      setReviewError("Please select a rating between 1 and 5 stars.");
+      return;
+    }
+    if (reviewComment.trim().length < 5) {
+      setReviewError("Review comment must be at least 5 characters long.");
+      return;
+    }
+
+    setSubmittingReview(true);
+    setReviewError(null);
+    try {
+      await api.workshops.reviews.create(targetBookingForReview.id, {
+        rating: reviewRating,
+        title: reviewTitle.trim() || undefined,
+        comment: reviewComment.trim(),
+        communication_rating: reviewCommRating || undefined,
+        workmanship_rating: reviewWorkRating || undefined,
+        pricing_transparency_rating: reviewPriceRating || undefined,
+      });
+
+      setReviewSuccess("Thank you! Your verified workshop review has been published.");
+      fetchMyBookings();
+      setTimeout(() => {
+        setReviewModalOpen(false);
+        setReviewSuccess(null);
+      }, 1500);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : "Failed to submit review.");
+    } finally {
+      setSubmittingReview(false);
+    }
+  };
 
   // Load workshops
   useEffect(() => {
@@ -452,9 +954,23 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                           <span>{ws.city || "UK"}, {ws.country}</span>
                         </div>
                       </div>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
-                        {ws.bay_capacity} Bays
-                      </span>
+                      <div className="flex flex-col items-end gap-1.5">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
+                          {ws.bay_capacity} Bays
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => openWorkshopReviews(ws)}
+                          className="flex items-center gap-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200/80 px-2 py-0.5 rounded-full text-[10px] font-bold transition-colors cursor-pointer"
+                          title="Click to view customer reviews"
+                        >
+                          <Star className="w-3 h-3 text-amber-500 fill-amber-500 shrink-0" />
+                          <span>{ws.average_rating && ws.average_rating > 0 ? Number(ws.average_rating).toFixed(1) : "New"}</span>
+                          {ws.review_count && ws.review_count > 0 ? (
+                            <span className="text-amber-700 font-medium">({ws.review_count})</span>
+                          ) : null}
+                        </button>
+                      </div>
                     </div>
 
                     {ws.description && (
@@ -484,6 +1000,14 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                   </div>
 
                   <div className="pt-4 mt-4 border-t border-slate-100 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openWorkshopReviews(ws)}
+                      className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                      <span>Reviews</span>
+                    </button>
                     <button
                       onClick={() => openBookingModal(ws)}
                       className="flex-1 py-2.5 px-3 bg-slate-950 hover:bg-slate-900 text-white font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-sm"
@@ -842,6 +1366,52 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                               {bk.active_quotation.currency} {bk.active_quotation.total_amount}
                             </span>
                           </div>
+
+                          {bk.active_quotation.requires_deposit && (
+                            <div className="mt-2 pt-2 border-t border-amber-400/20 bg-amber-400/10 rounded-lg p-2.5 space-y-1">
+                              <div className="flex justify-between text-xs text-amber-300 font-bold">
+                                <span>Required Upfront Deposit ({bk.active_quotation.deposit_percentage}%):</span>
+                                <span>{bk.active_quotation.currency} {bk.active_quotation.deposit_amount}</span>
+                              </div>
+                              <div className="flex justify-between text-xs text-slate-300">
+                                <span>Remaining Balance Due at Workshop:</span>
+                                <span>
+                                  {bk.active_quotation.currency}{" "}
+                                  {(
+                                    parseFloat(bk.active_quotation.total_amount) -
+                                    parseFloat(bk.active_quotation.deposit_amount || "0")
+                                  ).toFixed(2)}
+                                </span>
+                              </div>
+                              <div className="flex justify-between text-[11px] text-slate-400 pt-0.5">
+                                <span>Deposit Status:</span>
+                                <span
+                                  className={`font-black uppercase tracking-wider ${
+                                    bk.active_quotation.deposit_status === "PAID"
+                                      ? "text-emerald-400"
+                                      : bk.active_quotation.deposit_status === "FAILED"
+                                      ? "text-rose-400"
+                                      : bk.active_quotation.deposit_status === "PROCESSING"
+                                      ? "text-sky-400"
+                                      : "text-amber-400"
+                                  }`}
+                                >
+                                  {bk.active_quotation.deposit_status === "PAID"
+                                    ? "PAID AND VERIFIED"
+                                    : bk.active_quotation.deposit_status === "PROCESSING"
+                                    ? "PROCESSING"
+                                    : bk.active_quotation.deposit_status === "FAILED"
+                                    ? "PAYMENT FAILED"
+                                    : "PAYMENT REQUIRED"}
+                                </span>
+                              </div>
+                              {bk.active_quotation.deposit_transaction_id && (
+                                <div className="text-[10px] text-slate-400 font-mono truncate">
+                                  Ref: {bk.active_quotation.deposit_transaction_id}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -850,26 +1420,53 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                         <div className="pt-3 border-t border-white/10 flex items-center justify-end gap-3">
                           <button
                             onClick={() => setRejectReasonModal(bk.active_quotation!.id)}
-                            disabled={respondingQuoteId === bk.active_quotation.id}
-                            className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition-all"
+                            disabled={respondingQuoteId === bk.active_quotation.id || depositUIState === "processing" || depositUIState === "initiated"}
+                            className="px-4 py-2 bg-white/10 hover:bg-white/20 disabled:opacity-50 text-white font-bold text-xs rounded-xl transition-all"
                           >
                             Decline Quotation
                           </button>
-                          <button
-                            onClick={() => handleAcceptQuotation(bk.active_quotation!.id)}
-                            disabled={respondingQuoteId === bk.active_quotation.id}
-                            className="px-5 py-2 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs rounded-xl transition-all shadow-sm flex items-center gap-1.5"
-                          >
-                            <CheckCircle2 className="w-4 h-4" />
-                            <span>Accept & Confirm Service</span>
-                          </button>
+                          {bk.active_quotation.requires_deposit && bk.active_quotation.deposit_status !== "PAID" ? (
+                            <button
+                              onClick={() => openDepositModal(bk, bk.active_quotation!)}
+                              disabled={respondingQuoteId === bk.active_quotation.id || depositUIState === "processing" || depositUIState === "initiated"}
+                              className="px-5 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl transition-all shadow-sm flex items-center gap-1.5"
+                            >
+                              {depositUIState === "initiated" || depositUIState === "processing" ? (
+                                <>
+                                  <RefreshCw className="w-4 h-4 animate-spin" />
+                                  <span>Processing Deposit...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <CreditCard className="w-4 h-4" />
+                                  <span>Pay Deposit ({bk.active_quotation.currency} {bk.active_quotation.deposit_amount}) &amp; Confirm</span>
+                                </>
+                              )}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleAcceptQuotation(bk.active_quotation!.id)}
+                              disabled={respondingQuoteId === bk.active_quotation.id}
+                              className="px-5 py-2 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs rounded-xl transition-all shadow-sm flex items-center gap-1.5"
+                            >
+                              <CheckCircle2 className="w-4 h-4" />
+                              <span>Accept & Confirm Service</span>
+                            </button>
+                          )}
                         </div>
                       )}
 
                       {bk.active_quotation.status === "ACCEPTED" && (
-                        <div className="pt-2 text-xs text-emerald-400 font-bold flex items-center gap-1.5">
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>You accepted this quotation on {bk.active_quotation.accepted_at?.split("T")[0]}.</span>
+                        <div className="pt-2 text-xs text-emerald-400 font-bold flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>You accepted this quotation on {bk.active_quotation.accepted_at?.split("T")[0]}.</span>
+                          </div>
+                          {bk.active_quotation.deposit_status === "PAID" && (
+                            <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-lg text-[11px] font-mono">
+                              Deposit Paid: {bk.active_quotation.currency} {bk.active_quotation.deposit_amount}
+                            </span>
+                          )}
                         </div>
                       )}
 
@@ -885,17 +1482,49 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                     </div>
                   )}
 
-                  {/* Booking Cancel option */}
-                  {bk.status !== "CANCELLED" && bk.status !== "REJECTED" && (
-                    <div className="flex justify-end pt-2">
+                  {/* Service Review & Booking Actions */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openChatModal(bk)}
+                        className="inline-flex items-center gap-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-3.5 py-1.5 rounded-xl text-xs font-black transition-all shadow-xs cursor-pointer"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Message Workshop</span>
+                      </button>
+
+                      {bk.has_review ? (
+                        <div className="inline-flex items-center gap-1.5 bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1 rounded-xl text-xs font-bold">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Service Reviewed</span>
+                          {bk.review_rating && (
+                            <span className="flex items-center text-amber-600 font-bold ml-1">
+                              (★ {bk.review_rating})
+                            </span>
+                          )}
+                        </div>
+                      ) : (bk.work_order_status === "COMPLETED" || bk.is_review_eligible) ? (
+                        <button
+                          type="button"
+                          onClick={() => openReviewModal(bk)}
+                          className="inline-flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 px-3.5 py-1.5 rounded-xl text-xs font-black transition-all shadow-xs cursor-pointer"
+                        >
+                          <Star className="w-3.5 h-3.5 fill-slate-950" />
+                          <span>Rate &amp; Review Workshop</span>
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {bk.status !== "CANCELLED" && bk.status !== "REJECTED" && (
                       <button
                         onClick={() => handleCancelBooking(bk.id)}
                         className="text-xs text-rose-600 hover:text-rose-800 font-semibold"
                       >
                         Cancel Booking Request
                       </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -1231,6 +1860,739 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
             </div>
           </div>
         </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: SUBMIT WORKSHOP REVIEW */}
+      {/* ========================================================================= */}
+      {reviewModalOpen && targetBookingForReview && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 border border-slate-200 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-black uppercase tracking-wider mb-1.5 border border-emerald-200">
+                  <Shield className="w-3 h-3 text-emerald-600" />
+                  Verified Service Review
+                </div>
+                <h3 className="text-lg font-black text-slate-950">
+                  Rate & Review {targetBookingForReview.workshop_name}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Booking #{targetBookingForReview.booking_reference || targetBookingForReview.booking_number} &bull; {targetBookingForReview.service_items?.[0]?.service_name || "Vehicle Service"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReviewModalOpen(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {reviewSuccess ? (
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm font-bold flex items-center gap-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                <span>{reviewSuccess}</span>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmitReview} className="space-y-4">
+                {reviewError && (
+                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                    <span>{reviewError}</span>
+                  </div>
+                )}
+
+                {/* Primary Overall Star Rating */}
+                <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-center space-y-2">
+                  <label className="text-xs font-black text-slate-900 block uppercase tracking-wider">
+                    Overall Experience
+                  </label>
+                  <div className="flex items-center justify-center gap-2">
+                    {[1, 2, 3, 4, 5].map((star) => {
+                      const isActive = (reviewHoverRating || reviewRating) >= star;
+                      return (
+                        <button
+                          key={star}
+                          type="button"
+                          onMouseEnter={() => setReviewHoverRating(star)}
+                          onMouseLeave={() => setReviewHoverRating(0)}
+                          onClick={() => setReviewRating(star)}
+                          className="p-1 transition-transform hover:scale-110 focus:outline-none"
+                          aria-label={`Rate ${star} stars`}
+                        >
+                          <Star
+                            className={`w-8 h-8 ${
+                              isActive
+                                ? "text-amber-400 fill-amber-400 drop-shadow-sm"
+                                : "text-slate-300 hover:text-slate-400"
+                            }`}
+                          />
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs font-bold text-slate-700">
+                    {reviewRating === 5 && "Exceptional (5 / 5)"}
+                    {reviewRating === 4 && "Very Good (4 / 5)"}
+                    {reviewRating === 3 && "Good (3 / 5)"}
+                    {reviewRating === 2 && "Fair (2 / 5)"}
+                    {reviewRating === 1 && "Poor (1 / 5)"}
+                  </p>
+                </div>
+
+                {/* Dimensional Sub-ratings */}
+                <div className="space-y-2.5 pt-1">
+                  <p className="text-[11px] font-black uppercase tracking-wider text-slate-500">
+                    Service Dimensions (Optional)
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {/* Communication */}
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-center">
+                      <span className="text-[11px] font-bold text-slate-700 block">Communication</span>
+                      <div className="flex justify-center gap-0.5">
+                        {[1, 2, 3, 4, 5].map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => setReviewCommRating(s)}
+                            className="p-0.5"
+                          >
+                            <Star
+                              className={`w-4 h-4 ${
+                                reviewCommRating >= s
+                                  ? "text-amber-400 fill-amber-400"
+                                  : "text-slate-300"
+                              }`}
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Workmanship */}
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-center">
+                      <span className="text-[11px] font-bold text-slate-700 block">Workmanship</span>
+                      <div className="flex justify-center gap-0.5">
+                        {[1, 2, 3, 4, 5].map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => setReviewWorkRating(s)}
+                            className="p-0.5"
+                          >
+                            <Star
+                              className={`w-4 h-4 ${
+                                reviewWorkRating >= s
+                                  ? "text-amber-400 fill-amber-400"
+                                  : "text-slate-300"
+                              }`}
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Pricing Transparency */}
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-center">
+                      <span className="text-[11px] font-bold text-slate-700 block">Pricing Transparency</span>
+                      <div className="flex justify-center gap-0.5">
+                        {[1, 2, 3, 4, 5].map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => setReviewPriceRating(s)}
+                            className="p-0.5"
+                          >
+                            <Star
+                              className={`w-4 h-4 ${
+                                reviewPriceRating >= s
+                                  ? "text-amber-400 fill-amber-400"
+                                  : "text-slate-300"
+                              }`}
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Review Title */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-900 block">
+                    Headline / Summary (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={reviewTitle}
+                    onChange={(e) => setReviewTitle(e.target.value)}
+                    placeholder="E.g., Prompt diagnosis, transparent pricing and polite team"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    maxLength={120}
+                  />
+                </div>
+
+                {/* Review Comment */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-xs font-bold text-slate-900">
+                      Your Detailed Experience <span className="text-rose-500">*</span>
+                    </label>
+                    <span className="text-[10px] text-slate-500">Min 5 characters</span>
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={reviewComment}
+                    onChange={(e) => setReviewComment(e.target.value)}
+                    placeholder="Describe how the workshop handled your vehicle, turnaround time, communication, and overall quality of work..."
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    required
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setReviewModalOpen(false)}
+                    className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submittingReview || reviewComment.trim().length < 5}
+                    className="px-6 py-2.5 bg-amber-400 hover:bg-amber-500 text-slate-950 font-black text-xs rounded-xl flex items-center gap-2 shadow-sm disabled:opacity-50"
+                  >
+                    {submittingReview && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>Publish Review</span>
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* DRAWER / MODAL: WORKSHOP REVIEWS & REPUTATION */}
+      {/* ========================================================================= */}
+      {reviewsDrawerOpen && selectedWorkshopForReviews && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-2xl space-y-6 border border-slate-200 max-h-[90vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-start justify-between pb-3 border-b border-slate-100">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xl font-black text-slate-950">
+                    {selectedWorkshopForReviews.business_name || selectedWorkshopForReviews.display_name}
+                  </h3>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-bold border border-emerald-200">
+                    <Shield className="w-3 h-3 text-emerald-600" />
+                    Verified Reviews
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-1 flex items-center gap-2">
+                  <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                  {selectedWorkshopForReviews.city}, {selectedWorkshopForReviews.postal_code}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReviewsDrawerOpen(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Reputation Summary Card */}
+            {workshopReputation && (
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+                {/* Score & Stars */}
+                <div className="text-center sm:border-r border-slate-200 sm:pr-4 space-y-1">
+                  <div className="text-4xl font-black text-slate-950">
+                    {workshopReputation.average_rating ? workshopReputation.average_rating.toFixed(1) : "—"}
+                  </div>
+                  <div className="flex justify-center items-center gap-1 text-amber-400">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <Star
+                        key={star}
+                        className={`w-4 h-4 ${
+                          (workshopReputation.average_rating || 0) >= star
+                            ? "fill-amber-400 text-amber-400"
+                            : "text-slate-300"
+                        }`}
+                      />
+                    ))}
+                  </div>
+                  <div className="text-xs text-slate-500 font-bold">
+                    {workshopReputation.total_reviews} verified {workshopReputation.total_reviews === 1 ? "review" : "reviews"}
+                  </div>
+                </div>
+
+                {/* Star Distribution Breakdown */}
+                <div className="space-y-1.5 sm:col-span-2">
+                  {[5, 4, 3, 2, 1].map((s) => {
+                    const count = workshopReputation.distribution[String(s)] || 0;
+                    const percent = workshopReputation.total_reviews > 0
+                      ? Math.round((count / workshopReputation.total_reviews) * 100)
+                      : 0;
+                    return (
+                      <div key={s} className="flex items-center gap-2 text-xs">
+                        <span className="w-8 font-bold text-slate-600 flex items-center gap-0.5 justify-end">
+                          {s} <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+                        </span>
+                        <div className="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-amber-400 rounded-full transition-all"
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                        <span className="w-8 text-[11px] text-slate-500 text-right">{count}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Dimensional Sub-scores if present */}
+            {workshopReputation?.sub_ratings && (
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase block">Communication</span>
+                  <span className="text-sm font-black text-slate-900">
+                    {workshopReputation.sub_ratings.communication ? `${workshopReputation.sub_ratings.communication.toFixed(1)} / 5` : "—"}
+                  </span>
+                </div>
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase block">Workmanship</span>
+                  <span className="text-sm font-black text-slate-900">
+                    {workshopReputation.sub_ratings.workmanship ? `${workshopReputation.sub_ratings.workmanship.toFixed(1)} / 5` : "—"}
+                  </span>
+                </div>
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase block">Pricing</span>
+                  <span className="text-sm font-black text-slate-900">
+                    {workshopReputation.sub_ratings.pricing_transparency ? `${workshopReputation.sub_ratings.pricing_transparency.toFixed(1)} / 5` : "—"}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Review List Section */}
+            <div className="space-y-4">
+              <h4 className="text-xs font-black uppercase tracking-wider text-slate-500">
+                Customer Feedback ({workshopReviewsList.length})
+              </h4>
+
+              {loadingWorkshopReviews && (
+                <div className="py-12 text-center text-slate-500 text-xs flex items-center justify-center gap-2">
+                  <RefreshCw className="w-4 h-4 animate-spin text-amber-500" />
+                  <span>Loading verified reviews...</span>
+                </div>
+              )}
+
+              {workshopReviewsError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-bold flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                  <span>{workshopReviewsError}</span>
+                </div>
+              )}
+
+              {!loadingWorkshopReviews && !workshopReviewsError && workshopReviewsList.length === 0 && (
+                <div className="py-12 text-center rounded-2xl bg-slate-50 border border-dashed border-slate-200 space-y-2">
+                  <Star className="w-8 h-8 text-slate-300 mx-auto" />
+                  <p className="text-xs font-bold text-slate-600">No customer reviews yet</p>
+                  <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
+                    Reviews can only be submitted by verified customers who booked and completed work with this workshop on DriverXtra.
+                  </p>
+                </div>
+              )}
+
+              {!loadingWorkshopReviews && workshopReviewsList.map((review) => (
+                <div
+                  key={review.id}
+                  className="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm space-y-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <div className="flex text-amber-400">
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <Star
+                              key={star}
+                              className={`w-3.5 h-3.5 ${
+                                review.rating >= star
+                                  ? "fill-amber-400 text-amber-400"
+                                  : "text-slate-300"
+                              }`}
+                            />
+                          ))}
+                        </div>
+                        {review.title && (
+                          <h5 className="text-xs font-black text-slate-900">{review.title}</h5>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-[11px] text-slate-500">
+                        <span className="font-bold text-slate-700">{review.buyer_name}</span>
+                        <span>&bull;</span>
+                        <span>{new Date(review.created_at).toLocaleDateString()}</span>
+                        {review.vehicle_display && (
+                          <>
+                            <span>&bull;</span>
+                            <span className="px-2 py-0.5 rounded bg-slate-100 font-mono text-[10px] text-slate-700 font-bold">
+                              {review.vehicle_display}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {review.is_verified_service && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 text-[10px] font-bold border border-emerald-200 shrink-0">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        Verified Service
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-line">
+                    {review.comment}
+                  </p>
+
+                  {/* Dimensional breakdown badges if present */}
+                  {(review.communication_rating || review.workmanship_rating || review.pricing_transparency_rating) && (
+                    <div className="flex flex-wrap gap-2 pt-1 border-t border-slate-100 text-[10px] text-slate-500">
+                      {review.communication_rating && (
+                        <span>Communication: <strong className="text-slate-700">{review.communication_rating}/5</strong></span>
+                      )}
+                      {review.workmanship_rating && (
+                        <span>Workmanship: <strong className="text-slate-700">{review.workmanship_rating}/5</strong></span>
+                      )}
+                      {review.pricing_transparency_rating && (
+                        <span>Pricing: <strong className="text-slate-700">{review.pricing_transparency_rating}/5</strong></span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Official Workshop Response if present */}
+                  {review.workshop_reply && (
+                    <div className="mt-3 p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                          <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
+                          Official Response from {review.workshop_name}
+                        </span>
+                        {review.workshop_reply_at && (
+                          <span className="text-[10px] text-slate-500">
+                            {new Date(review.workshop_reply_at).toLocaleDateString()}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-700 leading-relaxed italic">
+                        &ldquo;{review.workshop_reply}&rdquo;
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setReviewsDrawerOpen(false)}
+                className="px-5 py-2.5 bg-slate-950 hover:bg-slate-900 text-white font-bold text-xs rounded-xl"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deposit Payment Modal */}
+      {depositModalOpen && targetQuotationForDeposit && targetBookingForDeposit && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 space-y-5 animate-in fade-in zoom-in duration-200">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-600">
+                  <CreditCard className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-black text-slate-900">
+                      Workshop Quotation Deposit
+                    </h3>
+                    {/* Explicit UI State Badges */}
+                    {depositUIState === "initiated" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200 flex items-center gap-1">
+                        <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Payment initiated
+                      </span>
+                    )}
+                    {depositUIState === "processing" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1">
+                        <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Processing
+                      </span>
+                    )}
+                    {depositUIState === "paid_and_verified" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                        <CheckCircle2 className="w-2.5 h-2.5" /> Paid and verified
+                      </span>
+                    )}
+                    {depositUIState === "failed" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1">
+                        <AlertCircle className="w-2.5 h-2.5" /> Payment failed
+                      </span>
+                    )}
+                    {depositUIState === "cancelled" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300 flex items-center gap-1">
+                        <AlertTriangle className="w-2.5 h-2.5" /> Payment cancelled
+                      </span>
+                    )}
+                    {depositUIState === "required" && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1">
+                        <Lock className="w-2.5 h-2.5" /> Payment required
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Booking: {targetBookingForDeposit.booking_number} • Quote: #{targetQuotationForDeposit.quotation_number}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (depositUIState !== "processing") {
+                    setDepositModalOpen(false);
+                    setDepositUIState("required");
+                    setDepositError(null);
+                    setDepositSuccess(null);
+                  }
+                }}
+                disabled={depositUIState === "processing"}
+                className="p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 disabled:opacity-30 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body: State-specific renderings */}
+            {depositUIState === "paid_and_verified" ? (
+              <div className="py-6 text-center space-y-4">
+                <div className="w-14 h-14 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
+                <div>
+                  <h4 className="text-base font-black text-slate-900">Deposit Paid &amp; Verified!</h4>
+                  <p className="text-xs text-slate-600 max-w-sm mx-auto mt-1">
+                    {depositSuccess || `Your quotation has been accepted and your workshop appointment is confirmed. Work Order has been generated for ${targetBookingForDeposit.workshop_name}.`}
+                  </p>
+                </div>
+                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 max-w-xs mx-auto text-xs text-emerald-900 font-mono">
+                  Amount Paid: {targetQuotationForDeposit.currency} {targetQuotationForDeposit.deposit_amount}
+                </div>
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDepositModalOpen(false);
+                      setDepositUIState("required");
+                    }}
+                    className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl"
+                  >
+                    Done • View Booking
+                  </button>
+                </div>
+              </div>
+            ) : depositUIState === "processing" ? (
+              <div className="py-10 text-center space-y-3">
+                <RefreshCw className="w-9 h-9 animate-spin mx-auto text-amber-500" />
+                <div>
+                  <h4 className="text-sm font-black text-slate-900">Processing &amp; Verifying Payment...</h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Authoritatively validating cryptographic payment signature and confirming booking with the server.
+                  </p>
+                </div>
+                <p className="text-[11px] text-amber-700 bg-amber-50 rounded-lg p-2 max-w-sm mx-auto font-medium">
+                  Please do not close or reload this page while verification completes.
+                </p>
+              </div>
+            ) : depositUIState === "failed" ? (
+              <div className="space-y-4">
+                <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5">
+                  <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block text-sm">Payment Verification Failed</span>
+                    <span className="mt-0.5 block">{depositError || "Payment could not be verified by the gateway or was declined."}</span>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDepositModalOpen(false);
+                      setDepositUIState("required");
+                    }}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openDepositModal(targetBookingForDeposit, targetQuotationForDeposit)}
+                    className="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs rounded-xl"
+                  >
+                    Retry Payment
+                  </button>
+                </div>
+              </div>
+            ) : depositUIState === "cancelled" ? (
+              <div className="space-y-4">
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-slate-800 text-xs flex items-start gap-2.5">
+                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block text-sm">Payment Checkout Cancelled</span>
+                    <span className="mt-0.5 block">{depositError || "Checkout was cancelled or dismissed. Your quotation remains pending deposit and can be resumed at any time."}</span>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDepositModalOpen(false);
+                      setDepositUIState("required");
+                    }}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openDepositModal(targetBookingForDeposit, targetQuotationForDeposit)}
+                    className="px-5 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs rounded-xl"
+                  >
+                    Resume Payment
+                  </button>
+                </div>
+              </div>
+            ) : depositLoading ? (
+              <div className="py-12 text-center space-y-3">
+                <RefreshCw className="w-8 h-8 animate-spin mx-auto text-amber-500" />
+                <p className="text-sm font-bold text-slate-600">
+                  Connecting to secure payment gateway...
+                </p>
+                <p className="text-xs text-slate-400">
+                  Initializing order session and cryptographic token
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Financial Breakdown Card */}
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2.5">
+                  <div className="flex justify-between text-xs text-slate-600">
+                    <span>Workshop Partner:</span>
+                    <span className="font-bold text-slate-900">{targetBookingForDeposit.workshop_name}</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-slate-600">
+                    <span>Total Service Quotation:</span>
+                    <span className="font-medium">
+                      {targetQuotationForDeposit.currency} {targetQuotationForDeposit.total_amount}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-xs text-amber-700 font-bold pt-1 border-t border-slate-200">
+                    <span>Required Upfront Deposit ({targetQuotationForDeposit.deposit_percentage}%):</span>
+                    <span className="text-sm font-black text-amber-600">
+                      {targetQuotationForDeposit.currency} {targetQuotationForDeposit.deposit_amount}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-xs text-slate-500">
+                    <span>Balance Due Upon Completion:</span>
+                    <span>
+                      {targetQuotationForDeposit.currency}{" "}
+                      {(
+                        parseFloat(targetQuotationForDeposit.total_amount) -
+                        parseFloat(targetQuotationForDeposit.deposit_amount || "0")
+                      ).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Gateway Provider & Security Notice */}
+                <div className="p-3 bg-slate-100 rounded-xl space-y-1.5 text-xs text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1.5 font-bold text-slate-800">
+                      <Lock className="w-3.5 h-3.5 text-emerald-600" />
+                      Payment Gateway:
+                    </span>
+                    <span className="font-mono text-[11px] font-bold text-slate-700 uppercase">
+                      {depositSession?.payment_session?.provider || targetQuotationForDeposit.deposit_provider || (targetQuotationForDeposit.currency === "GBP" ? "STRIPE" : "RAZORPAY")}
+                    </span>
+                  </div>
+                  {depositSession?.payment_session?.provider_order_id && (
+                    <div className="text-[11px] font-mono text-slate-500 truncate">
+                      Gateway Order: {depositSession.payment_session.provider_order_id}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1.5 text-[11px] text-slate-500 pt-1 border-t border-slate-200">
+                    <Shield className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>Authoritative HMAC cryptographic signature verification guarantees anti-tamper security.</span>
+                  </div>
+                </div>
+
+                {/* Guidance notice */}
+                <p className="text-xs text-slate-500 text-center">
+                  {(depositSession?.payment_session?.provider || (targetQuotationForDeposit.currency === "GBP" ? "STRIPE" : "RAZORPAY")).toUpperCase() === "STRIPE"
+                    ? "Click below to confirm your deposit via Stripe UK test gateway."
+                    : "Click below to open the secure Razorpay Checkout window and complete your deposit."}
+                </p>
+
+                {/* Actions */}
+                <div className="flex justify-end items-center gap-2.5 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDepositModalOpen(false);
+                      setDepositUIState("required");
+                    }}
+                    className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmDepositPayment}
+                    className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl transition-all shadow-md flex items-center gap-2"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>
+                      Confirm &amp; Pay Deposit ({targetQuotationForDeposit.currency}{" "}
+                      {targetQuotationForDeposit.deposit_amount})
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {/* ========================================================================= */}
+      {/* MODAL: WORKSHOP MESSAGING / REAL-TIME CHAT */}
+      {/* ========================================================================= */}
+      {chatModalOpen && targetBookingForChat && (
+        <WorkshopChatModal
+          booking={targetBookingForChat}
+          onClose={() => {
+            setChatModalOpen(false);
+            setTargetBookingForChat(null);
+          }}
+          currentUserId={user?.id}
+        />
       )}
     </div>
   );

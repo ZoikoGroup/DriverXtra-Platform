@@ -44,3 +44,20 @@ class BasePaymentProvider(ABC):
         Returns (is_valid, event_id, event_type, payload).
         """
         pass
+
+    @abstractmethod
+    def issue_refund(
+        self,
+        payment_reference: str,
+        amount: Any,
+        currency: str,
+        reason: str = '',
+        refund_number: str = '',
+        notes: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Initiates or registers an authentic refund with the gateway provider.
+        Returns (is_success, gateway_refund_id_or_error, extra_details).
+        """
+        pass
+

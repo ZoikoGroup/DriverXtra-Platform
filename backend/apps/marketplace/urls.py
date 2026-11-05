@@ -72,6 +72,9 @@ from apps.marketplace.views import (
     AdminOrderRefundCreateView,
     AdminRefundListView,
     AdminRefundProcessView,
+    AdminRefundApproveView,
+    AdminRefundRejectView,
+    BuyerRefundListView,
     AdminDisputeListView,
     AdminDisputeStatusUpdateView,
     BuyerOrderReviewEligibilityView,
@@ -206,7 +209,10 @@ urlpatterns = [
     path('orders/<str:identifier>/refund-summary/', OrderRefundSummaryView.as_view(), name='marketplace-order-refund-summary'),
     path('admin/orders/<str:identifier>/refund/', AdminOrderRefundCreateView.as_view(), name='marketplace-admin-order-refund'),
     path('admin/refunds/<str:identifier>/process/', AdminRefundProcessView.as_view(), name='marketplace-admin-refund-process'),
+    path('admin/refunds/<str:identifier>/approve/', AdminRefundApproveView.as_view(), name='marketplace-admin-refund-approve'),
+    path('admin/refunds/<str:identifier>/reject/', AdminRefundRejectView.as_view(), name='marketplace-admin-refund-reject'),
     path('admin/refunds/', AdminRefundListView.as_view(), name='marketplace-admin-refunds-list'),
+    path('buyer/refunds/', BuyerRefundListView.as_view(), name='marketplace-buyer-refunds-list'),
 
     # 12. Reviews, Ratings & Seller Reputation (Phase 5 Task 4)
     path('browse/parts/<uuid:id>/reviews/', MarketplacePartReviewsView.as_view(), name='marketplace-part-reviews'),
