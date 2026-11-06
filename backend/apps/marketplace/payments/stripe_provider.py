@@ -305,3 +305,102 @@ class StripePaymentProvider(BasePaymentProvider):
         event_type = payload.get('type', '')
 
         return True, event_id, event_type, payload
+
+    def issue_refund(
+        self,
+        payment_reference: str,
+        amount: Any,
+        currency: str,
+        reason: str = '',
+        refund_number: str = '',
+        notes: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Issues an authentic refund via Stripe Refunds API.
+        POST https://api.stripe.com/v1/refunds
+        Falls back to deterministic test mode when test_mode is enabled.
+        """
+        if str(currency).strip().upper() != 'GBP':
+            return False, f"Stripe UK provider only supports GBP refunds; received '{currency}'.", {}
+
+        try:
+            amount_pence = self._to_pence(Decimal(str(amount)))
+        except Exception:
+            return False, f"Invalid refund amount '{amount}'.", {}
+
+        if amount_pence <= 0:
+            return False, "Refund amount must be greater than zero.", {}
+
+        payment_id = (payment_reference or '').strip()
+        if not payment_id:
+            return False, "Missing payment_reference for Stripe refund dispatch.", {}
+
+        # Live / Sandbox Stripe API call
+        if self.is_configured and not getattr(settings, 'IS_TESTING', False):
+            url = "https://api.stripe.com/v1/refunds"
+            params = {
+                "amount": str(amount_pence),
+                "payment_intent": payment_id,
+                "reason": "requested_by_customer",
+            }
+            if refund_number:
+                params["metadata[refund_number]"] = str(refund_number)
+            if reason:
+                params["metadata[reason_detail]"] = str(reason)[:255]
+            if notes:
+                for k, v in notes.items():
+                    params[f"metadata[{k}]"] = str(v)[:255]
+
+            encoded_data = urllib.parse.urlencode(params).encode('utf-8')
+            idempotency_key = refund_number or f"idemp_{uuid.uuid4().hex}"
+            req = urllib.request.Request(
+                url,
+                data=encoded_data,
+                headers={
+                    "Authorization": f"Bearer {self.secret_key}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "DriverXtra-Platform/1.0",
+                    "Idempotency-Key": idempotency_key,
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    stripe_data = json.loads(resp.read().decode('utf-8'))
+                    re_id = stripe_data.get('id')
+                    logger.info("Successfully dispatched Stripe refund %s for payment %s", re_id, payment_id)
+                    return True, re_id, stripe_data
+            except urllib.error.HTTPError as http_err:
+                err_text = http_err.read().decode('utf-8', errors='replace')
+                logger.error("Stripe Refund API error HTTP %s: %s", http_err.code, err_text)
+                if not getattr(settings, 'IS_TESTING', False):
+                    return False, f"Stripe Refund API error (HTTP {http_err.code}): {err_text}", {"http_code": http_err.code}
+                logger.warning("Falling back to deterministic test refund in IS_TESTING environment.")
+            except Exception as exc:
+                logger.error("Failed to connect to Stripe Refund API: %s", str(exc))
+                if not getattr(settings, 'IS_TESTING', False):
+                    return False, f"Failed to connect to Stripe Refund API: {str(exc)}", {}
+                logger.warning("Falling back to deterministic test refund in IS_TESTING environment.")
+
+        # Test mode fallback for isolated test suites or development
+        if self.test_mode:
+            re_id = f"re_test_{uuid.uuid4().hex[:18]}"
+            metadata = {
+                "refund_number": refund_number,
+                "reason": reason,
+            }
+            if notes:
+                metadata.update(notes)
+
+            return True, re_id, {
+                "id": re_id,
+                "object": "refund",
+                "amount": amount_pence,
+                "currency": "gbp",
+                "payment_intent": payment_id,
+                "status": "succeeded",
+                "metadata": metadata,
+                "test_mode": True,
+            }
+
+        return False, "Live Stripe refunds require configured credentials (STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY).", {}

@@ -4156,6 +4156,7 @@ class OrderRefundSummaryView(views.APIView):
             return Response({"error": "Permission denied to inspect refund summary."}, status=status.HTTP_403_FORBIDDEN)
 
         summary = RefundService.get_order_refund_summary(order)
+        summary["refunds"] = RefundSerializer(order.refunds.all().order_by('-created_at'), many=True).data
         return Response(summary, status=status.HTTP_200_OK)
 
 
@@ -4257,6 +4258,84 @@ class AdminRefundProcessView(views.APIView):
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
             return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminRefundApproveView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/refunds/<identifier>/approve/
+    Staff or Admin approves a pending refund and triggers gateway refund dispatch or manual settlement.
+    Requires 'order.refund' permission.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        refund = _resolve_refund_by_identifier(identifier)
+        if not refund:
+            return Response({"error": "Refund not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        notes = request.data.get('notes', '')
+        try:
+            approved = RefundService.approve_refund(
+                refund=refund,
+                actor=request.user,
+                notes=notes,
+            )
+            return Response({
+                "status": "success",
+                "message": f"Refund {approved.refund_number} approved and status updated to {approved.status}.",
+                "refund": RefundSerializer(approved).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminRefundRejectView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/refunds/<identifier>/reject/
+    Staff or Admin rejects a refund request, recording cancellation and failure reason.
+    Requires 'order.refund' permission.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, identifier):
+        refund = _resolve_refund_by_identifier(identifier)
+        if not refund:
+            return Response({"error": "Refund not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reason = request.data.get('reason', '')
+        if not reason:
+            return Response({"error": "A rejection reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            rejected = RefundService.reject_refund(
+                refund=refund,
+                actor=request.user,
+                reason=reason,
+            )
+            return Response({
+                "status": "success",
+                "message": f"Refund {rejected.refund_number} rejected.",
+                "refund": RefundSerializer(rejected).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BuyerRefundListView(generics.ListAPIView):
+    """
+    GET /api/v1/marketplace/buyer/refunds/
+    Lists all refunds for orders placed by the authenticated buyer.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = RefundSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = Refund.objects.filter(order__buyer=user).select_related('order', 'return_request', 'dispute', 'created_by', 'approved_by')
+        st = self.request.query_params.get('status')
+        if st:
+            qs = qs.filter(status=st.strip().upper())
+        return qs
 
 
 class AdminDisputeListView(generics.ListAPIView):

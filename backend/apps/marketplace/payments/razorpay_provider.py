@@ -404,3 +404,96 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         event_id = payload.get('event_id') or f"rzp_evt_{hashlib.sha256(request_body).hexdigest()[:20]}"
 
         return True, event_id, event_type, payload
+
+    def issue_refund(
+        self,
+        payment_reference: str,
+        amount: Any,
+        currency: str,
+        reason: str = '',
+        refund_number: str = '',
+        notes: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Issues an authentic refund via Razorpay Refunds API.
+        POST https://api.razorpay.com/v1/payments/{payment_id}/refund
+        Falls back to deterministic test mode when test_mode is enabled.
+        """
+        if str(currency).strip().upper() != 'INR':
+            return False, f"Razorpay provider only supports INR refunds; received '{currency}'.", {}
+
+        try:
+            amount_paise = self._to_paise(Decimal(str(amount)))
+        except Exception:
+            return False, f"Invalid refund amount '{amount}'.", {}
+
+        if amount_paise <= 0:
+            return False, "Refund amount must be greater than zero.", {}
+
+        payment_id = (payment_reference or '').strip()
+        if not payment_id:
+            return False, "Missing payment_reference for Razorpay refund dispatch.", {}
+
+        notes_payload = {str(k): str(v) for k, v in (notes or {}).items()}
+        if refund_number:
+            notes_payload["refund_number"] = str(refund_number)
+        if reason:
+            notes_payload["reason"] = str(reason)[:255]
+
+        # Live / Sandbox Razorpay API call
+        if self.is_configured and not getattr(settings, 'IS_TESTING', False):
+            refund_url = f"{self.api_url}/payments/{payment_id}/refund"
+            payload_data = {
+                "amount": amount_paise,
+                "speed": "normal",
+                "receipt": refund_number or f"rcpt_{uuid.uuid4().hex[:8]}",
+                "notes": notes_payload,
+            }
+            body_bytes = json.dumps(payload_data).encode('utf-8')
+            auth_str = f"{self.key_id}:{self.key_secret}"
+            auth_header = base64.b64encode(auth_str.encode('utf-8')).decode('ascii')
+
+            req = urllib.request.Request(
+                refund_url,
+                data=body_bytes,
+                headers={
+                    "Authorization": f"Basic {auth_header}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "DriverXtra-Platform/1.0",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    raw_json = json.loads(response.read().decode('utf-8'))
+                    rfnd_id = raw_json.get('id')
+                    logger.info("Successfully dispatched Razorpay refund %s for payment %s", rfnd_id, payment_id)
+                    return True, rfnd_id, raw_json
+            except urllib.error.HTTPError as http_err:
+                err_text = http_err.read().decode('utf-8', errors='replace')
+                logger.error("Razorpay Refund API error HTTP %s: %s", http_err.code, err_text)
+                if not getattr(settings, 'IS_TESTING', False):
+                    return False, f"Razorpay Refund API error (HTTP {http_err.code}): {err_text}", {"http_code": http_err.code}
+                logger.warning("Falling back to deterministic test refund in IS_TESTING environment.")
+            except Exception as exc:
+                logger.error("Failed to connect to Razorpay Refund API: %s", str(exc))
+                if not getattr(settings, 'IS_TESTING', False):
+                    return False, f"Failed to connect to Razorpay Refund API: {str(exc)}", {}
+                logger.warning("Falling back to deterministic test refund in IS_TESTING environment.")
+
+        # Test mode fallback for isolated test suites or development
+        if self.test_mode:
+            rfnd_id = f"rfnd_test_{uuid.uuid4().hex[:14]}"
+            return True, rfnd_id, {
+                "id": rfnd_id,
+                "entity": "refund",
+                "amount": amount_paise,
+                "currency": "INR",
+                "payment_id": payment_id,
+                "status": "processed",
+                "receipt": refund_number,
+                "notes": notes_payload,
+                "test_mode": True,
+            }
+
+        return False, "Live Razorpay refunds require configured credentials (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET).", {}

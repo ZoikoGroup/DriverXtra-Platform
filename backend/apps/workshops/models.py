@@ -41,12 +41,29 @@ class QuotationStatusChoices(models.TextChoices):
     EXPIRED = 'EXPIRED', 'Expired'
 
 
+class DepositStatusChoices(models.TextChoices):
+    NOT_REQUIRED = 'NOT_REQUIRED', 'Not Required'
+    PENDING = 'PENDING', 'Pending Payment'
+    PROCESSING = 'PROCESSING', 'Processing'
+    PAID = 'PAID', 'Deposit Paid'
+    FAILED = 'FAILED', 'Payment Failed'
+    REFUNDED = 'REFUNDED', 'Refunded'
+
+
 class LineItemTypeChoices(models.TextChoices):
     LABOUR = 'LABOUR', 'Labour'
     PART = 'PART', 'Spare Part'
     DIAGNOSTIC = 'DIAGNOSTIC', 'Diagnostics'
     DISPOSAL = 'DISPOSAL', 'Disposal & Environmental Fee'
     OTHER = 'OTHER', 'Other Charge'
+
+
+class ReviewStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Moderation'
+    APPROVED = 'APPROVED', 'Approved / Published'
+    FLAGGED = 'FLAGGED', 'Flagged for Review'
+    REJECTED = 'REJECTED', 'Rejected / Hidden'
+
 
 
 def generate_booking_number() -> str:
@@ -158,6 +175,19 @@ class WorkshopProfile(BaseUUIDModel):
         default=Decimal('0.00'),
         validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))],
         help_text="Default tax percentage rate for this workshop (e.g. 20.00 for 20% VAT, or 0.00 if exempt/unregistered).",
+    )
+
+    # Deposit configuration
+    requires_deposit = models.BooleanField(
+        default=False,
+        help_text="Whether this workshop mandates an upfront deposit payment before confirming quotations and issuing work orders.",
+    )
+    default_deposit_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))],
+        help_text="Default deposit percentage required for quotations (e.g. 20.00 for 20%).",
     )
 
     class Meta:
@@ -641,6 +671,38 @@ class WorkshopQuotation(BaseUUIDModel):
         help_text="Immutable statutory tax calculation snapshot (document type, rates, components, legal citations).",
     )
 
+    # Deposit Requirements & Payment State
+    requires_deposit = models.BooleanField(
+        default=False,
+        help_text="Whether this quotation requires an upfront deposit payment before customer acceptance.",
+    )
+    deposit_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))],
+        help_text="Configured deposit percentage (e.g. 20.00 for 20%).",
+    )
+    deposit_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+        help_text="Calculated or explicitly specified deposit amount.",
+    )
+    deposit_status = models.CharField(
+        max_length=30,
+        choices=DepositStatusChoices.choices,
+        default=DepositStatusChoices.NOT_REQUIRED,
+        db_index=True,
+    )
+    deposit_paid_at = models.DateTimeField(null=True, blank=True)
+    deposit_provider = models.CharField(max_length=50, blank=True, default='RAZORPAY')
+    deposit_transaction_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    deposit_order_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    deposit_signature = models.CharField(max_length=255, blank=True, default='')
+    deposit_idempotency_key = models.CharField(max_length=100, blank=True, default='', db_index=True)
+
     # Terms and Notes
     valid_until = models.DateField(null=True, blank=True)
     workshop_notes = models.TextField(blank=True)
@@ -666,6 +728,7 @@ class WorkshopQuotation(BaseUUIDModel):
         indexes = [
             models.Index(fields=['booking', 'status']),
             models.Index(fields=['status']),
+            models.Index(fields=['deposit_status']),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -731,7 +794,8 @@ class WorkshopQuotation(BaseUUIDModel):
                         'subtotal_labour', 'subtotal_parts', 'subtotal_other',
                         'discount_amount', 'tax_rate_percent', 'tax_amount',
                         'total_amount', 'currency', 'version', 'booking_id',
-                        'tax_breakdown'
+                        'tax_breakdown', 'requires_deposit', 'deposit_percentage',
+                        'deposit_amount',
                     ]
                     for field in immutable_fields:
                         if getattr(self, field) != getattr(db_instance, field):
@@ -740,6 +804,20 @@ class WorkshopQuotation(BaseUUIDModel):
                             )
             except WorkshopQuotation.DoesNotExist:
                 pass
+
+        # Deposit validation
+        if self.requires_deposit:
+            if self.deposit_amount < Decimal('0.00'):
+                raise ValidationError({'deposit_amount': "Deposit amount cannot be negative."})
+            if self.total_amount > Decimal('0.00') and self.deposit_amount > self.total_amount:
+                raise ValidationError({
+                    'deposit_amount': f"Deposit amount ({self.currency} {self.deposit_amount}) cannot exceed total quotation amount ({self.currency} {self.total_amount})."
+                })
+        else:
+            self.deposit_amount = Decimal('0.00')
+            self.deposit_percentage = Decimal('0.00')
+            if self.deposit_status != DepositStatusChoices.PAID:
+                self.deposit_status = DepositStatusChoices.NOT_REQUIRED
 
     def recalculate_totals(self, commit=False):
         """
@@ -862,8 +940,22 @@ class WorkshopQuotation(BaseUUIDModel):
                 self.tax_amount = (net_subtotal * tax_mult).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
                 self.total_amount = (net_subtotal + self.tax_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
+        # Deposit recalculation
+        if self.requires_deposit:
+            if self.deposit_percentage > Decimal('0.00'):
+                self.deposit_amount = (self.total_amount * (self.deposit_percentage / Decimal('100.00'))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif self.deposit_amount > self.total_amount:
+                self.deposit_amount = self.total_amount
+        else:
+            self.deposit_amount = Decimal('0.00')
+            self.deposit_percentage = Decimal('0.00')
+
         if commit:
-            self.save(update_fields=['subtotal_labour', 'subtotal_parts', 'subtotal_other', 'tax_amount', 'total_amount', 'tax_rate_percent', 'tax_breakdown', 'updated_at'])
+            self.save(update_fields=[
+                'subtotal_labour', 'subtotal_parts', 'subtotal_other', 'tax_amount',
+                'total_amount', 'tax_rate_percent', 'tax_breakdown', 'requires_deposit',
+                'deposit_percentage', 'deposit_amount', 'deposit_status', 'updated_at'
+            ])
 
     def save(self, *args, **kwargs):
         if not self.quotation_number:
@@ -1226,6 +1318,19 @@ class WorkOrderPartUsage(BaseUUIDModel):
         null=True,
         blank=True,
         related_name='recorded_part_usages',
+    )
+    inventory_item = models.ForeignKey(
+        'marketplace.SparePartListing',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='work_order_usages',
+        help_text="Workshop inventory listing from which stock is decremented.",
+    )
+    is_stock_deducted = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Flag indicating whether inventory stock was deducted for this usage.",
     )
 
     class Meta:
@@ -1669,3 +1774,244 @@ class ChangeOrderLineItem(BaseUUIDModel):
         if self.change_order_id and self.change_order.status in (ChangeOrderStatusChoices.APPROVED, ChangeOrderStatusChoices.REJECTED):
             raise ValidationError("Cannot delete line items from a resolved change order.")
         super().delete(*args, **kwargs)
+
+
+class WorkshopReview(BaseUUIDModel):
+    """
+    Verified customer rating and review for a completed WorkshopBooking / WorkOrder.
+    Enforces strictly 1 review per booking at the database level via OneToOneField.
+    """
+    workshop = models.ForeignKey(
+        'workshops.WorkshopProfile',
+        on_delete=models.PROTECT,
+        related_name='reviews',
+        db_index=True,
+        help_text="The reviewed workshop service centre.",
+    )
+    booking = models.OneToOneField(
+        'workshops.WorkshopBooking',
+        on_delete=models.PROTECT,
+        related_name='review',
+        help_text="The completed booking. Exactly one review per service.",
+    )
+    work_order = models.OneToOneField(
+        'workshops.WorkOrder',
+        on_delete=models.PROTECT,
+        related_name='review',
+        help_text="The completed work order verifying execution.",
+    )
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='workshop_reviews',
+        help_text="The verified customer submitting the feedback.",
+    )
+    rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="Overall workshop experience rating (1 to 5 stars).",
+    )
+    communication_rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        null=True,
+        blank=True,
+        help_text="Rating for customer service and communication (1-5).",
+    )
+    workmanship_rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        null=True,
+        blank=True,
+        help_text="Rating for quality of repair and technical execution (1-5).",
+    )
+    pricing_transparency_rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        null=True,
+        blank=True,
+        help_text="Rating for estimate accuracy and transparent billing (1-5).",
+    )
+    title = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="Short headline summary of the review.",
+    )
+    comment = models.TextField(
+        help_text="Detailed written feedback regarding the workshop experience.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ReviewStatusChoices.choices,
+        default=ReviewStatusChoices.APPROVED,
+        db_index=True,
+    )
+    is_verified_service = models.BooleanField(
+        default=True,
+        help_text="Affirms review is tied to a verified completed WorkOrder.",
+    )
+    workshop_reply = models.TextField(
+        blank=True,
+        default='',
+        help_text="Public response from the workshop owner or staff.",
+    )
+    workshop_reply_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the workshop posted their reply.",
+    )
+    workshop_replied_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='replied_workshop_reviews',
+        help_text="Workshop staff user who posted the reply.",
+    )
+    helpful_votes = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of community members who found this review helpful.",
+    )
+
+    class Meta:
+        verbose_name = 'Workshop Review'
+        verbose_name_plural = 'Workshop Reviews'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workshop', 'status', '-created_at']),
+            models.Index(fields=['buyer', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Review ({self.rating}★) for {self.workshop.business_name} by {self.buyer.email}"
+
+    def clean(self):
+        super().clean()
+        if self.booking_id and self.work_order_id:
+            if self.work_order.booking_id != self.booking_id:
+                raise ValidationError("Work order does not belong to this booking.")
+        if self.booking_id and self.workshop_id:
+            if self.booking.workshop_id != self.workshop_id:
+                raise ValidationError("Booking does not belong to this workshop.")
+        if self.work_order_id and self.workshop_id:
+            if self.work_order.workshop_id != self.workshop_id:
+                raise ValidationError("Work order does not belong to this workshop.")
+        if self.booking_id and self.buyer_id:
+            if self.booking.buyer_id != self.buyer_id:
+                raise ValidationError("Buyer does not match the booking customer.")
+
+
+class WorkshopDepositWebhookEvent(BaseUUIDModel):
+    """
+    Authoritative audit record of incoming payment gateway webhooks (e.g. Razorpay/Stripe)
+    for workshop quotation deposits. Guarantees idempotent event processing and replay protection.
+    """
+    event_id = models.CharField(max_length=255, unique=True, db_index=True)
+    provider = models.CharField(max_length=50, default='RAZORPAY')
+    event_type = models.CharField(max_length=100)
+    quotation = models.ForeignKey(
+        WorkshopQuotation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='deposit_webhook_events',
+    )
+    processed = models.BooleanField(default=False, db_index=True)
+    payload = models.JSONField(default=dict)
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = 'Workshop Deposit Webhook Event'
+        verbose_name_plural = 'Workshop Deposit Webhook Events'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.provider}:{self.event_type} [{self.event_id}] - Processed: {self.processed}"
+
+
+class SenderTypeChoices(models.TextChoices):
+    BUYER = 'BUYER', 'Buyer'
+    WORKSHOP = 'WORKSHOP', 'Workshop'
+    SYSTEM = 'SYSTEM', 'System'
+
+
+class WorkshopConversation(BaseUUIDModel):
+    """
+    A persistent conversation thread linked to a specific WorkshopBooking
+    between the vehicle owner (buyer) and the workshop staff.
+    """
+    booking = models.OneToOneField(
+        WorkshopBooking,
+        on_delete=models.CASCADE,
+        related_name='conversation',
+    )
+    workshop = models.ForeignKey(
+        WorkshopProfile,
+        on_delete=models.CASCADE,
+        related_name='conversations',
+    )
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='workshop_conversations',
+    )
+    last_message_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        verbose_name = 'Workshop Conversation'
+        verbose_name_plural = 'Workshop Conversations'
+        ordering = ['-last_message_at']
+        indexes = [
+            models.Index(fields=['workshop', '-last_message_at']),
+            models.Index(fields=['buyer', '-last_message_at']),
+        ]
+
+    def __str__(self):
+        booking_no = getattr(self.booking, 'booking_number', str(self.booking_id))
+        return f"Conversation for Booking {booking_no}"
+
+    def clean(self):
+        super().clean()
+        if self.booking_id and self.workshop_id:
+            if self.booking.workshop_id != self.workshop_id:
+                raise ValidationError("Workshop must match booking workshop.")
+        if self.booking_id and self.buyer_id:
+            if self.booking.buyer_id != self.buyer_id:
+                raise ValidationError("Buyer must match booking buyer.")
+
+
+class WorkshopMessage(BaseUUIDModel):
+    """
+    An individual message in a WorkshopConversation, persisted in PostgreSQL.
+    """
+    conversation = models.ForeignKey(
+        WorkshopConversation,
+        on_delete=models.CASCADE,
+        related_name='messages',
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='workshop_sent_messages',
+    )
+    sender_type = models.CharField(
+        max_length=20,
+        choices=SenderTypeChoices.choices,
+        default=SenderTypeChoices.BUYER,
+    )
+    content = models.TextField()
+    attachment_url = models.CharField(max_length=500, blank=True, default='')
+    is_read = models.BooleanField(default=False, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Workshop Message'
+        verbose_name_plural = 'Workshop Messages'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['conversation', 'created_at']),
+            models.Index(fields=['conversation', 'is_read']),
+        ]
+
+    def __str__(self):
+        return f"Msg {self.id} by {self.sender_id} [{self.sender_type}] in {self.conversation_id}"
+
+
+

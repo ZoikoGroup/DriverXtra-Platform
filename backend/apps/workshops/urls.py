@@ -8,6 +8,10 @@ from apps.workshops.views import (
     BuyerBookingCancelView,
     BuyerQuotationAcceptView,
     BuyerQuotationRejectView,
+    QuotationDepositSessionCreateView,
+    QuotationDepositVerifyView,
+    QuotationDepositDetailView,
+    QuotationDepositWebhookView,
     WorkshopProfileManageView,
     WorkshopOperatingHoursManageView,
     WorkshopServiceListCreateView,
@@ -37,6 +41,21 @@ from apps.workshops.views import (
     BuyerChangeOrderListView,
     BuyerChangeOrderApproveView,
     BuyerChangeOrderRejectView,
+    BuyerBookingReviewEligibilityView,
+    BuyerBookingReviewCreateView,
+    WorkshopReviewsListView,
+    WorkshopReviewReplyView,
+    AdminWorkshopReviewListView,
+    AdminWorkshopReviewModerationView,
+    BookingConversationDetailView,
+    WorkshopConversationListView,
+    ConversationMessageListCreateView,
+    ConversationMarkReadView,
+    TechnicianWorkOrderListView,
+    TechnicianWorkOrderDetailView,
+    TechnicianWorkOrderStatusUpdateView,
+    TechnicianWorkOrderTaskUpdateView,
+    TechnicianWorkOrderPartUsageView,
 )
 
 urlpatterns = [
@@ -54,6 +73,10 @@ urlpatterns = [
     path('quotations/<uuid:id>/', WorkshopQuotationDetailView.as_view(), name='workshop-quotation-detail'),
     path('quotations/<uuid:id>/accept/', BuyerQuotationAcceptView.as_view(), name='workshop-quotation-accept'),
     path('quotations/<uuid:id>/reject/', BuyerQuotationRejectView.as_view(), name='workshop-quotation-reject'),
+    path('quotations/<uuid:id>/deposit/create/', QuotationDepositSessionCreateView.as_view(), name='workshop-quotation-deposit-create'),
+    path('quotations/<uuid:id>/deposit/verify/', QuotationDepositVerifyView.as_view(), name='workshop-quotation-deposit-verify'),
+    path('quotations/<uuid:id>/deposit/', QuotationDepositDetailView.as_view(), name='workshop-quotation-deposit-detail'),
+    path('deposit/webhook/<str:provider>/', QuotationDepositWebhookView.as_view(), name='workshop-quotation-deposit-webhook'),
 
     # Workshop console & operational management
     path('manage/profile/', WorkshopProfileManageView.as_view(), name='workshop-manage-profile'),
@@ -78,6 +101,13 @@ urlpatterns = [
     path('manage/work-orders/<uuid:id>/parts/<uuid:part_id>/', WorkOrderPartUsageDetailView.as_view(), name='workshop-work-order-part-detail'),
     path('manage/technicians/', WorkshopTechnicianListView.as_view(), name='workshop-technicians-list'),
 
+    # Technician Mobile Workflow
+    path('technician/work-orders/', TechnicianWorkOrderListView.as_view(), name='workshop-technician-work-orders-list'),
+    path('technician/work-orders/<uuid:id>/', TechnicianWorkOrderDetailView.as_view(), name='workshop-technician-work-order-detail'),
+    path('technician/work-orders/<uuid:id>/status/', TechnicianWorkOrderStatusUpdateView.as_view(), name='workshop-technician-work-order-status-update'),
+    path('technician/work-orders/<uuid:id>/tasks/<uuid:task_id>/', TechnicianWorkOrderTaskUpdateView.as_view(), name='workshop-technician-work-order-task-update'),
+    path('technician/work-orders/<uuid:id>/parts/', TechnicianWorkOrderPartUsageView.as_view(), name='workshop-technician-work-order-parts'),
+
     # Buyer Work Order inspection
     path('bookings/my/<uuid:id>/work-order/', BuyerWorkOrderDetailView.as_view(), name='workshop-buyer-work-order'),
 
@@ -92,11 +122,25 @@ urlpatterns = [
     path('change-orders/<uuid:id>/approve/', BuyerChangeOrderApproveView.as_view(), name='workshop-change-order-approve'),
     path('change-orders/<uuid:id>/reject/', BuyerChangeOrderRejectView.as_view(), name='workshop-change-order-reject'),
 
+    # Customer reviews & ratings
+    path('bookings/<uuid:id>/review-eligibility/', BuyerBookingReviewEligibilityView.as_view(), name='workshop-booking-review-eligibility'),
+    path('bookings/<uuid:id>/review/', BuyerBookingReviewCreateView.as_view(), name='workshop-booking-review-create'),
+    path('manage/reviews/<uuid:id>/reply/', WorkshopReviewReplyView.as_view(), name='workshop-manage-review-reply'),
+
     # Platform administrator oversight
     path('admin/bookings/', AdminWorkshopBookingListView.as_view(), name='workshop-admin-bookings-list'),
+    path('admin/reviews/', AdminWorkshopReviewListView.as_view(), name='workshop-admin-reviews-list'),
+    path('admin/reviews/<uuid:id>/moderate/', AdminWorkshopReviewModerationView.as_view(), name='workshop-admin-review-moderate'),
     path('admin/<uuid:id>/tax-authorization/', AdminWorkshopTaxAuthorizationView.as_view(), name='workshop-admin-tax-authorization'),
 
-    # Workshop detail lookup by UUID or slug (placed last to prevent collision with reserved endpoints)
+    # Workshop Messaging & Conversations
+    path('bookings/<str:identifier>/conversation/', BookingConversationDetailView.as_view(), name='workshop-booking-conversation'),
+    path('conversations/', WorkshopConversationListView.as_view(), name='workshop-conversations-list'),
+    path('conversations/<uuid:id>/messages/', ConversationMessageListCreateView.as_view(), name='workshop-conversation-messages'),
+    path('conversations/<uuid:id>/read/', ConversationMarkReadView.as_view(), name='workshop-conversation-mark-read'),
+
+    # Public reviews & workshop detail lookup by UUID or slug (placed last to prevent collision with reserved endpoints)
+    path('<str:id_or_slug>/reviews/', WorkshopReviewsListView.as_view(), name='workshop-public-reviews'),
     path('<str:id_or_slug>/', WorkshopDetailPublicView.as_view(), name='workshop-public-detail'),
 ]
 

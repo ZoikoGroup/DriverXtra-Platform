@@ -500,6 +500,45 @@ def _return_completed(entry):
 def _refund_processed(entry):
     from apps.marketplace.models import Refund
 
+    refund = (
+        Refund.objects.select_related('order__buyer')
+        .prefetch_related('order__items__listing__seller')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if refund is None or not refund.order or not refund.order.buyer:
+        return []
+
+    specs = [
+        NotificationSpec(
+            recipient=refund.order.buyer,
+            title=f"Refund Processed: {refund.refund_number}",
+            message=f"A refund of {refund.currency} {refund.amount} for order {refund.order.order_number} has been processed via {refund.refund_method}.",
+            link=_tab_link('my_orders'),
+        )
+    ]
+
+    # Notify sellers associated with items on this order
+    notified_sellers = set()
+    for item in refund.order.items.all():
+        seller = getattr(getattr(item, 'listing', None), 'seller', None)
+        if seller and seller.id != refund.order.buyer_id and seller.id not in notified_sellers:
+            notified_sellers.add(seller.id)
+            specs.append(
+                NotificationSpec(
+                    recipient=seller,
+                    title=f"Refund Processed: {refund.refund_number}",
+                    message=f"A refund of {refund.currency} {refund.amount} for order {refund.order.order_number} has been processed ({refund.reason or 'customer refund'}).",
+                    link=_tab_link('seller_orders'),
+                )
+            )
+
+    return specs
+
+
+def _refund_created(entry):
+    from apps.marketplace.models import Refund
+
     refund = Refund.objects.select_related('order__buyer').filter(pk=entry.resource_id).first()
     if refund is None or not refund.order or not refund.order.buyer:
         return []
@@ -507,8 +546,44 @@ def _refund_processed(entry):
     return [
         NotificationSpec(
             recipient=refund.order.buyer,
-            title=f"Refund Processed: {refund.refund_number}",
-            message=f"A refund of {refund.currency} {refund.amount} for order {refund.order.order_number} has been processed via {refund.refund_method}.",
+            title=f"Refund Initiated: {refund.refund_number}",
+            message=f"A refund request of {refund.currency} {refund.amount} for order {refund.order.order_number} has been initiated and is awaiting processing.",
+            link=_tab_link('my_orders'),
+        )
+    ]
+
+
+def _refund_rejected(entry):
+    from apps.marketplace.models import Refund
+
+    refund = Refund.objects.select_related('order__buyer').filter(pk=entry.resource_id).first()
+    if refund is None or not refund.order or not refund.order.buyer:
+        return []
+
+    reason = refund.failure_reason or 'Refund request declined by operations.'
+    return [
+        NotificationSpec(
+            recipient=refund.order.buyer,
+            title=f"Refund Request Rejected: {refund.refund_number}",
+            message=_with_reason(f"Your refund request for order {refund.order.order_number} was not approved.", reason),
+            link=_tab_link('my_orders'),
+        )
+    ]
+
+
+def _refund_failed(entry):
+    from apps.marketplace.models import Refund
+
+    refund = Refund.objects.select_related('order__buyer').filter(pk=entry.resource_id).first()
+    if refund is None or not refund.order or not refund.order.buyer:
+        return []
+
+    reason = refund.failure_reason or 'Payment gateway declined refund transaction.'
+    return [
+        NotificationSpec(
+            recipient=refund.order.buyer,
+            title=f"Refund Failed: {refund.refund_number}",
+            message=f"A refund attempt of {refund.currency} {refund.amount} for order {refund.order.order_number} could not be completed. Reason: {reason}",
             link=_tab_link('my_orders'),
         )
     ]
@@ -719,7 +794,10 @@ EVENT_RESOLVERS = {
     'marketplace.return.approved': _return_decision,
     'marketplace.return.rejected': _return_decision,
     'marketplace.return.completed': _return_completed,
+    'marketplace.refund.created': _refund_created,
     'marketplace.refund.processed': _refund_processed,
+    'marketplace.refund.rejected': _refund_rejected,
+    'marketplace.refund.failed': _refund_failed,
 
     # Disputes
     'marketplace.dispute.created': _dispute_created,

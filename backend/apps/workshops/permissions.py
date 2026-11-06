@@ -15,6 +15,17 @@ def is_platform_admin_or_staff(user) -> bool:
     )
 
 
+def is_workshop_staff_or_admin(user, workshop) -> bool:
+    if not (user and user.is_authenticated and workshop):
+        return False
+    if is_platform_admin_or_staff(user):
+        return True
+    org = getattr(workshop, 'organisation', None)
+    if not org:
+        return False
+    return org.is_member(user)
+
+
 class IsWorkshopOwnerOrAdmin(permissions.BasePermission):
     """
     Grants access only to users who are active OWNER or ADMIN members of

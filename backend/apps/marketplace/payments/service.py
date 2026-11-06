@@ -4,7 +4,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from django.conf import settings
 from django.utils import timezone
 import datetime
-from django.db import transaction
+from django.db import models, transaction
 from apps.marketplace.models import (
     Order,
     OrderStatusChoices,
@@ -14,6 +14,8 @@ from apps.marketplace.models import (
     PaymentTransaction,
     PaymentWebhookEvent,
     StockMovementReasonChoices,
+    Refund,
+    RefundStatusChoices,
 )
 from apps.marketplace.services import adjust_stock
 from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
@@ -513,19 +515,33 @@ class PaymentService:
                 "replayed": True,
             }
 
-        # Locate associated order
+        # Locate associated order and refund
         order = None
         order_number = None
+        refund_obj = None
+        gateway_refund_id = None
 
         if p_name == 'RAZORPAY':
-            # Razorpay order payload inspection
+            # Razorpay order & refund payload inspection
             payload_data = payload.get('payload', {})
             order_entity = payload_data.get('order', {}).get('entity', {})
             payment_entity = payload_data.get('payment', {}).get('entity', {})
+            refund_entity = payload_data.get('refund', {}).get('entity', {})
+
+            if refund_entity:
+                gateway_refund_id = refund_entity.get('id')
+                rfnd_notes = refund_entity.get('notes', {}) or {}
+                order_number = rfnd_notes.get('order_number') or order_number
+                rfnd_num = rfnd_notes.get('refund_number')
+                if gateway_refund_id:
+                    refund_obj = Refund.objects.filter(gateway_refund_id=gateway_refund_id).first()
+                if not refund_obj and rfnd_num:
+                    refund_obj = Refund.objects.filter(refund_number=rfnd_num).first()
 
             razorpay_order_id = order_entity.get('id') or payment_entity.get('order_id')
             notes = order_entity.get('notes') or payment_entity.get('notes') or {}
-            order_number = notes.get('order_number')
+            if not order_number:
+                order_number = notes.get('order_number')
             order_id = notes.get('order_id')
 
             if order_number:
@@ -537,17 +553,47 @@ class PaymentService:
                     pass
             if not order and razorpay_order_id:
                 order = Order.objects.filter(payment_reference=razorpay_order_id).first()
+            if not order and refund_obj:
+                order = refund_obj.order
 
         elif p_name == 'STRIPE':
             data_obj = payload.get('data', {}).get('object', {})
-            metadata = data_obj.get('metadata', {})
-            order_number = metadata.get('order_number')
-            pi_id = data_obj.get('id')
+            obj_type = data_obj.get('object')
+
+            if obj_type == 'refund':
+                gateway_refund_id = data_obj.get('id')
+                rfnd_meta = data_obj.get('metadata', {}) or {}
+                rfnd_num = rfnd_meta.get('refund_number')
+                order_number = rfnd_meta.get('order_number')
+                pi_id = data_obj.get('payment_intent')
+                if gateway_refund_id:
+                    refund_obj = Refund.objects.filter(gateway_refund_id=gateway_refund_id).first()
+                if not refund_obj and rfnd_num:
+                    refund_obj = Refund.objects.filter(refund_number=rfnd_num).first()
+            elif obj_type == 'charge':
+                refunds_data = data_obj.get('refunds', {}).get('data', [])
+                if refunds_data:
+                    first_rfnd = refunds_data[0]
+                    gateway_refund_id = first_rfnd.get('id')
+                    rfnd_meta = first_rfnd.get('metadata', {}) or {}
+                    rfnd_num = rfnd_meta.get('refund_number')
+                    order_number = rfnd_meta.get('order_number')
+                    if gateway_refund_id:
+                        refund_obj = Refund.objects.filter(gateway_refund_id=gateway_refund_id).first()
+                    if not refund_obj and rfnd_num:
+                        refund_obj = Refund.objects.filter(refund_number=rfnd_num).first()
+                pi_id = data_obj.get('payment_intent')
+            else:
+                metadata = data_obj.get('metadata', {})
+                order_number = metadata.get('order_number')
+                pi_id = data_obj.get('id')
 
             if order_number:
                 order = Order.objects.filter(order_number=order_number).first()
             if not order and pi_id:
                 order = Order.objects.filter(payment_reference=pi_id).first()
+            if not order and refund_obj:
+                order = refund_obj.order
 
         settled_this_request = False
 
@@ -720,6 +766,125 @@ class PaymentService:
                         provider_order_id=locked_order.payment_reference,
                         raw_response=payload,
                     )
+
+            # Process Refund Events
+            elif event_type in (
+                'refund.processed',
+                'charge.refunded',
+                'refund.updated',
+                'refund.created',
+            ):
+                if not refund_obj and locked_order:
+                    refund_obj = locked_order.refunds.filter(
+                        status__in=[RefundStatusChoices.PENDING, RefundStatusChoices.PROCESSING]
+                    ).first()
+
+                if refund_obj:
+                    locked_rfnd = Refund.objects.select_for_update().get(id=refund_obj.id)
+                    if gateway_refund_id and not locked_rfnd.gateway_refund_id:
+                        locked_rfnd.gateway_refund_id = gateway_refund_id
+
+                    is_succeeded = event_type in ('refund.processed', 'charge.refunded')
+                    if event_type in ('refund.updated', 'refund.created'):
+                        p_status = str(payload.get('data', {}).get('object', {}).get('status', '')).lower()
+                        if p_status in ('succeeded', 'processed'):
+                            is_succeeded = True
+
+                    if is_succeeded and locked_rfnd.status != RefundStatusChoices.SUCCEEDED:
+                        locked_rfnd.status = RefundStatusChoices.SUCCEEDED
+                        locked_rfnd.processed_at = timezone.now()
+                        locked_rfnd.save(update_fields=['status', 'gateway_refund_id', 'processed_at', 'updated_at'])
+
+                        existing_rfnd_tx = PaymentTransaction.objects.filter(
+                            order=locked_order or locked_rfnd.order,
+                            transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                            status=PaymentTransaction.StatusChoices.SUCCESS,
+                            provider_transaction_id=gateway_refund_id or locked_rfnd.gateway_refund_id or locked_rfnd.refund_number,
+                        ).first()
+
+                        if not existing_rfnd_tx:
+                            PaymentTransaction.objects.create(
+                                order=locked_order or locked_rfnd.order,
+                                transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                                provider=p_name,
+                                amount=locked_rfnd.amount,
+                                currency=locked_rfnd.currency,
+                                status=PaymentTransaction.StatusChoices.SUCCESS,
+                                provider_transaction_id=gateway_refund_id or locked_rfnd.gateway_refund_id or locked_rfnd.refund_number,
+                                provider_order_id=(locked_order or locked_rfnd.order).payment_reference or '',
+                                raw_response=payload,
+                            )
+
+                        ord_target = locked_order or locked_rfnd.order
+                        tot_refunded = ord_target.refunds.filter(
+                            status=RefundStatusChoices.SUCCEEDED
+                        ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+
+                        if tot_refunded >= ord_target.total_amount:
+                            ord_target.payment_status = PaymentStatusChoices.REFUNDED
+                            ord_target.save(update_fields=['payment_status', 'updated_at'])
+
+                        record_audit_entry(
+                            event_type="marketplace.refund.processed",
+                            action="marketplace:refund.process",
+                            resource_type="Refund",
+                            resource_id=str(locked_rfnd.id),
+                            actor_id=ord_target.buyer_id,
+                            metadata={
+                                "refund_number": locked_rfnd.refund_number,
+                                "order_number": ord_target.order_number,
+                                "amount": str(locked_rfnd.amount),
+                                "currency": locked_rfnd.currency,
+                                "gateway_refund_id": gateway_refund_id or locked_rfnd.gateway_refund_id,
+                                "settlement_source": "webhook",
+                                "provider": p_name,
+                            },
+                        )
+                        settled_this_request = True
+
+            elif event_type in (
+                'refund.failed',
+            ):
+                if not refund_obj and locked_order:
+                    refund_obj = locked_order.refunds.filter(
+                        status__in=[RefundStatusChoices.PENDING, RefundStatusChoices.PROCESSING]
+                    ).first()
+
+                if refund_obj:
+                    locked_rfnd = Refund.objects.select_for_update().get(id=refund_obj.id)
+                    if locked_rfnd.status != RefundStatusChoices.SUCCEEDED:
+                        locked_rfnd.status = RefundStatusChoices.FAILED
+                        err_text = payload.get('payload', {}).get('refund', {}).get('entity', {}).get('error_description') or 'Refund failed at payment gateway'
+                        locked_rfnd.failure_reason = err_text
+                        locked_rfnd.save(update_fields=['status', 'failure_reason', 'updated_at'])
+
+                        PaymentTransaction.objects.create(
+                            order=locked_order or locked_rfnd.order,
+                            transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                            provider=p_name,
+                            amount=locked_rfnd.amount,
+                            currency=locked_rfnd.currency,
+                            status=PaymentTransaction.StatusChoices.FAILED,
+                            provider_transaction_id=gateway_refund_id or locked_rfnd.refund_number,
+                            error_message=err_text,
+                            raw_response=payload,
+                        )
+
+                        record_audit_entry(
+                            event_type="marketplace.refund.failed",
+                            action="marketplace:refund.fail",
+                            resource_type="Refund",
+                            resource_id=str(locked_rfnd.id),
+                            actor_id=(locked_order or locked_rfnd.order).buyer_id,
+                            metadata={
+                                "refund_number": locked_rfnd.refund_number,
+                                "order_number": (locked_order or locked_rfnd.order).order_number,
+                                "amount": str(locked_rfnd.amount),
+                                "failure_reason": err_text,
+                                "settlement_source": "webhook",
+                                "provider": p_name,
+                            },
+                        )
 
             webhook_record.processed = True
             webhook_record.processed_at = timezone.now()

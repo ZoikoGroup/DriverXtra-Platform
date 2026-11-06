@@ -313,6 +313,66 @@ export async function apiRequest<T>(endpoint: string, options: RequestOptions = 
   return data as T;
 }
 
+export async function apiRequestBlob(endpoint: string, options: RequestOptions = {}): Promise<Blob> {
+  const { requiresAuth = true, retryOn401 = true, headers: customHeaders, ...restOptions } = options;
+  const baseUrl = getBaseUrl();
+  const url = endpoint.startsWith("http://") || endpoint.startsWith("https://")
+    ? endpoint
+    : `${baseUrl}${endpoint.startsWith("/") ? "" : "/"}${endpoint}`;
+
+  const headers: Record<string, string> = {
+    ...(customHeaders as Record<string, string>),
+  };
+
+  if (requiresAuth) {
+    const token = tokenStorage.getAccessToken();
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url, { ...restOptions, headers });
+  } catch {
+    throw new ApiError(
+      "Unable to connect to DriverXtra backend. Please ensure Django is running on http://127.0.0.1:8000.",
+      0
+    );
+  }
+
+  if (response.status === 401 && requiresAuth && retryOn401) {
+    const newAccessToken = await refreshAccessToken();
+    if (newAccessToken) {
+      const retryHeaders = {
+        ...headers,
+        Authorization: `Bearer ${newAccessToken}`,
+      };
+      try {
+        response = await fetch(url, { ...restOptions, headers: retryHeaders });
+      } catch {
+        throw new ApiError("Network error during retried request.", 0);
+      }
+    } else {
+      tokenStorage.clearTokens();
+    }
+  }
+
+  if (!response.ok) {
+    let msg = `Failed to download file (status ${response.status})`;
+    try {
+      const errText = await response.text();
+      const errJson = JSON.parse(errText);
+      msg = errJson.detail || errJson.message || msg;
+    } catch {
+      // Ignore parse error
+    }
+    throw new ApiError(msg, response.status);
+  }
+
+  return response.blob();
+}
+
 export interface PaginatedResponse<T> {
   count?: number;
   next?: string | null;
@@ -992,6 +1052,13 @@ export const api = {
     async deleteServiceRecord(id: string): Promise<void> {
       return apiRequest<void>(`/garage/service-history/${id}/`, {
         method: "DELETE",
+        requiresAuth: true,
+      });
+    },
+
+    async downloadVehiclePassportPdf(vehicleId: string): Promise<Blob> {
+      return apiRequestBlob(`/garage/vehicles/${vehicleId}/passport/pdf/`, {
+        method: "GET",
         requiresAuth: true,
       });
     },
@@ -1939,6 +2006,53 @@ export const api = {
       });
     },
 
+    async approveAdminRefund(
+      identifier: string,
+      notes?: string
+    ): Promise<{
+      status: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/admin/refunds/${identifier}/approve/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ notes }),
+      });
+    },
+
+    async rejectAdminRefund(
+      identifier: string,
+      reason: string
+    ): Promise<{
+      status: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/admin/refunds/${identifier}/reject/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
+      });
+    },
+
+    async listBuyerRefunds(status?: string): Promise<PlatformRefund[]> {
+      const q = status && status !== "ALL" ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<PlatformRefund[] | { results: PlatformRefund[] }>(
+        `/marketplace/buyer/refunds/${q}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
     async listAdminDisputes(status?: string, category?: string): Promise<PlatformDispute[]> {
       const q = new URLSearchParams();
       if (status && status !== "ALL") q.set("status", status);
@@ -2383,6 +2497,52 @@ export const api = {
       });
     },
 
+    async createDepositSession(id: string, payload?: WorkshopDepositSessionPayload): Promise<WorkshopDepositSessionResponse> {
+      return apiRequest<WorkshopDepositSessionResponse>(`/workshops/quotations/${id}/deposit/create/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async verifyDeposit(id: string, payload: WorkshopDepositVerifyPayload): Promise<WorkshopDepositVerifyResponse> {
+      return apiRequest<WorkshopDepositVerifyResponse>(`/workshops/quotations/${id}/deposit/verify/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getDepositDetails(id: string): Promise<WorkshopDepositDetailResponse> {
+      return apiRequest<WorkshopDepositDetailResponse>(`/workshops/quotations/${id}/deposit/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    reviews: {
+      async list(idOrSlug: string): Promise<{ results: PlatformWorkshopReview[]; count: number; reputation?: WorkshopReputationSummary }> {
+        return apiRequest<{ results: PlatformWorkshopReview[]; count: number; reputation?: WorkshopReputationSummary }>(`/workshops/${idOrSlug}/reviews/`, {
+          method: "GET",
+          requiresAuth: false,
+        });
+      },
+      async create(bookingId: string, payload: {
+        rating: number;
+        title?: string;
+        comment: string;
+        communication_rating?: number;
+        workmanship_rating?: number;
+        pricing_transparency_rating?: number;
+      }): Promise<PlatformWorkshopReview> {
+        return apiRequest<PlatformWorkshopReview>(`/workshops/bookings/${bookingId}/review/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        });
+      },
+    },
+
     manageProfile: {
       async get(): Promise<WorkshopProfilePublic> {
         return apiRequest<WorkshopProfilePublic>("/workshops/manage/profile/", {
@@ -2616,6 +2776,7 @@ export const api = {
           part_number?: string;
           description?: string;
           catalogue_part_id?: string | null;
+          inventory_item_id?: string | null;
         }
       ): Promise<WorkOrderPartUsageItem> {
         return apiRequest<WorkOrderPartUsageItem>(`/workshops/manage/work-orders/${id}/parts/`, {
@@ -2668,6 +2829,72 @@ export const api = {
       },
     },
 
+    technician: {
+      async listWorkOrders(params?: { status?: string; q?: string; all?: boolean }): Promise<{ results: WorkOrderSummary[]; count: number }> {
+        const qs = new URLSearchParams();
+        if (params?.status) qs.set("status", params.status);
+        if (params?.q) qs.set("q", params.q);
+        if (params?.all) qs.set("all", "true");
+        const query = qs.toString();
+        const res = await apiRequest<{ results: WorkOrderSummary[]; count: number } | WorkOrderSummary[]>(
+          `/workshops/technician/work-orders/${query ? `?${query}` : ""}`,
+          { method: "GET", requiresAuth: true }
+        );
+        return Array.isArray(res) ? { results: res, count: res.length } : res;
+      },
+      async getWorkOrder(id: string): Promise<WorkOrderDetail & { customer_notes?: string; reported_faults?: string; available_transitions?: string[] }> {
+        return apiRequest<WorkOrderDetail & { customer_notes?: string; reported_faults?: string; available_transitions?: string[] }>(
+          `/workshops/technician/work-orders/${id}/`,
+          { method: "GET", requiresAuth: true }
+        );
+      },
+      async updateStatus(
+        id: string,
+        data: {
+          status: "ASSIGNED" | "IN_PROGRESS" | "AWAITING_PARTS" | "QUALITY_CHECK" | "COMPLETED" | "CANCELLED";
+          internal_notes?: string;
+          quality_notes?: string;
+          cancellation_reason?: string;
+        }
+      ): Promise<WorkOrderStatusUpdateResponse> {
+        return apiRequest<WorkOrderStatusUpdateResponse>(
+          `/workshops/technician/work-orders/${id}/status/`,
+          { method: "POST", requiresAuth: true, body: JSON.stringify(data) }
+        );
+      },
+      async updateTask(
+        id: string,
+        taskId: string,
+        data: {
+          status?: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "BLOCKED";
+          actual_labour_minutes?: number;
+          notes?: string;
+        }
+      ): Promise<WorkOrderTaskItem> {
+        return apiRequest<WorkOrderTaskItem>(
+          `/workshops/technician/work-orders/${id}/tasks/${taskId}/`,
+          { method: "PATCH", requiresAuth: true, body: JSON.stringify(data) }
+        );
+      },
+      async recordPartUsage(
+        id: string,
+        data: {
+          part_name: string;
+          quantity: string | number;
+          unit_cost: string | number;
+          part_number?: string;
+          description?: string;
+          inventory_item_id?: string | null;
+          catalogue_part_id?: string | null;
+        }
+      ): Promise<WorkOrderPartUsageItem> {
+        return apiRequest<WorkOrderPartUsageItem>(
+          `/workshops/technician/work-orders/${id}/parts/`,
+          { method: "POST", requiresAuth: true, body: JSON.stringify(data) }
+        );
+      },
+    },
+
     async getBuyerWorkOrder(bookingId: string): Promise<WorkOrderDetail> {
       return apiRequest<WorkOrderDetail>(`/workshops/bookings/my/${bookingId}/work-order/`, {
         method: "GET",
@@ -2696,6 +2923,40 @@ export const api = {
         requiresAuth: true,
         body: JSON.stringify({ reason }),
       });
+    },
+
+    messaging: {
+      async getBookingConversation(bookingIdentifier: string): Promise<WorkshopConversation> {
+        return apiRequest<WorkshopConversation>(`/workshops/bookings/${bookingIdentifier}/conversation/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async listConversations(): Promise<WorkshopConversation[]> {
+        return apiRequest<WorkshopConversation[]>("/workshops/conversations/", {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async getMessages(conversationId: string): Promise<WorkshopMessage[]> {
+        return apiRequest<WorkshopMessage[]>(`/workshops/conversations/${conversationId}/messages/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+      async sendMessage(conversationId: string, content: string, attachmentUrl?: string): Promise<WorkshopMessage> {
+        return apiRequest<WorkshopMessage>(`/workshops/conversations/${conversationId}/messages/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify({ content, attachment_url: attachmentUrl }),
+        });
+      },
+      async markRead(conversationId: string): Promise<{ status: string; marked_read: number }> {
+        return apiRequest<{ status: string; marked_read: number }>(`/workshops/conversations/${conversationId}/read/`, {
+          method: "POST",
+          requiresAuth: true,
+        });
+      },
     },
   },
 
@@ -4308,6 +4569,10 @@ export interface WorkshopProfilePublic {
   is_tax_registered: boolean;
   can_collect_tax?: boolean;
   default_tax_rate_percent?: string;
+  requires_deposit?: boolean;
+  default_deposit_percentage?: string;
+  average_rating?: number | null;
+  review_count?: number;
   services: WorkshopServiceItem[];
   operating_hours: WorkshopOperatingHours[];
   created_at: string;
@@ -4353,6 +4618,14 @@ export interface WorkshopQuotation {
   tax_amount: string;
   total_amount: string;
   currency: string;
+  requires_deposit?: boolean;
+  deposit_percentage?: string;
+  deposit_amount?: string;
+  deposit_status?: "NOT_REQUIRED" | "PENDING" | "PROCESSING" | "PAID" | "FAILED" | "REFUNDED";
+  deposit_paid_at?: string | null;
+  deposit_provider?: string;
+  deposit_transaction_id?: string;
+  deposit_order_id?: string;
   quoted_price?: string;
   valid_until?: string | null;
   workshop_notes?: string;
@@ -4366,6 +4639,72 @@ export interface WorkshopQuotation {
   line_items: QuotationLineItem[];
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkshopDepositSessionPayload {
+  preferred_provider?: string;
+  return_url?: string;
+  cancel_url?: string;
+}
+
+export interface WorkshopDepositSessionResponse {
+  status: string;
+  quotation_id: string;
+  quotation_number: string;
+  deposit_amount: string;
+  total_amount: string;
+  currency: string;
+  deposit_status: string;
+  payment_session: {
+    provider: string;
+    provider_order_id: string;
+    amount: string;
+    amount_minor?: number;
+    currency: string;
+    key_id?: string;
+    receipt?: string;
+    customer_name?: string;
+    customer_email?: string;
+    customer_contact?: string;
+    is_test_mode?: boolean;
+    client_secret?: string;
+    checkout_url?: string;
+    methods_info?: Record<string, unknown>;
+  };
+}
+
+export interface WorkshopDepositVerifyPayload {
+  razorpay_payment_id?: string;
+  razorpay_order_id?: string;
+  razorpay_signature?: string;
+  payment_intent_id?: string;
+  stripe_payment_intent_id?: string;
+  client_secret?: string;
+  preferred_provider?: string;
+  amount?: string | number;
+  currency?: string;
+}
+
+export interface WorkshopDepositVerifyResponse {
+  status: "success" | "error";
+  message: string;
+  quotation?: WorkshopQuotation;
+}
+
+export interface WorkshopDepositDetailResponse {
+  quotation_id: string;
+  quotation_number: string;
+  booking_number: string;
+  requires_deposit: boolean;
+  deposit_percentage: string;
+  deposit_amount: string;
+  deposit_status: "NOT_REQUIRED" | "PENDING" | "PROCESSING" | "PAID" | "FAILED" | "REFUNDED";
+  deposit_provider: string;
+  deposit_order_id: string;
+  deposit_transaction_id: string;
+  deposit_paid_at: string | null;
+  total_amount: string;
+  currency: string;
 }
 
 export interface WorkshopBooking {
@@ -4414,6 +4753,10 @@ export interface WorkshopBooking {
   work_order_tasks_count?: number;
   work_order_created_at?: string | null;
   work_order?: WorkOrderDetail | null;
+  has_review?: boolean;
+  review_id?: string | null;
+  review_rating?: number | null;
+  is_review_eligible?: boolean;
   audit_logs?: Array<{
     id: string;
     event_type: string;
@@ -4422,6 +4765,73 @@ export interface WorkshopBooking {
     status: string;
     metadata: Record<string, unknown>;
   }>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformWorkshopReview {
+  id: string;
+  workshop: string;
+  workshop_name: string;
+  booking: string;
+  work_order?: string | null;
+  buyer_name?: string;
+  vehicle_display?: string;
+  rating: number;
+  communication_rating?: number | null;
+  workmanship_rating?: number | null;
+  pricing_transparency_rating?: number | null;
+  title: string;
+  comment: string;
+  is_verified_service: boolean;
+  status: "PENDING" | "APPROVED" | "FLAGGED" | "REJECTED";
+  workshop_reply?: string;
+  workshop_reply_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkshopReputationSummary {
+  average_rating: number;
+  total_reviews: number;
+  distribution: Record<string, number>;
+  sub_ratings?: {
+    communication?: number;
+    workmanship?: number;
+    pricing_transparency?: number;
+  };
+}
+
+export interface WorkshopMessage {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  sender_name: string;
+  sender_type: "BUYER" | "WORKSHOP" | "SYSTEM";
+  content: string;
+  attachment_url?: string;
+  is_read: boolean;
+  read_at?: string | null;
+  created_at: string;
+}
+
+export interface WorkshopConversation {
+  id: string;
+  booking_id: string;
+  booking_number: string;
+  workshop_id: string;
+  workshop_name: string;
+  buyer_id: string;
+  buyer_name: string;
+  last_message?: {
+    id: string;
+    content: string;
+    sender_type: "BUYER" | "WORKSHOP" | "SYSTEM";
+    is_read: boolean;
+    created_at: string;
+  } | null;
+  unread_count: number;
+  last_message_at: string;
   created_at: string;
   updated_at: string;
 }
@@ -4451,6 +4861,8 @@ export interface WorkOrderPartUsageItem {
   part_number?: string;
   description?: string;
   catalogue_part?: string | null;
+  inventory_item?: string | null;
+  is_stock_deducted?: boolean;
   quantity: string;
   unit_cost: string;
   total_cost: string;
@@ -4576,6 +4988,8 @@ export interface WorkOrderDetail extends WorkOrderSummary {
   buyer_name: string;
   buyer_email: string;
   buyer_phone: string;
+  customer_notes?: string;
+  reported_faults?: string;
   lead_technician_email?: string | null;
   internal_notes: string;
   quality_notes: string;

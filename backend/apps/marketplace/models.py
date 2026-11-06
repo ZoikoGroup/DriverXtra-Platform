@@ -42,6 +42,8 @@ class StockMovementReasonChoices(models.TextChoices):
     SALE = 'SALE', 'Customer Order / Sale'
     RETURN = 'RETURN', 'Customer Return / Restock'
     CORRECTION = 'CORRECTION', 'Inventory Audit / Correction'
+    WORK_ORDER = 'WORK_ORDER', 'Work Order Part Consumption'
+    WORK_ORDER_RESTOCK = 'WORK_ORDER_RESTOCK', 'Work Order Cancellation / Restock'
 
 
 class PartConditionChoices(models.TextChoices):

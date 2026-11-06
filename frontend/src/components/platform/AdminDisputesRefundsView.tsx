@@ -69,6 +69,12 @@ export default function AdminDisputesRefundsView() {
   const [isProcessingRefund, setIsProcessingRefund] = useState(false);
   const [processRefundError, setProcessRefundError] = useState<string | null>(null);
 
+  // Refund approval & rejection actions
+  const [actioningRefundId, setActioningRefundId] = useState<string | null>(null);
+  const [rejectModalRefund, setRejectModalRefund] = useState<PlatformRefund | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState("");
+  const [rejectError, setRejectError] = useState<string | null>(null);
+
   // Issue Refund Tool State
   const [orderQuery, setOrderQuery] = useState("");
   const [refundSummary, setRefundSummary] = useState<OrderRefundSummary | null>(null);
@@ -212,6 +218,40 @@ export default function AdminDisputesRefundsView() {
       setProcessRefundError(err instanceof Error ? err.message : "Failed to settle refund.");
     } finally {
       setIsProcessingRefund(false);
+    }
+  };
+
+  const handleApproveRefund = async (refund: PlatformRefund) => {
+    setActioningRefundId(refund.id);
+    try {
+      const res = await api.marketplace.approveAdminRefund(refund.refund_number);
+      if (res.status === "success" && res.refund) {
+        setRefunds((prev) => prev.map((r) => (r.id === res.refund.id ? res.refund : r)));
+        setSuccessBanner(`Refund ${res.refund.refund_number} approved and dispatched via gateway (${res.refund.status}).`);
+      }
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to approve and dispatch refund.");
+    } finally {
+      setActioningRefundId(null);
+    }
+  };
+
+  const handleConfirmReject = async () => {
+    if (!rejectModalRefund || !rejectReasonInput.trim()) return;
+    setActioningRefundId(rejectModalRefund.id);
+    setRejectError(null);
+    try {
+      const res = await api.marketplace.rejectAdminRefund(rejectModalRefund.refund_number, rejectReasonInput.trim());
+      if (res.status === "success" && res.refund) {
+        setRefunds((prev) => prev.map((r) => (r.id === res.refund.id ? res.refund : r)));
+        setSuccessBanner(`Refund ${res.refund.refund_number} has been rejected.`);
+        setRejectModalRefund(null);
+        setRejectReasonInput("");
+      }
+    } catch (err: unknown) {
+      setRejectError(err instanceof Error ? err.message : "Failed to reject refund.");
+    } finally {
+      setActioningRefundId(null);
     }
   };
 
@@ -712,12 +752,18 @@ export default function AdminDisputesRefundsView() {
                     </div>
 
                     <div className="text-[11px] text-slate-400 flex flex-wrap items-center gap-4">
-                      {refund.gateway_reference && (
-                        <span>Gateway Ref: <strong className="font-mono text-slate-700">{refund.gateway_reference}</strong></span>
+                      {(refund.gateway_refund_id || refund.gateway_reference) && (
+                        <span>Gateway Ref: <strong className="font-mono text-slate-700">{refund.gateway_refund_id || refund.gateway_reference}</strong></span>
+                      )}
+                      {refund.gateway_provider && (
+                        <span>Provider: <strong className="font-mono text-slate-700">{refund.gateway_provider}</strong></span>
                       )}
                       <span>Issued: {new Date(refund.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
                       {refund.processed_at && (
                         <span className="text-emerald-700 font-medium">Settled: {new Date(refund.processed_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}</span>
+                      )}
+                      {refund.failure_reason && (
+                        <span className="text-rose-600 font-semibold">Note / Reason: {refund.failure_reason}</span>
                       )}
                     </div>
                   </div>
@@ -731,16 +777,43 @@ export default function AdminDisputesRefundsView() {
                     </div>
 
                     {refund.status === "PENDING" && (
-                      <button
-                        onClick={() => {
-                          setProcessModalRefund(refund);
-                          setGatewayRefInput(refund.gateway_reference || "");
-                          setProcessNotesInput(refund.notes || "");
-                        }}
-                        className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all shadow-xs"
-                      >
-                        Settle / Process
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => handleApproveRefund(refund)}
+                          disabled={actioningRefundId === refund.id}
+                          className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          {actioningRefundId === refund.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                          )}
+                          <span>Approve & Dispatch</span>
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setRejectModalRefund(refund);
+                            setRejectReasonInput("");
+                            setRejectError(null);
+                          }}
+                          disabled={actioningRefundId === refund.id}
+                          className="px-3 py-1.5 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-xs font-bold transition-all disabled:opacity-50"
+                        >
+                          Reject
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setProcessModalRefund(refund);
+                            setGatewayRefInput(refund.gateway_refund_id || refund.gateway_reference || "");
+                            setProcessNotesInput(refund.notes || "");
+                          }}
+                          className="px-3 py-1.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-bold transition-all"
+                        >
+                          Manual Settle
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1259,6 +1332,74 @@ export default function AdminDisputesRefundsView() {
                 className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-50"
               >
                 {isProcessingRefund ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>Confirm Succeeded</span>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* REJECT REFUND MODAL                                       */}
+      {/* ========================================================= */}
+      {rejectModalRefund && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl border border-slate-200">
+            <div className="space-y-1">
+              <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 text-rose-600" />
+                <span>Reject Refund {rejectModalRefund.refund_number}</span>
+              </h3>
+              <p className="text-xs text-slate-500">
+                Provide a reason for rejecting this refund request. The buyer will be notified.
+              </p>
+            </div>
+
+            {rejectError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs">
+                {rejectError}
+              </div>
+            )}
+
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Amount:</span>
+                <strong className="font-mono text-slate-900">{rejectModalRefund.currency} {Number(rejectModalRefund.amount).toFixed(2)}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Order:</span>
+                <strong className="text-slate-800">#{rejectModalRefund.order_number}</strong>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Rejection Reason <span className="text-rose-500">*</span>
+              </label>
+              <textarea
+                rows={3}
+                value={rejectReasonInput}
+                onChange={(e) => setRejectReasonInput(e.target.value)}
+                placeholder="e.g. Return inspection failed / duplicate claim / unauthorized request"
+                className="w-full px-3.5 py-2 rounded-xl border border-slate-200 text-xs text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-rose-400"
+              />
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setRejectModalRefund(null)}
+                disabled={actioningRefundId === rejectModalRefund.id}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmReject}
+                disabled={actioningRefundId === rejectModalRefund.id || !rejectReasonInput.trim()}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {actioningRefundId === rejectModalRefund.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>Confirm Reject</span>}
               </button>
             </div>
           </div>

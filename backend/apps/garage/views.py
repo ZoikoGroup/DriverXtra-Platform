@@ -173,3 +173,52 @@ class VehicleServiceRecordDetailView(generics.RetrieveUpdateDestroyAPIView):
             record=instance,
             buyer=self.request.user,
         )
+
+
+class VehicleServicePassportPdfView(views.APIView):
+    """
+    Download a certified PDF Vehicle Service Passport.
+    Strictly restricted to:
+    - Registered vehicle owner (vehicle.user == request.user)
+    - Servicing workshop profile owner (workshop has serviced this vehicle)
+    - Platform staff/administrators
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, vehicle_id):
+        from django.http import HttpResponse
+        from apps.garage.passport_service import VehiclePassportPdfService
+
+        vehicle = generics.get_object_or_404(
+            GarageVehicle,
+            id=vehicle_id,
+            is_archived=False,
+        )
+
+        is_owner = vehicle.user_id == request.user.id
+        is_staff = request.user.is_staff or request.user.is_superuser
+        is_servicing_workshop = False
+
+        if not is_owner and not is_staff:
+            # Check if requesting user is member/owner of a workshop that serviced this vehicle
+            is_servicing_workshop = VehicleServiceRecord.objects.filter(
+                vehicle=vehicle,
+                workshop__organisation__memberships__user=request.user,
+                workshop__organisation__memberships__is_active=True,
+            ).exists()
+
+        if not (is_owner or is_staff or is_servicing_workshop):
+            return Response(
+                {"detail": "You do not have permission to access this vehicle's service passport."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        pdf_bytes = VehiclePassportPdfService.generate_passport_pdf(vehicle)
+        plate_slug = vehicle.registration_plate.replace(" ", "_") if vehicle.registration_plate else str(vehicle.id)[:8]
+        filename = f"Service_Passport_{plate_slug}.pdf"
+
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Content-Length'] = len(pdf_bytes)
+        return response
+

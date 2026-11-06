@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
+    "channels",
 
     # Local apps
     "common",
@@ -121,6 +122,12 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": os.getenv("CHANNEL_LAYER_BACKEND", "channels.layers.InMemoryChannelLayer"),
+    }
+}
 
 
 # =========================================================

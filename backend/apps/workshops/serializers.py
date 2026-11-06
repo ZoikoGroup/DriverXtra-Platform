@@ -26,6 +26,10 @@ from apps.workshops.models import (
     ChangeOrder,
     ChangeOrderLineItem,
     ChangeOrderStatusChoices,
+    WorkshopReview,
+    ReviewStatusChoices,
+    WorkshopConversation,
+    WorkshopMessage,
 )
 from apps.garage.models import GarageVehicle
 from apps.catalogue.models import Part
@@ -104,6 +108,8 @@ class WorkshopProfilePublicSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(read_only=True)
     services = serializers.SerializerMethodField()
     operating_hours = serializers.SerializerMethodField()
+    average_rating = serializers.SerializerMethodField()
+    review_count = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkshopProfile
@@ -133,10 +139,26 @@ class WorkshopProfilePublicSerializer(serializers.ModelSerializer):
             'is_tax_registered',
             'can_collect_tax',
             'default_tax_rate_percent',
+            'requires_deposit',
+            'default_deposit_percentage',
+            'average_rating',
+            'review_count',
             'services',
             'operating_hours',
             'created_at',
         ]
+
+    def get_average_rating(self, obj) -> float:
+        if hasattr(obj, 'avg_rating') and obj.avg_rating is not None:
+            return round(float(obj.avg_rating), 2)
+        from django.db.models import Avg
+        avg = obj.reviews.filter(status=ReviewStatusChoices.APPROVED).aggregate(Avg('rating'))['rating__avg']
+        return round(float(avg), 2) if avg is not None else 0.0
+
+    def get_review_count(self, obj) -> int:
+        if hasattr(obj, 'total_reviews'):
+            return obj.total_reviews
+        return obj.reviews.filter(status=ReviewStatusChoices.APPROVED).count()
 
     def get_services(self, obj):
         active_services = obj.services.filter(is_active=True).select_related('category')
@@ -170,6 +192,8 @@ class WorkshopProfileManageSerializer(serializers.ModelSerializer):
             'is_tax_registered',
             'can_collect_tax',
             'default_tax_rate_percent',
+            'requires_deposit',
+            'default_deposit_percentage',
         ]
         read_only_fields = ['can_collect_tax']
 
@@ -266,6 +290,14 @@ class WorkshopQuotationSerializer(serializers.ModelSerializer):
             'tax_breakdown',
             'total_amount',
             'currency',
+            'requires_deposit',
+            'deposit_percentage',
+            'deposit_amount',
+            'deposit_status',
+            'deposit_paid_at',
+            'deposit_provider',
+            'deposit_transaction_id',
+            'deposit_order_id',
             'valid_until',
             'workshop_notes',
             'terms_and_conditions',
@@ -302,6 +334,9 @@ class QuotationCreateUpdateSerializer(serializers.Serializer):
     valid_until = serializers.DateField(required=False, allow_null=True)
     workshop_notes = serializers.CharField(required=False, allow_blank=True, default='')
     terms_and_conditions = serializers.CharField(required=False, allow_blank=True, default='')
+    requires_deposit = serializers.BooleanField(required=False, default=None)
+    deposit_percentage = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, default=None)
+    deposit_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=None)
     line_items = QuotationLineItemInputSerializer(many=True, required=True)
 
     def validate_currency(self, value):
@@ -330,6 +365,25 @@ class QuotationCreateUpdateSerializer(serializers.Serializer):
                     'tax_rate_percent': f"Workshop '{booking.workshop.display_name}' is not authorized to collect tax. Quotation tax rate must be 0.00%."
                 })
         return attrs
+
+
+class QuotationDepositSessionCreateSerializer(serializers.Serializer):
+    preferred_provider = serializers.CharField(max_length=50, required=False, allow_blank=True, default='')
+    return_url = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+    cancel_url = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+
+
+class QuotationDepositVerifySerializer(serializers.Serializer):
+    razorpay_payment_id = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    razorpay_order_id = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    razorpay_signature = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    payment_intent_id = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    stripe_payment_intent_id = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    client_secret = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=None)
+    currency = serializers.CharField(max_length=3, required=False, allow_blank=True, default='')
+    preferred_provider = serializers.CharField(max_length=50, required=False, allow_blank=True, default='')
+
 
 
 class WorkshopBookingDetailSerializer(serializers.ModelSerializer):
@@ -388,6 +442,10 @@ class WorkshopBookingDetailSerializer(serializers.ModelSerializer):
             'work_order_tasks_count',
             'work_order_created_at',
             'work_order',
+            'has_review',
+            'review_id',
+            'review_rating',
+            'is_review_eligible',
             'audit_logs',
             'created_at',
             'updated_at',
@@ -400,7 +458,27 @@ class WorkshopBookingDetailSerializer(serializers.ModelSerializer):
     work_order_tasks_count = serializers.SerializerMethodField()
     work_order_created_at = serializers.SerializerMethodField()
     work_order = serializers.SerializerMethodField()
+    has_review = serializers.SerializerMethodField()
+    review_id = serializers.SerializerMethodField()
+    review_rating = serializers.SerializerMethodField()
+    is_review_eligible = serializers.SerializerMethodField()
     audit_logs = serializers.SerializerMethodField()
+
+    def get_has_review(self, obj) -> bool:
+        return hasattr(obj, 'review') and obj.review is not None
+
+    def get_review_id(self, obj) -> str | None:
+        return str(obj.review.id) if hasattr(obj, 'review') and obj.review else None
+
+    def get_review_rating(self, obj) -> int | None:
+        return obj.review.rating if hasattr(obj, 'review') and obj.review else None
+
+    def get_is_review_eligible(self, obj) -> bool:
+        if hasattr(obj, 'review') and obj.review:
+            return False
+        if not hasattr(obj, 'work_order') or not obj.work_order:
+            return False
+        return obj.work_order.status == WorkOrderStatusChoices.COMPLETED
 
     def get_work_order_id(self, obj):
         return str(obj.work_order.id) if hasattr(obj, 'work_order') and obj.work_order else None
@@ -596,6 +674,8 @@ class WorkOrderPartUsageSerializer(serializers.ModelSerializer):
             'part_number',
             'description',
             'catalogue_part',
+            'inventory_item',
+            'is_stock_deducted',
             'quantity',
             'unit_cost',
             'total_cost',
@@ -701,6 +781,8 @@ class WorkOrderSerializer(serializers.ModelSerializer):
     buyer_name = serializers.SerializerMethodField()
     buyer_email = serializers.CharField(source='buyer.email', read_only=True)
     buyer_phone = serializers.CharField(source='buyer.phone_number', read_only=True)
+    customer_notes = serializers.CharField(source='booking.customer_notes', read_only=True, default='')
+    reported_faults = serializers.CharField(source='booking.reported_faults', read_only=True, default='')
     lead_technician_name = serializers.SerializerMethodField()
     lead_technician_email = serializers.CharField(source='lead_technician.email', read_only=True)
     assigned_by_name = serializers.SerializerMethodField()
@@ -748,6 +830,8 @@ class WorkOrderSerializer(serializers.ModelSerializer):
             'buyer_name',
             'buyer_email',
             'buyer_phone',
+            'customer_notes',
+            'reported_faults',
             'vehicle',
             'vehicle_make',
             'vehicle_model',
@@ -847,6 +931,7 @@ class WorkOrderPartUsageCreateSerializer(serializers.Serializer):
     part_number = serializers.CharField(required=False, allow_blank=True, default='', max_length=100)
     description = serializers.CharField(required=False, allow_blank=True, default='')
     catalogue_part_id = serializers.UUIDField(required=False, allow_null=True)
+    inventory_item_id = serializers.UUIDField(required=False, allow_null=True)
     quantity = serializers.DecimalField(max_digits=10, decimal_places=2, default=Decimal('1.00'), min_value=Decimal('0.01'))
     unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'), min_value=Decimal('0.00'))
 
@@ -1144,3 +1229,179 @@ class AdminWorkshopTaxAuthorizationSerializer(serializers.Serializer):
 class ChangeOrderDecisionSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True, default='')
     reason = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class WorkshopReviewSerializer(serializers.ModelSerializer):
+    workshop_id = serializers.UUIDField(source='workshop.id', read_only=True)
+    workshop_name = serializers.CharField(source='workshop.business_name', read_only=True)
+    booking_id = serializers.UUIDField(source='booking.id', read_only=True)
+    booking_number = serializers.CharField(source='booking.booking_number', read_only=True)
+    work_order_id = serializers.UUIDField(source='work_order.id', read_only=True, allow_null=True)
+    work_order_number = serializers.CharField(source='work_order.work_order_number', read_only=True, allow_null=True)
+    buyer_id = serializers.UUIDField(source='buyer.id', read_only=True)
+    buyer_name = serializers.SerializerMethodField()
+    workshop_replied_by_name = serializers.SerializerMethodField()
+    vehicle_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkshopReview
+        fields = [
+            'id',
+            'workshop_id',
+            'workshop_name',
+            'booking_id',
+            'booking_number',
+            'work_order_id',
+            'work_order_number',
+            'buyer_id',
+            'buyer_name',
+            'rating',
+            'communication_rating',
+            'workmanship_rating',
+            'pricing_transparency_rating',
+            'title',
+            'comment',
+            'status',
+            'is_verified_service',
+            'workshop_reply',
+            'workshop_reply_at',
+            'workshop_replied_by_name',
+            'helpful_votes',
+            'vehicle_display',
+            'created_at',
+            'updated_at',
+        ]
+
+    def get_buyer_name(self, obj) -> str:
+        if obj.buyer:
+            full = getattr(obj.buyer, 'full_name', '')
+            if full:
+                parts = full.split()
+                if len(parts) > 1:
+                    return f"{parts[0]} {parts[-1][0]}."
+                return full
+            return obj.buyer.email.split('@')[0]
+        return "Customer"
+
+    def get_workshop_replied_by_name(self, obj) -> str | None:
+        if obj.workshop_replied_by:
+            return getattr(obj.workshop_replied_by, 'full_name', None) or obj.workshop_replied_by.email.split('@')[0]
+        return None
+
+    def get_vehicle_display(self, obj) -> str | None:
+        if obj.booking:
+            make = obj.booking.vehicle_make or ""
+            model = obj.booking.vehicle_model or ""
+            year = obj.booking.vehicle_year or ""
+            return f"{year} {make} {model}".strip() or None
+        return None
+
+
+class WorkshopReviewCreateSerializer(serializers.Serializer):
+    rating = serializers.IntegerField(min_value=1, max_value=5, required=True)
+    communication_rating = serializers.IntegerField(min_value=1, max_value=5, required=False, allow_null=True)
+    workmanship_rating = serializers.IntegerField(min_value=1, max_value=5, required=False, allow_null=True)
+    pricing_transparency_rating = serializers.IntegerField(min_value=1, max_value=5, required=False, allow_null=True)
+    title = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    comment = serializers.CharField(min_length=5, required=True)
+
+
+class WorkshopReviewReplySerializer(serializers.Serializer):
+    reply = serializers.CharField(min_length=2, required=True)
+
+
+class WorkshopReviewModerationSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=ReviewStatusChoices.choices, required=True)
+    reason = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+
+
+class WorkshopMessageSerializer(serializers.ModelSerializer):
+    sender_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkshopMessage
+        fields = [
+            'id',
+            'conversation_id',
+            'sender_id',
+            'sender_name',
+            'sender_type',
+            'content',
+            'attachment_url',
+            'is_read',
+            'read_at',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_sender_name(self, obj) -> str:
+        if not obj.sender:
+            return "System"
+        name = getattr(obj.sender, 'full_name', '')
+        return name if name else obj.sender.email.split('@')[0]
+
+
+class WorkshopConversationSerializer(serializers.ModelSerializer):
+    booking_number = serializers.CharField(source='booking.booking_number', read_only=True)
+    workshop_name = serializers.CharField(source='workshop.business_name', read_only=True)
+    buyer_name = serializers.SerializerMethodField()
+    last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkshopConversation
+        fields = [
+            'id',
+            'booking_id',
+            'booking_number',
+            'workshop_id',
+            'workshop_name',
+            'buyer_id',
+            'buyer_name',
+            'last_message',
+            'unread_count',
+            'last_message_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_buyer_name(self, obj) -> str:
+        if not obj.buyer:
+            return "Customer"
+        name = getattr(obj.buyer, 'full_name', '')
+        return name if name else obj.buyer.email.split('@')[0]
+
+    def get_last_message(self, obj) -> dict | None:
+        last = obj.messages.order_by('-created_at').first()
+        if not last:
+            return None
+        return {
+            'id': str(last.id),
+            'content': last.content,
+            'sender_type': last.sender_type,
+            'is_read': last.is_read,
+            'created_at': last.created_at.isoformat(),
+        }
+
+    def get_unread_count(self, obj) -> int:
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return 0
+        return obj.messages.filter(is_read=False).exclude(sender=request.user).count()
+
+
+class CreateWorkshopMessageSerializer(serializers.Serializer):
+    content = serializers.CharField(required=False, allow_blank=True, default='')
+    attachment_url = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        content = attrs.get('content', '').strip()
+        attachment_url = attrs.get('attachment_url', '').strip()
+        if not content and not attachment_url:
+            raise serializers.ValidationError("Either message content or attachment URL is required.")
+        attrs['content'] = content
+        attrs['attachment_url'] = attachment_url
+        return attrs
+
+
