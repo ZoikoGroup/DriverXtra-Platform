@@ -18,6 +18,7 @@ import BuyerWorkshopsView from "@/components/platform/BuyerWorkshopsView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import AdminWorkshopOversightView from "@/components/platform/AdminWorkshopOversightView";
+import CommercialAdminView from "@/components/platform/CommercialAdminView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
 import BuyerOrdersView from "@/components/platform/BuyerOrdersView";
@@ -115,6 +116,7 @@ export default function PlatformDashboardPage() {
       admin_marketplace_review: "Admin Moderation — Listing Review Queue",
       admin_staff_management: "Staff Administration & Access Control",
       admin_workshop_oversight: "Workshop Operations Oversight (Platform Administration)",
+      commercial_admin: "Commercial Control Plane — SKUs, Gates, Rates & Quotes",
       profile: "User Profile & Account Settings",
       organisations: "Organisations & Teams",
       garage: "My Garage — Vehicle Management",
@@ -219,6 +221,12 @@ export default function PlatformDashboardPage() {
           ) : currentTab === "admin_staff_management" ? (
             isPlatformAdmin ? (
               <AdminStaffManagementView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "commercial_admin" ? (
+            isAdmin ? (
+              <CommercialAdminView />
             ) : (
               <MarketplaceBrowseView />
             )
