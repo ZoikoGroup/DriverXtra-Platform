@@ -37,6 +37,9 @@ urlpatterns = [
 
     # Platform Core: Regional Configuration & Multi-Country Specifications
     path('api/v1/regions/', include('platform_core.regional.urls')),
+
+    # R1 Commercial control plane: SKUs, country gates, role profiles, rates, quotes
+    path('api/v1/', include('apps.commercial.urls')),
 ]
 
 # Serve media files in development / test environments

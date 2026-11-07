@@ -75,9 +75,11 @@ INSTALLED_APPS = [
     "apps.marketplace",
     "apps.notifications",
     "apps.workshops",
+    "apps.commercial",
 
     # Platform audit
     "platform_core.audit.apps.AuditConfig",
+    "platform_core.events.apps.EventsConfig",
 ]
 
 
