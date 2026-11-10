@@ -3211,7 +3211,6 @@ export const api = {
     },
   },
 
-<<<<<<< HEAD
   // Phase 4: Customer Support & Ticketing System
   support: {
     async getMyTickets(statusFilter?: string): Promise<{ tickets: SupportTicketSummary[]; count: number }> {
@@ -3376,7 +3375,6 @@ export const api = {
         method: "GET",
         requiresAuth: true,
       });
-=======
   commercial: {
     // Admin: SKU catalogue
     listSkus(params?: Record<string, string>): Promise<CommercialPage<CommercialSku>> {
@@ -3463,7 +3461,6 @@ export const api = {
     },
     acceptQuote(id: string, payload: { terms_hash: string; consent_notice_version: string }): Promise<CommercialQuote> {
       return apiRequest<CommercialQuote>(`/commercial/quotes/${id}/accept/`, { method: "POST", body: JSON.stringify(payload) });
->>>>>>> origin/main
     },
   },
 };
