@@ -3375,6 +3375,9 @@ export const api = {
         method: "GET",
         requiresAuth: true,
       });
+    },
+  },
+
   commercial: {
     // Admin: SKU catalogue
     listSkus(params?: Record<string, string>): Promise<CommercialPage<CommercialSku>> {
