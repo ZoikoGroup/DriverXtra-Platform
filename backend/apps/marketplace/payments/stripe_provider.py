@@ -404,3 +404,135 @@ class StripePaymentProvider(BasePaymentProvider):
             }
 
         return False, "Live Stripe refunds require configured credentials (STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY).", {}
+
+    def inquire_refund(
+        self,
+        payment_reference: str,
+        refund_number: str,
+        gateway_refund_id: Optional[str] = None,
+    ) -> Tuple[str, Optional[str], Dict[str, Any]]:
+        """
+        Inquires Stripe to determine the authoritative status of a refund.
+        Queries https://api.stripe.com/v1/refunds/{gateway_refund_id} if ID is known,
+        or lists refunds for the payment_intent and matches by metadata[refund_number].
+        Returns:
+            status: 'SUCCEEDED' | 'FAILED' | 'PROCESSING' | 'NOT_FOUND' | 'UNKNOWN'
+            gateway_refund_id_or_error: string
+            extra_details: dict
+        """
+        payment_id = (payment_reference or '').strip()
+        rfnd_num = (refund_number or '').strip()
+        gw_id = (gateway_refund_id or '').strip()
+
+        # Live / Sandbox call when configured (or when force_network_call is enabled for tests)
+        if (self.is_configured and not getattr(settings, 'IS_TESTING', False)) or getattr(self, 'force_network_call', False):
+            # 1. Query by known gateway_refund_id if available
+            if gw_id:
+                url = f"https://api.stripe.com/v1/refunds/{urllib.parse.quote(gw_id)}"
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self.secret_key}",
+                        "User-Agent": "DriverXtra-Platform/1.0",
+                    },
+                    method="GET",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        st = data.get('status', '').lower()
+                        if st == 'succeeded':
+                            return 'SUCCEEDED', data.get('id'), data
+                        elif st == 'pending':
+                            return 'PROCESSING', data.get('id'), data
+                        elif st in ('failed', 'canceled'):
+                            return 'FAILED', data.get('failure_reason') or 'Stripe refund failed or canceled', data
+                        return 'UNKNOWN', f"Unrecognized Stripe refund status '{st}'", data
+                except urllib.error.HTTPError as http_err:
+                    if http_err.code == 404:
+                        return 'NOT_FOUND', f"Refund '{gw_id}' not found on Stripe", {}
+                    err_text = http_err.read().decode('utf-8', errors='replace')
+                    return 'UNKNOWN', f"Stripe API error (HTTP {http_err.code}): {err_text}", {}
+                except Exception as exc:
+                    return 'UNKNOWN', f"Connection error querying Stripe: {str(exc)}", {}
+
+            # 2. Query by payment_intent to find refund by metadata[refund_number] with cursor-based pagination
+            if payment_id:
+                has_more = True
+                starting_after = None
+                max_pages = 5
+                page_count = 0
+                last_data = {}
+
+                while has_more and page_count < max_pages:
+                    page_count += 1
+                    query_params = f"payment_intent={urllib.parse.quote(payment_id)}&limit=50"
+                    if starting_after:
+                        query_params += f"&starting_after={urllib.parse.quote(starting_after)}"
+                    url = f"https://api.stripe.com/v1/refunds?{query_params}"
+                    req = urllib.request.Request(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {self.secret_key}",
+                            "User-Agent": "DriverXtra-Platform/1.0",
+                        },
+                        method="GET",
+                    )
+                    try:
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            data = json.loads(resp.read().decode('utf-8'))
+                            last_data = data
+                            items = data.get('data', [])
+                            for item in items:
+                                meta = item.get('metadata', {}) or {}
+                                if meta.get('refund_number') == rfnd_num or (gw_id and item.get('id') == gw_id):
+                                    st = item.get('status', '').lower()
+                                    if st == 'succeeded':
+                                        return 'SUCCEEDED', item.get('id'), item
+                                    elif st == 'pending':
+                                        return 'PROCESSING', item.get('id'), item
+                                    elif st in ('failed', 'canceled'):
+                                        return 'FAILED', item.get('failure_reason') or 'Stripe refund failed or canceled', item
+                                    return 'UNKNOWN', f"Unrecognized Stripe refund status '{st}'", item
+
+                            has_more = bool(data.get('has_more', False))
+                            if items:
+                                starting_after = items[-1].get('id')
+                            else:
+                                has_more = False
+
+                    except urllib.error.HTTPError as http_err:
+                        if http_err.code == 404:
+                            return 'NOT_FOUND', f"PaymentIntent '{payment_id}' not found on Stripe", {}
+                        err_text = http_err.read().decode('utf-8', errors='replace')
+                        return 'UNKNOWN', f"Stripe API error on page {page_count} (HTTP {http_err.code}): {err_text}", {}
+                    except Exception as exc:
+                        return 'UNKNOWN', f"Connection error querying Stripe on page {page_count}: {str(exc)}", {}
+
+                if has_more:
+                    return 'UNKNOWN', f"Refund '{rfnd_num}' not found within first {max_pages * 50} Stripe records. Inquiry limit reached.", last_data
+
+                return 'NOT_FOUND', f"No refund with number '{rfnd_num}' found on Stripe for PaymentIntent '{payment_id}' across {page_count} page(s)", last_data
+
+        # Test mode / sandbox mock behavior
+        if self.test_mode or getattr(settings, 'IS_TESTING', False):
+            check_key = f"{gw_id}_{rfnd_num}".lower()
+            if "fail" in check_key:
+                return 'FAILED', "Simulated Stripe refund failure", {"status": "failed", "test_mode": True}
+            if "unknown" in check_key or "timeout" in check_key:
+                return 'UNKNOWN', "Simulated gateway connection error during inquiry", {"test_mode": True}
+            if "not_found" in check_key:
+                return 'NOT_FOUND', "Simulated Stripe refund not found", {"test_mode": True}
+            if "processing" in check_key or "pending" in check_key:
+                return 'PROCESSING', gw_id or f"re_test_{rfnd_num}", {"status": "pending", "test_mode": True}
+
+            re_id = gw_id or f"re_test_reconciled_{rfnd_num}"
+            return 'SUCCEEDED', re_id, {
+                "id": re_id,
+                "status": "succeeded",
+                "payment_intent": payment_id,
+                "test_mode": True,
+            }
+
+        return 'UNKNOWN', "Live Stripe inquiry requires configured credentials.", {}
+

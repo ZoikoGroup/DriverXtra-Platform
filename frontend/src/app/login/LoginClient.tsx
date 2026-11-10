@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
+import { PrototypeUser } from "@/lib/prototype-auth/types";
 import { api } from "@/lib/api/client";
 import {
   Lock,
@@ -23,7 +24,7 @@ import {
 
 export default function LoginClient() {
   const router = useRouter();
-  const { login, verifyMfaLogin, mfaChallenge, clearMfaChallenge, authError, clearAuthError, availablePrototypeUsers, isAuthenticated, isInitialized } = useAuth();
+  const { login, verifyMfaLogin, mfaChallenge, clearMfaChallenge, authError, clearAuthError, availablePrototypeUsers, isAuthenticated, isInitialized, user } = useAuth();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -34,8 +35,73 @@ export default function LoginClient() {
   const [isVerifyingMfa, setIsVerifyingMfa] = useState(false);
   const [isResending, setIsResending] = useState(false);
   const [resendMsg, setResendMsg] = useState<string | null>(null);
+  const [enrollData, setEnrollData] = useState<{ secret: string; qr_code_uri: string } | null>(null);
+  const [loadingEnroll, setLoadingEnroll] = useState(false);
+  const [copiedSecret, setCopiedSecret] = useState(false);
+
+  useEffect(() => {
+    let ignore = false;
+    if (mfaChallenge?.enrollmentRequired && mfaChallenge.preAuthToken) {
+      const fetchEnrollment = async () => {
+        setLoadingEnroll(true);
+        try {
+          const res = await api.auth.enrolMfa(mfaChallenge.preAuthToken!);
+          if (!ignore) {
+            setEnrollData({ secret: res.secret, qr_code_uri: res.qr_code_uri });
+          }
+        } catch (err) {
+          if (!ignore) {
+            setError(err instanceof Error ? err.message : "Failed to load MFA enrollment details.");
+          }
+        } finally {
+          if (!ignore) {
+            setLoadingEnroll(false);
+          }
+        }
+      };
+      fetchEnrollment();
+    } else {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setEnrollData(null);
+    }
+    return () => {
+      ignore = true;
+    };
+  }, [mfaChallenge]);
 
   const showDevLogin = process.env.NEXT_PUBLIC_ENABLE_DEV_LOGIN === "true";
+
+  const getRedirectForRole = useCallback((userObj?: PrototypeUser | null, role?: string): string => {
+    const r = (role || userObj?.activeRole || user?.activeRole || "").toUpperCase();
+    const staffCode = (userObj?.staff_role?.code || user?.staff_role?.code || "").toUpperCase();
+
+    if (r === "ADMIN") {
+      return "/platform?tab=admin_marketplace_review";
+    }
+    if (r === "STAFF") {
+      switch (staffCode) {
+        case "DISPUTE_MANAGER":
+          return "/platform?tab=admin_disputes_refunds";
+        case "FINANCE_OFFICER":
+          return "/platform?tab=admin_approvals";
+        case "VERIFICATION_OFFICER":
+          return "/platform?tab=admin_marketplace_review";
+        case "SUPPORT_AGENT":
+          return "/platform?tab=support_overview";
+        default:
+          return "/platform?tab=marketplace_browse";
+      }
+    }
+    switch (r) {
+      case "SELLER":
+        return "/platform?tab=seller_inventory";
+      case "WORKSHOP":
+        return "/platform?tab=workshop_landing";
+      case "BUYER":
+      default:
+        return "/platform?tab=marketplace_browse";
+    }
+  }, [user]);
 
   useEffect(() => {
     // Clear any stale auth errors on mount so unauthenticated users see a clean login screen
@@ -44,9 +110,9 @@ export default function LoginClient() {
 
   useEffect(() => {
     if (isInitialized && isAuthenticated) {
-      router.replace("/platform");
+      router.replace(getRedirectForRole(user));
     }
-  }, [isInitialized, isAuthenticated, router]);
+  }, [isInitialized, isAuthenticated, router, user, getRedirectForRole]);
 
   const handleResend = async () => {
     if (!email) {
@@ -78,23 +144,20 @@ export default function LoginClient() {
     clearAuthError();
 
     const result = await login(email, password);
-    console.log("[Login] Result:", result);
-console.log("[Login] Auth error:", authError);
     setIsSubmitting(false);
 
     if (result.success) {
       if (!result.mfaRequired) {
-        router.replace("/platform");
+        router.replace(getRedirectForRole(result.user || user, result.activeRole));
       }
       // If mfaRequired, mfaChallenge state is set in AuthContext and UI switches to MFA prompt
     } else {
-      setError(authError || "Invalid email or password.");
+      setError(result.error || authError || "Invalid email or password.");
     }
   };
 
   const handleMfaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("LOGIN BUTTON CLICKED");
     if (!mfaCode || mfaCode.trim().length !== 6) {
       setError("Please enter a valid 6-digit verification code.");
       return;
@@ -103,13 +166,13 @@ console.log("[Login] Auth error:", authError);
     setIsVerifyingMfa(true);
     setError(null);
 
-    const verified = await verifyMfaLogin(mfaCode.trim());
+    const result = await verifyMfaLogin(mfaCode.trim());
     setIsVerifyingMfa(false);
 
-    if (verified) {
-      router.replace("/platform");
+    if (result.success) {
+      router.replace(getRedirectForRole(result.user || user, result.activeRole));
     } else {
-      setError(authError || "Invalid authentication code. Please try again.");
+      setError(result.error || authError || "Invalid authentication code. Please try again.");
     }
   };
 
@@ -205,14 +268,50 @@ console.log("[Login] Auth error:", authError);
                   <ShieldCheck className="w-5 h-5 text-amber-400" />
                 </div>
                 <div className="text-xs">
-                  <div className="font-bold text-white">Staff / Security Verification Required</div>
+                  <div className="font-bold text-white">
+                    {mfaChallenge.enrollmentRequired ? "Mandatory Two-Factor Authentication Setup" : "Staff / Security Verification Required"}
+                  </div>
                   <div className="text-slate-400 mt-0.5">Account: <span className="text-amber-300 font-mono">{mfaChallenge.email}</span></div>
                 </div>
               </div>
 
+              {mfaChallenge.enrollmentRequired && (
+                <div className="p-4 bg-slate-950/90 border border-amber-500/30 rounded-2xl space-y-3">
+                  <div className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                    <KeyRound className="w-4 h-4 text-amber-400" />
+                    <span>Step 1: Set up in Authenticator App</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Open Google Authenticator, Authy, or Microsoft Authenticator on your phone. Tap <strong>+</strong>, choose <strong>Enter a setup key</strong>, and paste the key below:
+                  </p>
+                  {loadingEnroll ? (
+                    <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl text-center text-xs text-slate-400 animate-pulse">
+                      Generating secure TOTP secret key...
+                    </div>
+                  ) : enrollData?.secret ? (
+                    <div className="flex items-center justify-between bg-slate-900 border border-slate-700 px-3.5 py-2.5 rounded-xl">
+                      <div className="text-xs text-amber-300 font-mono font-bold tracking-widest select-all">
+                        {enrollData.secret}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(enrollData.secret);
+                          setCopiedSecret(true);
+                          setTimeout(() => setCopiedSecret(false), 2000);
+                        }}
+                        className="px-2.5 py-1 bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 rounded-lg text-amber-300 text-xs font-bold transition-all ml-2"
+                      >
+                        {copiedSecret ? "Copied!" : "Copy Key"}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                  6-Digit Authenticator Code
+                  {mfaChallenge.enrollmentRequired ? "Step 2: Enter 6-Digit Verification Code" : "6-Digit Authenticator Code"}
                 </label>
                 <div className="relative">
 
@@ -242,7 +341,13 @@ console.log("[Login] Auth error:", authError);
                 disabled={isVerifyingMfa || mfaCode.length !== 6}
                 className="w-full h-11 bg-amber-400 hover:bg-amber-500 text-slate-950 font-black rounded-xl text-sm flex items-center justify-center gap-2 shadow-md transition-all hover:shadow-amber-400/20 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <span>{isVerifyingMfa ? "Verifying TOTP Code..." : "Verify & Complete Sign In"}</span>
+                <span>
+                  {isVerifyingMfa
+                    ? "Verifying TOTP Code..."
+                    : mfaChallenge.enrollmentRequired
+                    ? "Verify & Activate 2FA"
+                    : "Verify & Complete Sign In"}
+                </span>
                 <ArrowRight className="w-4 h-4" />
               </button>
 

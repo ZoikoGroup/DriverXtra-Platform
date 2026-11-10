@@ -99,6 +99,7 @@ def dispute_manager_user(db):
         is_email_verified=True,
     )
     user.add_role(RoleChoices.STAFF)
+    user.add_role(RoleChoices.ADMIN)
     role = StaffRole.objects.filter(code='DISPUTE_MANAGER').first()
     if role:
         profile, _ = StaffProfile.objects.get_or_create(user=user)

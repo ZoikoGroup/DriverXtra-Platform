@@ -1279,6 +1279,7 @@ class ReturnRequest(BaseUUIDModel):
 class RefundStatusChoices(models.TextChoices):
     PENDING = 'PENDING', 'Pending Approval'
     PROCESSING = 'PROCESSING', 'Processing Gateway / Payout'
+    PROCESSING_UNKNOWN = 'PROCESSING_UNKNOWN', 'Processing Unknown (Gateway Timeout)'
     SUCCEEDED = 'SUCCEEDED', 'Succeeded'
     FAILED = 'FAILED', 'Failed'
     CANCELLED = 'CANCELLED', 'Cancelled'
@@ -1323,7 +1324,7 @@ class Refund(BaseUUIDModel):
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=10, default='INR')
     status = models.CharField(
-        max_length=20,
+        max_length=30,
         choices=RefundStatusChoices.choices,
         default=RefundStatusChoices.PENDING,
         db_index=True,
@@ -1335,10 +1336,32 @@ class Refund(BaseUUIDModel):
     )
     gateway_provider = models.CharField(max_length=30, blank=True, default='')
     gateway_refund_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    idempotency_key = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Gateway refund idempotency key preserved across safe retries."
+    )
     reason = models.CharField(max_length=255, blank=True, default='')
     failure_reason = models.TextField(blank=True, default='')
     notes = models.TextField(blank=True, default='')
     processed_at = models.DateTimeField(null=True, blank=True)
+    reconciliation_attempts = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of background or manual reconciliation attempts executed."
+    )
+    last_reconciliation_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of the most recent gateway inquiry reconciliation attempt."
+    )
+    next_reconciliation_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Timestamp after which the next background reconciliation attempt is scheduled."
+    )
     created_by = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,

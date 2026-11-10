@@ -74,6 +74,8 @@ from apps.marketplace.views import (
     AdminRefundProcessView,
     AdminRefundApproveView,
     AdminRefundRejectView,
+    AdminRefundDispatchView,
+    AdminRefundReconcileView,
     BuyerRefundListView,
     AdminDisputeListView,
     AdminDisputeStatusUpdateView,
@@ -211,6 +213,8 @@ urlpatterns = [
     path('admin/refunds/<str:identifier>/process/', AdminRefundProcessView.as_view(), name='marketplace-admin-refund-process'),
     path('admin/refunds/<str:identifier>/approve/', AdminRefundApproveView.as_view(), name='marketplace-admin-refund-approve'),
     path('admin/refunds/<str:identifier>/reject/', AdminRefundRejectView.as_view(), name='marketplace-admin-refund-reject'),
+    path('admin/refunds/<str:identifier>/dispatch/', AdminRefundDispatchView.as_view(), name='marketplace-admin-refund-dispatch'),
+    path('admin/refunds/<str:identifier>/reconcile/', AdminRefundReconcileView.as_view(), name='marketplace-admin-refund-reconcile'),
     path('admin/refunds/', AdminRefundListView.as_view(), name='marketplace-admin-refunds-list'),
     path('buyer/refunds/', BuyerRefundListView.as_view(), name='marketplace-buyer-refunds-list'),
 

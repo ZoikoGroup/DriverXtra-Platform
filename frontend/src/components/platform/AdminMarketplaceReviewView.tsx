@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Image from "next/image";
+import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
   api,
   resolveMediaUrl,
@@ -39,6 +40,14 @@ export default function AdminMarketplaceReviewView({
   initialVehicleId,
   initialPartId,
 }: AdminMarketplaceReviewViewProps = {}) {
+  const { user } = useAuth();
+  const hasCatalogueManage = Boolean(
+    user?.is_superuser ||
+    user?.activeRole === "ADMIN" ||
+    user?.rawRoles?.includes("ADMIN") ||
+    user?.permissions?.includes("catalogue.manage")
+  );
+
   const [activeQueue, setActiveQueue] = useState<
     "vehicles" | "parts" | "applications" | "photo_proposals" | "reviews"
   >("vehicles");
@@ -237,11 +246,19 @@ export default function AdminMarketplaceReviewView({
           );
           if (!ignore) setParts(data);
         } else if (activeQueue === "applications") {
-          const data = await api.catalogue.listApplications(resolveCatalogueStatus(statusFilter));
-          if (!ignore) setApplications(data);
+          if (hasCatalogueManage) {
+            const data = await api.catalogue.listApplications(resolveCatalogueStatus(statusFilter));
+            if (!ignore) setApplications(data);
+          } else if (!ignore) {
+            setActiveQueue("vehicles");
+          }
         } else if (activeQueue === "photo_proposals") {
-          const data = await api.catalogue.listPhotoProposals(resolveCatalogueStatus(statusFilter));
-          if (!ignore) setPhotoProposals(data);
+          if (hasCatalogueManage) {
+            const data = await api.catalogue.listPhotoProposals(resolveCatalogueStatus(statusFilter));
+            if (!ignore) setPhotoProposals(data);
+          } else if (!ignore) {
+            setActiveQueue("vehicles");
+          }
         } else if (activeQueue === "reviews") {
           if (reviewsSubTab === "reviews") {
             const params: { status?: string; search?: string } = {};
@@ -264,7 +281,7 @@ export default function AdminMarketplaceReviewView({
     return () => {
       ignore = true;
     };
-  }, [activeQueue, statusFilter, reviewsSubTab, reviewStatusFilter, reportStatusFilter, reviewSearch]);
+  }, [activeQueue, statusFilter, reviewsSubTab, reviewStatusFilter, reportStatusFilter, reviewSearch, hasCatalogueManage]);
 
   // Handle external navigation (from Global Search) to a specific admin vehicle review item
   useEffect(() => {
@@ -413,28 +430,32 @@ export default function AdminMarketplaceReviewView({
             <Wrench className="w-3.5 h-3.5" />
             <span>Spare Parts ({parts.length})</span>
           </button>
-          <button
-            onClick={() => setActiveQueue("applications")}
-            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-              activeQueue === "applications"
-                ? "bg-amber-500 text-slate-950 shadow-md"
-                : "text-slate-400 hover:text-white"
-            }`}
-          >
-            <FilePlus className="w-3.5 h-3.5" />
-            <span>Applications ({applications.length})</span>
-          </button>
-          <button
-            onClick={() => setActiveQueue("photo_proposals")}
-            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-              activeQueue === "photo_proposals"
-                ? "bg-amber-500 text-slate-950 shadow-md"
-                : "text-slate-400 hover:text-white"
-            }`}
-          >
-            <Camera className="w-3.5 h-3.5" />
-            <span>Photo Proposals ({photoProposals.length})</span>
-          </button>
+          {hasCatalogueManage && (
+            <>
+              <button
+                onClick={() => setActiveQueue("applications")}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  activeQueue === "applications"
+                    ? "bg-amber-500 text-slate-950 shadow-md"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <FilePlus className="w-3.5 h-3.5" />
+                <span>Applications ({applications.length})</span>
+              </button>
+              <button
+                onClick={() => setActiveQueue("photo_proposals")}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                  activeQueue === "photo_proposals"
+                    ? "bg-amber-500 text-slate-950 shadow-md"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Photo Proposals ({photoProposals.length})</span>
+              </button>
+            </>
+          )}
           <button
             onClick={() => setActiveQueue("reviews")}
             className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all ${
@@ -458,8 +479,8 @@ export default function AdminMarketplaceReviewView({
               onClick={() => {
                 if (activeQueue === "vehicles") fetchVehicles();
                 else if (activeQueue === "parts") fetchParts();
-                else if (activeQueue === "applications") fetchApplications();
-                else if (activeQueue === "photo_proposals") fetchPhotoProposals();
+                else if (activeQueue === "applications") { if (hasCatalogueManage) fetchApplications(); }
+                else if (activeQueue === "photo_proposals") { if (hasCatalogueManage) fetchPhotoProposals(); }
               }}
               disabled={loading}
               className="px-3 py-1 rounded-xl font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs transition-colors flex items-center gap-1"

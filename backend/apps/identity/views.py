@@ -1,4 +1,10 @@
+import logging
 from rest_framework import generics, status, views
+from rest_framework.views import APIView
+from django.db import models
+from django.core.exceptions import ValidationError as DjangoValidationError
+
+logger = logging.getLogger(__name__)
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
@@ -8,7 +14,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 from .models import (
     User,
+    UserRole,
     RoleChoices,
+    AccountStatusChoices,
     EmailVerificationToken,
     PasswordResetToken,
     StaffRole,
@@ -26,9 +34,11 @@ from .security import (
     verify_totp_code,
 )
 from .throttling import AuthRateThrottle, PasswordResetRateThrottle
-from common.permissions import IsMarketplaceAdmin
+from common.permissions import IsMarketplaceAdmin, IsPlatformStaff, HasPermission
 from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
 from rest_framework import serializers as drf_serializers
+from rest_framework_simplejwt.views import TokenRefreshView
+from django.db import transaction
 from .serializers import (
     UserRegistrationSerializer,
     UserLoginSerializer,
@@ -41,7 +51,12 @@ from .serializers import (
     SwitchRoleSerializer,
     StaffInviteSerializer,
     StaffSetPasswordSerializer,
+    StaffAwareTokenRefreshSerializer,
     MFAVerifySerializer,
+    StaffRoleSerializer,
+    StaffMemberSerializer,
+    StaffMemberUpdateSerializer,
+    StaffInvitationSerializer,
 )
 
 
@@ -115,13 +130,21 @@ class LoginView(views.APIView):
         user = validated_data['user']
 
         if validated_data.get('mfa_required'):
+            enrollment_required = validated_data.get('mfa_enrollment_required', False)
             return Response(
                 {
-                    "status": "mfa_required",
-                    "code": "MFA_REQUIRED",
-                    "message": "Two-factor authentication code required.",
+                    "status": "mfa_enrollment_required" if enrollment_required else "mfa_required",
+                    "code": "MFA_ENROLLMENT_REQUIRED" if enrollment_required else "MFA_REQUIRED",
+                    "message": (
+                        "Two-factor authentication enrollment required before accessing the platform."
+                        if enrollment_required
+                        else "Two-factor authentication code required."
+                    ),
+                    "mfa_required": True,
                     "pre_auth_token": validated_data['pre_auth_token'],
                     "email": user.email,
+                    "active_role": validated_data.get('active_role', user.get_default_role()),
+                    "mfa_enrollment_required": enrollment_required,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -170,6 +193,11 @@ class LogoutView(views.APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class StaffTokenRefreshView(TokenRefreshView):
+    """Token refresh view applying staff-aware access token lifetime clamping (15 minutes)."""
+    serializer_class = StaffAwareTokenRefreshSerializer
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
@@ -452,9 +480,13 @@ class StaffInviteView(views.APIView):
     """Create a pending staff user with a single-use set-password token.
 
     POST /api/v1/admin/staff/invite/
+    Failure-safe: wrapped in transaction.atomic so email delivery failures
+    automatically roll back user creation, preventing stranded PENDING accounts.
+    Supports retrying invitations for accounts in PENDING status.
     """
     permission_classes = [IsMarketplaceAdmin]
 
+    @transaction.atomic
     def post(self, request):
         serializer = StaffInviteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -468,24 +500,45 @@ class StaffInviteView(views.APIView):
 
         staff_role = StaffRole.objects.get(code=staff_role_code)
 
-        user = User.objects.create_user(
-            email=email,
-            first_name=first_name,
-            last_name=last_name,
-            is_staff=True,
-            is_email_verified=True,
-            status='PENDING',
-        )
-        user.set_unusable_password()
-        user.save()
-        user.add_role(RoleChoices.STAFF)
+        # Re-invitation / idempotent pending user handling
+        user = User.objects.filter(email=email).first()
+        if user:
+            user.first_name = first_name
+            user.last_name = last_name
+            user.is_staff = True
+            user.is_email_verified = True
+            user.status = 'PENDING'
+            user.set_unusable_password()
+            user.save()
+            user.add_role(RoleChoices.STAFF)
 
-        StaffProfile.objects.create(
-            user=user,
-            staff_role=staff_role,
-            department=department,
-            totp_enabled=False,
-        )
+            # Invalidate any previous unconsumed invite tokens
+            StaffInviteToken.objects.filter(user=user, consumed_at__isnull=True).delete()
+
+            profile, _ = StaffProfile.objects.get_or_create(user=user)
+            profile.staff_role = staff_role
+            profile.department = department
+            profile.totp_enabled = False
+            profile.save()
+        else:
+            user = User.objects.create_user(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                is_staff=True,
+                is_email_verified=True,
+                status='PENDING',
+            )
+            user.set_unusable_password()
+            user.save()
+            user.add_role(RoleChoices.STAFF)
+
+            StaffProfile.objects.create(
+                user=user,
+                staff_role=staff_role,
+                department=department,
+                totp_enabled=False,
+            )
 
         import secrets
         import hashlib
@@ -505,18 +558,34 @@ class StaffInviteView(views.APIView):
         frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
         invite_link = f"{frontend_url}/set-password?token={raw_token}"
 
-        send_mail(
-            subject="DriverXtra Staff Invitation",
-            message=(
-                f"Hello {user.full_name or user.email},\n\n"
-                f"You have been invited to join DriverXtra Operations as a {staff_role.name} ({department}).\n\n"
-                f"Please set your password using this link:\n{invite_link}\n\n"
-                f"This link expires in 48 hours.\n\nDriverXtra Operations Team"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            fail_silently=False,
-        )
+        try:
+            send_mail(
+                subject="DriverXtra Staff Invitation",
+                message=(
+                    f"Hello {user.full_name or user.email},\n\n"
+                    f"You have been invited to join DriverXtra Operations as a {staff_role.name} ({department}).\n\n"
+                    f"Please set your password using this link:\n{invite_link}\n\n"
+                    f"This link expires in 48 hours.\n\nDriverXtra Operations Team"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+        except Exception as mail_exc:
+            logger.error("Failed to deliver staff invitation email to %s: %s", user.email, str(mail_exc))
+            corr_id = getattr(request, 'correlation_id', '')
+            record_denied_audit_entry(
+                action="staff:invite",
+                resource_type="User",
+                resource_id=str(user.id),
+                actor_id=request.user.id,
+                reason_code="EMAIL_DELIVERY_FAILED",
+                correlation_id=corr_id,
+                metadata={"email": user.email, "error": str(mail_exc)},
+            )
+            raise drf_serializers.ValidationError({
+                "email": "Failed to deliver invitation email. The operation has been safely rolled back. Please verify the email address or try again later."
+            })
 
         corr_id = getattr(request, 'correlation_id', '')
         record_audit_entry(
@@ -533,15 +602,16 @@ class StaffInviteView(views.APIView):
             },
         )
 
-        return Response(
-            {
-                "status": "success",
-                "message": "Staff invitation dispatched successfully.",
-                "email": user.email,
-                "staff_role": staff_role.code,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        resp_data = {
+            "status": "success",
+            "message": "Staff invitation dispatched successfully.",
+            "email": user.email,
+            "staff_role": staff_role.code,
+        }
+        if getattr(settings, 'DEBUG', False):
+            resp_data["invite_token"] = raw_token
+
+        return Response(resp_data, status=status.HTTP_201_CREATED)
 
 
 class StaffSetPasswordView(views.APIView):
@@ -551,6 +621,7 @@ class StaffSetPasswordView(views.APIView):
     """
     permission_classes = [AllowAny]
 
+    @transaction.atomic
     def post(self, request):
         serializer = StaffSetPasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -593,11 +664,47 @@ class MFAEnrolView(views.APIView):
     """Generate TOTP MFA secret and QR code URI for authenticator setup.
 
     POST /api/v1/auth/mfa/enrol/
+    Accepts authenticated users or unauthenticated users with a valid mfa_enrollment pre_auth_token.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def post(self, request):
-        user = request.user
+        user = None
+        pre_auth_token = request.data.get('pre_auth_token') or request.headers.get('X-MFA-Token', '').strip()
+
+        if request.user and request.user.is_authenticated:
+            user = request.user
+        elif pre_auth_token:
+            try:
+                data = signing.loads(pre_auth_token, salt='driverxtra.mfa', max_age=300)
+                if data.get('action') != 'mfa_enrollment':
+                    return Response(
+                        {"status": "error", "code": 400, "message": "Invalid token purpose for MFA enrollment."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                user_id = data.get('user_id')
+                user = User.objects.filter(id=user_id, is_active=True).first()
+                if not user:
+                    return Response(
+                        {"status": "error", "code": 404, "message": "User not found."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+                if user.has_mfa_enabled:
+                    return Response(
+                        {"status": "error", "code": 400, "message": "MFA is already enrolled for this account."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            except Exception:
+                return Response(
+                    {"status": "error", "code": 400, "message": "Invalid or expired MFA session. Please log in again."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            return Response(
+                {"status": "error", "code": 401, "message": "Authentication or valid MFA enrollment token required."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
         profile, _ = StaffProfile.objects.get_or_create(user=user)
 
         plain_secret = generate_new_totp_secret()
@@ -607,15 +714,16 @@ class MFAEnrolView(views.APIView):
 
         uri = get_totp_provisioning_uri(plain_secret, user.email)
 
-        return Response(
-            {
-                "status": "success",
-                "secret": plain_secret,
-                "qr_code_uri": uri,
-                "message": "TOTP secret generated. Please verify with a code from your authenticator app to enable MFA.",
-            },
-            status=status.HTTP_200_OK,
-        )
+        resp_data = {
+            "status": "success",
+            "secret": plain_secret,
+            "qr_code_uri": uri,
+            "message": "TOTP secret generated. Please verify with a code from your authenticator app to enable MFA.",
+        }
+        if pre_auth_token:
+            resp_data["pre_auth_token"] = pre_auth_token
+
+        return Response(resp_data, status=status.HTTP_200_OK)
 
 
 class MFAVerifyView(views.APIView):
@@ -633,10 +741,21 @@ class MFAVerifyView(views.APIView):
         pre_auth_token = serializer.validated_data.get('pre_auth_token', '').strip()
 
         if pre_auth_token:
-            # Login completion mode
+            import hashlib
+            from django.core.cache import cache
+
+            cache_key = f"mfa_used_{hashlib.sha256(pre_auth_token.encode()).hexdigest()}"
+            if cache.get(cache_key):
+                return Response(
+                    {"status": "error", "code": 400, "message": "MFA session token has already been used. Please log in again."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Login completion mode or enrollment verification mode via pre_auth_token
             try:
                 data = signing.loads(pre_auth_token, salt='driverxtra.mfa', max_age=300)
                 user_id = data.get('user_id')
+                action = data.get('action', 'mfa_login')
                 user = User.objects.get(id=user_id)
             except Exception:
                 return Response(
@@ -649,6 +768,23 @@ class MFAVerifyView(views.APIView):
                 return Response(
                     {"status": "error", "code": 400, "message": "Invalid two-factor authentication code."},
                     status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            cache.set(cache_key, True, timeout=360)
+
+            # If this was an enrollment verification, activate MFA on the profile
+            if action == 'mfa_enrollment':
+                profile.totp_enabled = True
+                profile.save(update_fields=['totp_enabled', 'updated_at'])
+                corr_id = getattr(request, 'correlation_id', '')
+                record_audit_entry(
+                    event_type="staff.mfa.enrolled",
+                    action="auth:mfa.enrol",
+                    resource_type="User",
+                    resource_id=str(user.id),
+                    actor_id=user.id,
+                    correlation_id=corr_id,
+                    metadata={"email": user.email},
                 )
 
             active_role = user.get_default_role()
@@ -735,3 +871,1827 @@ class MFAVerifyView(views.APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+
+
+# =========================================================
+# MAKER-CHECKER APPROVAL ENGINE VIEWS
+# =========================================================
+
+class ApprovalRequestListView(APIView):
+    """GET /api/v1/admin/approvals/
+
+    List and filter Maker-Checker approval requests.
+    Requires Platform Staff membership.
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def get(self, request):
+        from apps.identity.models import ApprovalRequest
+        from apps.identity.serializers import ApprovalRequestSerializer
+
+        queryset = ApprovalRequest.objects.select_related(
+            'requester',
+            'approver',
+            'executed_by',
+            'requester__staff_profile__staff_role',
+            'approver__staff_profile__staff_role',
+        ).all().order_by('-requested_at')
+
+        status_param = request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param.strip().upper())
+
+        action_param = request.query_params.get('action_type')
+        if action_param:
+            queryset = queryset.filter(action_type=action_param.strip().upper())
+
+        target_param = request.query_params.get('target_type')
+        if target_param:
+            queryset = queryset.filter(target_type=target_param.strip())
+
+        search_param = request.query_params.get('search')
+        if search_param:
+            term = search_param.strip()
+            queryset = queryset.filter(
+                models.Q(target_id__icontains=term)
+                | models.Q(reason__icontains=term)
+                | models.Q(notes__icontains=term)
+                | models.Q(requester__email__icontains=term)
+            )
+
+        serializer = ApprovalRequestSerializer(queryset, many=True, context={'request': request})
+        return Response({
+            "status": "success",
+            "count": queryset.count(),
+            "results": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+
+class ApprovalRequestDetailView(APIView):
+    """GET /api/v1/admin/approvals/<id>/
+
+    Retrieve details for a single approval request.
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def get(self, request, pk):
+        from apps.identity.models import ApprovalRequest
+        from apps.identity.serializers import ApprovalRequestSerializer
+
+        try:
+            req = ApprovalRequest.objects.select_related(
+                'requester',
+                'approver',
+                'executed_by',
+                'requester__staff_profile__staff_role',
+                'approver__staff_profile__staff_role',
+            ).get(id=pk)
+        except (ApprovalRequest.DoesNotExist, DjangoValidationError, ValueError):
+            return Response({"error": "Approval request not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ApprovalRequestSerializer(req, context={'request': request})
+        return Response({
+            "status": "success",
+            "approval_request": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+
+class ApprovalRequestApproveView(APIView):
+    """POST /api/v1/admin/approvals/<id>/approve/
+
+    Authorizes an approval request.
+    Maker cannot approve own request. Requires 'finance.payout' or admin.
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def post(self, request, pk):
+        from apps.identity.approval_service import ApprovalService
+        from apps.identity.serializers import ApprovalActionSerializer, ApprovalRequestSerializer
+
+        serializer = ApprovalActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        notes = serializer.validated_data.get('notes', '')
+
+        try:
+            approved_req = ApprovalService.approve_request(
+                approval_request_id=pk,
+                approver=request.user,
+                notes=notes,
+            )
+            return Response({
+                "status": "success",
+                "message": "Approval request approved successfully.",
+                "approval_request": ApprovalRequestSerializer(approved_req, context={'request': request}).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+class StaffRoleListView(views.APIView):
+    """GET /api/v1/admin/staff/roles/
+    List active platform staff roles and their granted capabilities.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        roles = StaffRole.objects.all().prefetch_related('role_permissions__permission').order_by('name')
+        return Response({
+            "status": "success",
+            "roles": StaffRoleSerializer(roles, many=True).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMetricsView(views.APIView):
+    """GET /api/v1/admin/staff/metrics/
+    Aggregated operational metrics for staff dashboard.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct()
+
+        total_staff = staff_qs.count()
+        active_staff = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True).count()
+        suspended_staff = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False)).count()
+        pending_invitations = StaffInviteToken.objects.filter(
+            consumed_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).count()
+
+        mfa_enrolled_count = staff_qs.filter(staff_profile__totp_enabled=True).count()
+        mfa_rate = round((mfa_enrolled_count / total_staff * 100), 1) if total_staff > 0 else 0.0
+
+        role_dist = {}
+        for role in StaffRole.objects.all():
+            role_dist[role.code] = staff_qs.filter(staff_profile__staff_role=role).count()
+        role_dist['ADMIN'] = staff_qs.filter(models.Q(is_superuser=True) | models.Q(user_roles__role=RoleChoices.ADMIN)).distinct().count()
+
+        return Response({
+            "status": "success",
+            "metrics": {
+                "total_staff": total_staff,
+                "active_staff": active_staff,
+                "suspended_staff": suspended_staff,
+                "pending_invitations": pending_invitations,
+                "mfa_enrolled_count": mfa_enrolled_count,
+                "mfa_adoption_percentage": mfa_rate,
+                "role_distribution": role_dist,
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberListView(views.APIView):
+    """GET /api/v1/admin/staff/
+    Search and filter staff directory.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct().select_related('staff_profile__staff_role').order_by('-date_joined')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            staff_qs = staff_qs.filter(
+                models.Q(email__icontains=search) |
+                models.Q(first_name__icontains=search) |
+                models.Q(last_name__icontains=search)
+            )
+
+        role = request.query_params.get('role', '').strip().upper()
+        if role:
+            if role == 'ADMIN':
+                staff_qs = staff_qs.filter(
+                    models.Q(is_superuser=True) |
+                    models.Q(user_roles__role=RoleChoices.ADMIN) |
+                    models.Q(staff_profile__staff_role__code='ADMIN')
+                )
+            else:
+                staff_qs = staff_qs.filter(staff_profile__staff_role__code=role)
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param:
+            if status_param == AccountStatusChoices.ACTIVE:
+                staff_qs = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True)
+            elif status_param == AccountStatusChoices.SUSPENDED:
+                staff_qs = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False))
+            else:
+                staff_qs = staff_qs.filter(status=status_param)
+
+        mfa_param = request.query_params.get('mfa', '').strip().lower()
+        if mfa_param in ('true', '1'):
+            staff_qs = staff_qs.filter(staff_profile__totp_enabled=True)
+        elif mfa_param in ('false', '0'):
+            staff_qs = staff_qs.filter(models.Q(staff_profile__totp_enabled=False) | models.Q(staff_profile__isnull=True))
+
+        data = StaffMemberSerializer(staff_qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberDetailView(views.APIView):
+    """GET /api/v1/admin/staff/<pk>/
+    PATCH /api/v1/admin/staff/<pk>/
+    View and modify staff member role, department, or status.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def _get_target_user(self, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+        try:
+            return User.objects.filter(id=pk).select_related('staff_profile__staff_role').first()
+        except (DjangoValidationError, ValueError):
+            return None
+
+    def get(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "status": "success",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+    def patch(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = StaffMemberUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        target_status = validated.get('status')
+        target_role = validated.get('staff_role')
+        target_department = validated.get('department')
+
+        # Prevent admin from suspending themselves
+        if target_status == AccountStatusChoices.SUSPENDED and str(request.user.id) == str(user.id):
+            return Response({"error": "Cannot suspend your own administrator account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update status
+        if target_status:
+            user.status = target_status
+            if target_status == AccountStatusChoices.SUSPENDED:
+                user.is_active = False
+            elif target_status == AccountStatusChoices.ACTIVE:
+                user.is_active = True
+            user.save(update_fields=['status', 'is_active', 'updated_at'])
+
+        # Update staff profile
+        profile, _ = StaffProfile.objects.get_or_create(user=user)
+        updated_profile_fields = []
+        if target_role:
+            role_obj = StaffRole.objects.get(code=target_role)
+            profile.staff_role = role_obj
+            updated_profile_fields.append('staff_role')
+        if target_department is not None and target_department.strip():
+            profile.department = target_department.strip()
+            updated_profile_fields.append('department')
+
+        if updated_profile_fields:
+            updated_profile_fields.append('updated_at')
+            profile.save(update_fields=updated_profile_fields)
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.member.updated",
+            action="staff:update",
+            resource_type="User",
+            resource_id=str(user.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={
+                "target_email": user.email,
+                "new_status": target_status,
+                "new_role": target_role,
+                "new_department": target_department,
+            },
+        )
+
+        user.refresh_from_db()
+        return Response({
+            "status": "success",
+            "message": "Staff member updated successfully.",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationListView(views.APIView):
+    """GET /api/v1/admin/staff/invitations/
+    List and filter pending, accepted, and expired staff invitations.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        now = timezone.now()
+        qs = StaffInviteToken.objects.all().select_related('user__staff_profile__staff_role').order_by('-created_at')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                models.Q(user__email__icontains=search) |
+                models.Q(user__first_name__icontains=search) |
+                models.Q(user__last_name__icontains=search)
+            )
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param == 'PENDING':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__gt=now)
+        elif status_param == 'EXPIRED':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__lte=now)
+        elif status_param == 'ACCEPTED':
+            qs = qs.filter(consumed_at__isnull=False)
+
+        data = StaffInvitationSerializer(qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationResendView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/resend/
+    Generates a new secure token, extends validity to 48 hours, and dispatches an invitation email.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        import secrets
+        import hashlib
+        from datetime import timedelta
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user__staff_profile__staff_role').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot resend invitation for an account that has already been activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Invalidate existing token and issue a fresh one
+        raw_token = secrets.token_urlsafe(32)
+        invite.token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+        invite.expires_at = timezone.now() + timedelta(days=2)
+        invite.save(update_fields=['token_hash', 'expires_at', 'updated_at'])
+
+        user = invite.user
+        staff_role_name = user.staff_profile.staff_role.name if (hasattr(user, 'staff_profile') and user.staff_profile.staff_role) else "Operations Staff"
+        department = user.staff_profile.department if hasattr(user, 'staff_profile') else "Operations"
+
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+        invite_link = f"{frontend_url}/set-password?token={raw_token}"
+
+        try:
+            send_mail(
+                subject="DriverXtra Staff Invitation (Resent)",
+                message=(
+                    f"Hello {user.full_name or user.email},\n\n"
+                    f"Your invitation to join DriverXtra Operations as a {staff_role_name} ({department}) has been refreshed.\n\n"
+                    f"Please set your password using this link:\n{invite_link}\n\n"
+                    f"This link expires in 48 hours.\n\nDriverXtra Operations Team"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+        except Exception as mail_exc:
+            logger.error("Failed to deliver resent staff invitation email to %s: %s", user.email, str(mail_exc))
+            corr_id = getattr(request, 'correlation_id', '')
+            record_denied_audit_entry(
+                action="staff:invite_resend",
+                resource_type="User",
+                resource_id=str(user.id),
+                actor_id=request.user.id,
+                reason_code="EMAIL_DELIVERY_FAILED",
+                correlation_id=corr_id,
+                metadata={"email": user.email, "error": str(mail_exc)},
+            )
+            return Response({
+                "error": "Failed to deliver invitation email. Please verify the email server or recipient address."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.resent",
+            action="staff:invite_resend",
+            resource_type="User",
+            resource_id=str(user.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": user.email, "invite_id": str(invite.id)},
+        )
+
+        resp = {
+            "status": "success",
+            "message": "Staff invitation dispatched successfully.",
+            "email": user.email,
+        }
+        if getattr(settings, 'DEBUG', False):
+            resp["invite_token"] = raw_token
+        return Response(resp, status=status.HTTP_200_OK)
+
+
+class StaffInvitationRevokeView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/revoke/
+    DELETE /api/v1/admin/staff/invitations/<pk>/revoke/
+    Revokes a pending staff invitation and safely cleans up unactivated invite records.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        return self._revoke(request, pk)
+
+    @transaction.atomic
+    def delete(self, request, pk):
+        return self._revoke(request, pk)
+
+    def _revoke(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot revoke an invitation that has already been accepted and activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = invite.user
+        email = user.email
+
+        # Delete token and pending user record safely
+        invite.delete()
+        if user.status == AccountStatusChoices.PENDING and not user.has_usable_password():
+            user.delete()
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.revoked",
+            action="staff:invite_revoke",
+            resource_type="StaffInviteToken",
+            resource_id=str(pk),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": email},
+        )
+
+        return Response({
+            "status": "success",
+            "message": "Staff invitation successfully revoked.",
+        }, status=status.HTTP_200_OK)
+
+
+
+class ApprovalRequestRejectView(APIView):
+    """POST /api/v1/admin/approvals/<id>/reject/
+
+    Rejects a pending approval request with a required reason.
+    Maker cannot review own request. Requires 'finance.payout' or admin.
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def post(self, request, pk):
+        from apps.identity.approval_service import ApprovalService
+        from apps.identity.serializers import ApprovalActionSerializer, ApprovalRequestSerializer
+
+        serializer = ApprovalActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get('reason', '').strip()
+        notes = serializer.validated_data.get('notes', '').strip()
+
+        if not reason:
+            return Response({"error": "A rejection reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            rejected_req = ApprovalService.reject_request(
+                approval_request_id=pk,
+                approver=request.user,
+                reason=reason,
+                notes=notes,
+            )
+            return Response({
+                "status": "success",
+                "message": "Approval request rejected.",
+                "approval_request": ApprovalRequestSerializer(rejected_req, context={'request': request}).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+class StaffRoleListView(views.APIView):
+    """GET /api/v1/admin/staff/roles/
+    List active platform staff roles and their granted capabilities.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        roles = StaffRole.objects.all().prefetch_related('role_permissions__permission').order_by('name')
+        return Response({
+            "status": "success",
+            "roles": StaffRoleSerializer(roles, many=True).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMetricsView(views.APIView):
+    """GET /api/v1/admin/staff/metrics/
+    Aggregated operational metrics for staff dashboard.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct()
+
+        total_staff = staff_qs.count()
+        active_staff = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True).count()
+        suspended_staff = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False)).count()
+        pending_invitations = StaffInviteToken.objects.filter(
+            consumed_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).count()
+
+        mfa_enrolled_count = staff_qs.filter(staff_profile__totp_enabled=True).count()
+        mfa_rate = round((mfa_enrolled_count / total_staff * 100), 1) if total_staff > 0 else 0.0
+
+        role_dist = {}
+        for role in StaffRole.objects.all():
+            role_dist[role.code] = staff_qs.filter(staff_profile__staff_role=role).count()
+        role_dist['ADMIN'] = staff_qs.filter(models.Q(is_superuser=True) | models.Q(user_roles__role=RoleChoices.ADMIN)).distinct().count()
+
+        return Response({
+            "status": "success",
+            "metrics": {
+                "total_staff": total_staff,
+                "active_staff": active_staff,
+                "suspended_staff": suspended_staff,
+                "pending_invitations": pending_invitations,
+                "mfa_enrolled_count": mfa_enrolled_count,
+                "mfa_adoption_percentage": mfa_rate,
+                "role_distribution": role_dist,
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberListView(views.APIView):
+    """GET /api/v1/admin/staff/
+    Search and filter staff directory.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct().select_related('staff_profile__staff_role').order_by('-date_joined')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            staff_qs = staff_qs.filter(
+                models.Q(email__icontains=search) |
+                models.Q(first_name__icontains=search) |
+                models.Q(last_name__icontains=search)
+            )
+
+        role = request.query_params.get('role', '').strip().upper()
+        if role:
+            if role == 'ADMIN':
+                staff_qs = staff_qs.filter(
+                    models.Q(is_superuser=True) |
+                    models.Q(user_roles__role=RoleChoices.ADMIN) |
+                    models.Q(staff_profile__staff_role__code='ADMIN')
+                )
+            else:
+                staff_qs = staff_qs.filter(staff_profile__staff_role__code=role)
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param:
+            if status_param == AccountStatusChoices.ACTIVE:
+                staff_qs = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True)
+            elif status_param == AccountStatusChoices.SUSPENDED:
+                staff_qs = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False))
+            else:
+                staff_qs = staff_qs.filter(status=status_param)
+
+        mfa_param = request.query_params.get('mfa', '').strip().lower()
+        if mfa_param in ('true', '1'):
+            staff_qs = staff_qs.filter(staff_profile__totp_enabled=True)
+        elif mfa_param in ('false', '0'):
+            staff_qs = staff_qs.filter(models.Q(staff_profile__totp_enabled=False) | models.Q(staff_profile__isnull=True))
+
+        data = StaffMemberSerializer(staff_qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberDetailView(views.APIView):
+    """GET /api/v1/admin/staff/<pk>/
+    PATCH /api/v1/admin/staff/<pk>/
+    View and modify staff member role, department, or status.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def _get_target_user(self, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+        try:
+            return User.objects.filter(id=pk).select_related('staff_profile__staff_role').first()
+        except (DjangoValidationError, ValueError):
+            return None
+
+    def get(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "status": "success",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+    def patch(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = StaffMemberUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        target_status = validated.get('status')
+        target_role = validated.get('staff_role')
+        target_department = validated.get('department')
+
+        # Prevent admin from suspending themselves
+        if target_status == AccountStatusChoices.SUSPENDED and str(request.user.id) == str(user.id):
+            return Response({"error": "Cannot suspend your own administrator account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update status
+        if target_status:
+            user.status = target_status
+            if target_status == AccountStatusChoices.SUSPENDED:
+                user.is_active = False
+            elif target_status == AccountStatusChoices.ACTIVE:
+                user.is_active = True
+            user.save(update_fields=['status', 'is_active', 'updated_at'])
+
+        # Update staff profile
+        profile, _ = StaffProfile.objects.get_or_create(user=user)
+        updated_profile_fields = []
+        if target_role:
+            role_obj = StaffRole.objects.get(code=target_role)
+            profile.staff_role = role_obj
+            updated_profile_fields.append('staff_role')
+        if target_department is not None and target_department.strip():
+            profile.department = target_department.strip()
+            updated_profile_fields.append('department')
+
+        if updated_profile_fields:
+            updated_profile_fields.append('updated_at')
+            profile.save(update_fields=updated_profile_fields)
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.member.updated",
+            action="staff:update",
+            resource_type="User",
+            resource_id=str(user.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={
+                "target_email": user.email,
+                "new_status": target_status,
+                "new_role": target_role,
+                "new_department": target_department,
+            },
+        )
+
+        user.refresh_from_db()
+        return Response({
+            "status": "success",
+            "message": "Staff member updated successfully.",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationListView(views.APIView):
+    """GET /api/v1/admin/staff/invitations/
+    List and filter pending, accepted, and expired staff invitations.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        now = timezone.now()
+        qs = StaffInviteToken.objects.all().select_related('user__staff_profile__staff_role').order_by('-created_at')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                models.Q(user__email__icontains=search) |
+                models.Q(user__first_name__icontains=search) |
+                models.Q(user__last_name__icontains=search)
+            )
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param == 'PENDING':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__gt=now)
+        elif status_param == 'EXPIRED':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__lte=now)
+        elif status_param == 'ACCEPTED':
+            qs = qs.filter(consumed_at__isnull=False)
+
+        data = StaffInvitationSerializer(qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationResendView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/resend/
+    Generates a new secure token, extends validity to 48 hours, and dispatches an invitation email.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        import secrets
+        import hashlib
+        from datetime import timedelta
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user__staff_profile__staff_role').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot resend invitation for an account that has already been activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Invalidate existing token and issue a fresh one
+        raw_token = secrets.token_urlsafe(32)
+        invite.token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+        invite.expires_at = timezone.now() + timedelta(days=2)
+        invite.save(update_fields=['token_hash', 'expires_at', 'updated_at'])
+
+        user = invite.user
+        staff_role_name = user.staff_profile.staff_role.name if (hasattr(user, 'staff_profile') and user.staff_profile.staff_role) else "Operations Staff"
+        department = user.staff_profile.department if hasattr(user, 'staff_profile') else "Operations"
+
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+        invite_link = f"{frontend_url}/set-password?token={raw_token}"
+
+        try:
+            send_mail(
+                subject="DriverXtra Staff Invitation (Resent)",
+                message=(
+                    f"Hello {user.full_name or user.email},\n\n"
+                    f"Your invitation to join DriverXtra Operations as a {staff_role_name} ({department}) has been refreshed.\n\n"
+                    f"Please set your password using this link:\n{invite_link}\n\n"
+                    f"This link expires in 48 hours.\n\nDriverXtra Operations Team"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+        except Exception as mail_exc:
+            logger.error("Failed to deliver resent staff invitation email to %s: %s", user.email, str(mail_exc))
+            corr_id = getattr(request, 'correlation_id', '')
+            record_denied_audit_entry(
+                action="staff:invite_resend",
+                resource_type="User",
+                resource_id=str(user.id),
+                actor_id=request.user.id,
+                reason_code="EMAIL_DELIVERY_FAILED",
+                correlation_id=corr_id,
+                metadata={"email": user.email, "error": str(mail_exc)},
+            )
+            return Response({
+                "error": "Failed to deliver invitation email. Please verify the email server or recipient address."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.resent",
+            action="staff:invite_resend",
+            resource_type="User",
+            resource_id=str(user.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": user.email, "invite_id": str(invite.id)},
+        )
+
+        resp = {
+            "status": "success",
+            "message": "Staff invitation dispatched successfully.",
+            "email": user.email,
+        }
+        if getattr(settings, 'DEBUG', False):
+            resp["invite_token"] = raw_token
+        return Response(resp, status=status.HTTP_200_OK)
+
+
+class StaffInvitationRevokeView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/revoke/
+    DELETE /api/v1/admin/staff/invitations/<pk>/revoke/
+    Revokes a pending staff invitation and safely cleans up unactivated invite records.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        return self._revoke(request, pk)
+
+    @transaction.atomic
+    def delete(self, request, pk):
+        return self._revoke(request, pk)
+
+    def _revoke(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot revoke an invitation that has already been accepted and activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = invite.user
+        email = user.email
+
+        # Delete token and pending user record safely
+        invite.delete()
+        if user.status == AccountStatusChoices.PENDING and not user.has_usable_password():
+            user.delete()
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.revoked",
+            action="staff:invite_revoke",
+            resource_type="StaffInviteToken",
+            resource_id=str(pk),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": email},
+        )
+
+        return Response({
+            "status": "success",
+            "message": "Staff invitation successfully revoked.",
+        }, status=status.HTTP_200_OK)
+
+
+
+class ApprovalRequestCancelView(APIView):
+    """POST /api/v1/admin/approvals/<id>/cancel/
+
+    Cancels a pending approval request.
+    Only requester or platform administrator can cancel.
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def post(self, request, pk):
+        from apps.identity.approval_service import ApprovalService
+        from apps.identity.serializers import ApprovalActionSerializer, ApprovalRequestSerializer
+
+        serializer = ApprovalActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        notes = serializer.validated_data.get('notes', '')
+
+        try:
+            cancelled_req = ApprovalService.cancel_request(
+                approval_request_id=pk,
+                actor=request.user,
+                notes=notes,
+            )
+            return Response({
+                "status": "success",
+                "message": "Approval request cancelled.",
+                "approval_request": ApprovalRequestSerializer(cancelled_req, context={'request': request}).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+class StaffRoleListView(views.APIView):
+    """GET /api/v1/admin/staff/roles/
+    List active platform staff roles and their granted capabilities.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        roles = StaffRole.objects.all().prefetch_related('role_permissions__permission').order_by('name')
+        return Response({
+            "status": "success",
+            "roles": StaffRoleSerializer(roles, many=True).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMetricsView(views.APIView):
+    """GET /api/v1/admin/staff/metrics/
+    Aggregated operational metrics for staff dashboard.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct()
+
+        total_staff = staff_qs.count()
+        active_staff = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True).count()
+        suspended_staff = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False)).count()
+        pending_invitations = StaffInviteToken.objects.filter(
+            consumed_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).count()
+
+        mfa_enrolled_count = staff_qs.filter(staff_profile__totp_enabled=True).count()
+        mfa_rate = round((mfa_enrolled_count / total_staff * 100), 1) if total_staff > 0 else 0.0
+
+        role_dist = {}
+        for role in StaffRole.objects.all():
+            role_dist[role.code] = staff_qs.filter(staff_profile__staff_role=role).count()
+        role_dist['ADMIN'] = staff_qs.filter(models.Q(is_superuser=True) | models.Q(user_roles__role=RoleChoices.ADMIN)).distinct().count()
+
+        return Response({
+            "status": "success",
+            "metrics": {
+                "total_staff": total_staff,
+                "active_staff": active_staff,
+                "suspended_staff": suspended_staff,
+                "pending_invitations": pending_invitations,
+                "mfa_enrolled_count": mfa_enrolled_count,
+                "mfa_adoption_percentage": mfa_rate,
+                "role_distribution": role_dist,
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberListView(views.APIView):
+    """GET /api/v1/admin/staff/
+    Search and filter staff directory.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct().select_related('staff_profile__staff_role').order_by('-date_joined')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            staff_qs = staff_qs.filter(
+                models.Q(email__icontains=search) |
+                models.Q(first_name__icontains=search) |
+                models.Q(last_name__icontains=search)
+            )
+
+        role = request.query_params.get('role', '').strip().upper()
+        if role:
+            if role == 'ADMIN':
+                staff_qs = staff_qs.filter(
+                    models.Q(is_superuser=True) |
+                    models.Q(user_roles__role=RoleChoices.ADMIN) |
+                    models.Q(staff_profile__staff_role__code='ADMIN')
+                )
+            else:
+                staff_qs = staff_qs.filter(staff_profile__staff_role__code=role)
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param:
+            if status_param == AccountStatusChoices.ACTIVE:
+                staff_qs = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True)
+            elif status_param == AccountStatusChoices.SUSPENDED:
+                staff_qs = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False))
+            else:
+                staff_qs = staff_qs.filter(status=status_param)
+
+        mfa_param = request.query_params.get('mfa', '').strip().lower()
+        if mfa_param in ('true', '1'):
+            staff_qs = staff_qs.filter(staff_profile__totp_enabled=True)
+        elif mfa_param in ('false', '0'):
+            staff_qs = staff_qs.filter(models.Q(staff_profile__totp_enabled=False) | models.Q(staff_profile__isnull=True))
+
+        data = StaffMemberSerializer(staff_qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberDetailView(views.APIView):
+    """GET /api/v1/admin/staff/<pk>/
+    PATCH /api/v1/admin/staff/<pk>/
+    View and modify staff member role, department, or status.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def _get_target_user(self, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+        try:
+            return User.objects.filter(id=pk).select_related('staff_profile__staff_role').first()
+        except (DjangoValidationError, ValueError):
+            return None
+
+    def get(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "status": "success",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+    def patch(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = StaffMemberUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        target_status = validated.get('status')
+        target_role = validated.get('staff_role')
+        target_department = validated.get('department')
+
+        # Prevent admin from suspending themselves
+        if target_status == AccountStatusChoices.SUSPENDED and str(request.user.id) == str(user.id):
+            return Response({"error": "Cannot suspend your own administrator account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update status
+        if target_status:
+            user.status = target_status
+            if target_status == AccountStatusChoices.SUSPENDED:
+                user.is_active = False
+            elif target_status == AccountStatusChoices.ACTIVE:
+                user.is_active = True
+            user.save(update_fields=['status', 'is_active', 'updated_at'])
+
+        # Update staff profile
+        profile, _ = StaffProfile.objects.get_or_create(user=user)
+        updated_profile_fields = []
+        if target_role:
+            role_obj = StaffRole.objects.get(code=target_role)
+            profile.staff_role = role_obj
+            updated_profile_fields.append('staff_role')
+        if target_department is not None and target_department.strip():
+            profile.department = target_department.strip()
+            updated_profile_fields.append('department')
+
+        if updated_profile_fields:
+            updated_profile_fields.append('updated_at')
+            profile.save(update_fields=updated_profile_fields)
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.member.updated",
+            action="staff:update",
+            resource_type="User",
+            resource_id=str(user.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={
+                "target_email": user.email,
+                "new_status": target_status,
+                "new_role": target_role,
+                "new_department": target_department,
+            },
+        )
+
+        user.refresh_from_db()
+        return Response({
+            "status": "success",
+            "message": "Staff member updated successfully.",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationListView(views.APIView):
+    """GET /api/v1/admin/staff/invitations/
+    List and filter pending, accepted, and expired staff invitations.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        now = timezone.now()
+        qs = StaffInviteToken.objects.all().select_related('user__staff_profile__staff_role').order_by('-created_at')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                models.Q(user__email__icontains=search) |
+                models.Q(user__first_name__icontains=search) |
+                models.Q(user__last_name__icontains=search)
+            )
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param == 'PENDING':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__gt=now)
+        elif status_param == 'EXPIRED':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__lte=now)
+        elif status_param == 'ACCEPTED':
+            qs = qs.filter(consumed_at__isnull=False)
+
+        data = StaffInvitationSerializer(qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationResendView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/resend/
+    Generates a new secure token, extends validity to 48 hours, and dispatches an invitation email.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        import secrets
+        import hashlib
+        from datetime import timedelta
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user__staff_profile__staff_role').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot resend invitation for an account that has already been activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Invalidate existing token and issue a fresh one
+        raw_token = secrets.token_urlsafe(32)
+        invite.token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+        invite.expires_at = timezone.now() + timedelta(days=2)
+        invite.save(update_fields=['token_hash', 'expires_at', 'updated_at'])
+
+        user = invite.user
+        staff_role_name = user.staff_profile.staff_role.name if (hasattr(user, 'staff_profile') and user.staff_profile.staff_role) else "Operations Staff"
+        department = user.staff_profile.department if hasattr(user, 'staff_profile') else "Operations"
+
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+        invite_link = f"{frontend_url}/set-password?token={raw_token}"
+
+        try:
+            send_mail(
+                subject="DriverXtra Staff Invitation (Resent)",
+                message=(
+                    f"Hello {user.full_name or user.email},\n\n"
+                    f"Your invitation to join DriverXtra Operations as a {staff_role_name} ({department}) has been refreshed.\n\n"
+                    f"Please set your password using this link:\n{invite_link}\n\n"
+                    f"This link expires in 48 hours.\n\nDriverXtra Operations Team"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+        except Exception as mail_exc:
+            logger.error("Failed to deliver resent staff invitation email to %s: %s", user.email, str(mail_exc))
+            corr_id = getattr(request, 'correlation_id', '')
+            record_denied_audit_entry(
+                action="staff:invite_resend",
+                resource_type="User",
+                resource_id=str(user.id),
+                actor_id=request.user.id,
+                reason_code="EMAIL_DELIVERY_FAILED",
+                correlation_id=corr_id,
+                metadata={"email": user.email, "error": str(mail_exc)},
+            )
+            return Response({
+                "error": "Failed to deliver invitation email. Please verify the email server or recipient address."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.resent",
+            action="staff:invite_resend",
+            resource_type="User",
+            resource_id=str(user.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": user.email, "invite_id": str(invite.id)},
+        )
+
+        resp = {
+            "status": "success",
+            "message": "Staff invitation dispatched successfully.",
+            "email": user.email,
+        }
+        if getattr(settings, 'DEBUG', False):
+            resp["invite_token"] = raw_token
+        return Response(resp, status=status.HTTP_200_OK)
+
+
+class StaffInvitationRevokeView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/revoke/
+    DELETE /api/v1/admin/staff/invitations/<pk>/revoke/
+    Revokes a pending staff invitation and safely cleans up unactivated invite records.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        return self._revoke(request, pk)
+
+    @transaction.atomic
+    def delete(self, request, pk):
+        return self._revoke(request, pk)
+
+    def _revoke(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot revoke an invitation that has already been accepted and activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = invite.user
+        email = user.email
+
+        # Delete token and pending user record safely
+        invite.delete()
+        if user.status == AccountStatusChoices.PENDING and not user.has_usable_password():
+            user.delete()
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.revoked",
+            action="staff:invite_revoke",
+            resource_type="StaffInviteToken",
+            resource_id=str(pk),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": email},
+        )
+
+        return Response({
+            "status": "success",
+            "message": "Staff invitation successfully revoked.",
+        }, status=status.HTTP_200_OK)
+
+
+
+class ApprovalRequestExecuteView(APIView):
+    """POST /api/v1/admin/approvals/<id>/execute/
+
+    Executes an approved request (e.g. gateway refund dispatch).
+    Requires 'finance.payout' or admin. Status must be APPROVED.
+    """
+    permission_classes = [IsPlatformStaff, HasPermission('finance.payout')]
+
+    def post(self, request, pk):
+        from apps.identity.approval_service import ApprovalService
+        from apps.identity.serializers import ApprovalRequestSerializer
+
+        try:
+            executed_req, result = ApprovalService.execute_request(
+                approval_request_id=pk,
+                executor=request.user,
+            )
+            return Response({
+                "status": "success",
+                "message": "Approval request executed successfully.",
+                "approval_request": ApprovalRequestSerializer(executed_req, context={'request': request}).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class StaffRoleListView(views.APIView):
+    """GET /api/v1/admin/staff/roles/
+    List active platform staff roles and their granted capabilities.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        roles = StaffRole.objects.all().prefetch_related('role_permissions__permission').order_by('name')
+        return Response({
+            "status": "success",
+            "roles": StaffRoleSerializer(roles, many=True).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMetricsView(views.APIView):
+    """GET /api/v1/admin/staff/metrics/
+    Aggregated operational metrics for staff dashboard.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct()
+
+        total_staff = staff_qs.count()
+        active_staff = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True).count()
+        suspended_staff = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False)).count()
+        pending_invitations = StaffInviteToken.objects.filter(
+            consumed_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).count()
+
+        mfa_enrolled_count = staff_qs.filter(staff_profile__totp_enabled=True).count()
+        mfa_rate = round((mfa_enrolled_count / total_staff * 100), 1) if total_staff > 0 else 0.0
+
+        role_dist = {}
+        for role in StaffRole.objects.all():
+            role_dist[role.code] = staff_qs.filter(staff_profile__staff_role=role).count()
+        role_dist['ADMIN'] = staff_qs.filter(models.Q(is_superuser=True) | models.Q(user_roles__role=RoleChoices.ADMIN)).distinct().count()
+
+        return Response({
+            "status": "success",
+            "metrics": {
+                "total_staff": total_staff,
+                "active_staff": active_staff,
+                "suspended_staff": suspended_staff,
+                "pending_invitations": pending_invitations,
+                "mfa_enrolled_count": mfa_enrolled_count,
+                "mfa_adoption_percentage": mfa_rate,
+                "role_distribution": role_dist,
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberListView(views.APIView):
+    """GET /api/v1/admin/staff/
+    Search and filter staff directory.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        staff_qs = User.objects.filter(
+            models.Q(is_staff=True) |
+            models.Q(staff_profile__isnull=False) |
+            models.Q(user_roles__role__in=['STAFF', RoleChoices.ADMIN])
+        ).distinct().select_related('staff_profile__staff_role').order_by('-date_joined')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            staff_qs = staff_qs.filter(
+                models.Q(email__icontains=search) |
+                models.Q(first_name__icontains=search) |
+                models.Q(last_name__icontains=search)
+            )
+
+        role = request.query_params.get('role', '').strip().upper()
+        if role:
+            if role == 'ADMIN':
+                staff_qs = staff_qs.filter(
+                    models.Q(is_superuser=True) |
+                    models.Q(user_roles__role=RoleChoices.ADMIN) |
+                    models.Q(staff_profile__staff_role__code='ADMIN')
+                )
+            else:
+                staff_qs = staff_qs.filter(staff_profile__staff_role__code=role)
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param:
+            if status_param == AccountStatusChoices.ACTIVE:
+                staff_qs = staff_qs.filter(status=AccountStatusChoices.ACTIVE, is_active=True)
+            elif status_param == AccountStatusChoices.SUSPENDED:
+                staff_qs = staff_qs.filter(models.Q(status=AccountStatusChoices.SUSPENDED) | models.Q(is_active=False))
+            else:
+                staff_qs = staff_qs.filter(status=status_param)
+
+        mfa_param = request.query_params.get('mfa', '').strip().lower()
+        if mfa_param in ('true', '1'):
+            staff_qs = staff_qs.filter(staff_profile__totp_enabled=True)
+        elif mfa_param in ('false', '0'):
+            staff_qs = staff_qs.filter(models.Q(staff_profile__totp_enabled=False) | models.Q(staff_profile__isnull=True))
+
+        data = StaffMemberSerializer(staff_qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffMemberDetailView(views.APIView):
+    """GET /api/v1/admin/staff/<pk>/
+    PATCH /api/v1/admin/staff/<pk>/
+    View and modify staff member role, department, or status.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def _get_target_user(self, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+        try:
+            return User.objects.filter(id=pk).select_related('staff_profile__staff_role').first()
+        except (DjangoValidationError, ValueError):
+            return None
+
+    def get(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            "status": "success",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+    def patch(self, request, pk):
+        user = self._get_target_user(pk)
+        if not user:
+            return Response({"error": "Staff member not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = StaffMemberUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        target_status = validated.get('status')
+        target_role = validated.get('staff_role')
+        target_department = validated.get('department')
+
+        # Prevent admin from suspending themselves
+        if target_status == AccountStatusChoices.SUSPENDED and str(request.user.id) == str(user.id):
+            return Response({"error": "Cannot suspend your own administrator account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if target is an administrator, and ensure we do not suspend or demote the last active admin
+        is_target_admin = (
+            user.is_superuser
+            or user.has_role(RoleChoices.ADMIN)
+            or (hasattr(user, 'staff_profile') and user.staff_profile and user.staff_profile.staff_role and user.staff_profile.staff_role.code == 'ADMIN')
+        )
+        if is_target_admin:
+            other_active_admins = User.objects.filter(
+                models.Q(is_superuser=True) |
+                models.Q(user_roles__role=RoleChoices.ADMIN) |
+                models.Q(staff_profile__staff_role__code='ADMIN'),
+                is_active=True,
+                status=AccountStatusChoices.ACTIVE,
+            ).exclude(id=user.id).distinct().count()
+
+            if other_active_admins == 0:
+                if target_status in (AccountStatusChoices.SUSPENDED, AccountStatusChoices.DEACTIVATED):
+                    return Response({
+                        "error": "Cannot suspend the last active platform administrator."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                if target_role and target_role != 'ADMIN':
+                    return Response({
+                        "error": "Cannot demote the last active platform administrator."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            # Update status
+            if target_status:
+                user.status = target_status
+                if target_status in (AccountStatusChoices.SUSPENDED, AccountStatusChoices.DEACTIVATED):
+                    user.is_active = False
+                elif target_status == AccountStatusChoices.ACTIVE:
+                    user.is_active = True
+                user.save(update_fields=['status', 'is_active', 'updated_at'])
+
+                # If staff user was deactivated or suspended, unassign any active support tickets
+                if not user.is_active:
+                    from apps.support.services import TicketService
+                    corr_id = getattr(request, 'correlation_id', '')
+                    TicketService.handle_agent_deactivation(
+                        agent=user,
+                        actor=request.user,
+                        correlation_id=corr_id,
+                    )
+
+            # Update staff profile
+            profile, _ = StaffProfile.objects.get_or_create(user=user)
+            updated_profile_fields = []
+            if target_role:
+                role_obj = StaffRole.objects.get(code=target_role)
+                profile.staff_role = role_obj
+                updated_profile_fields.append('staff_role')
+                if user.has_role(RoleChoices.ADMIN) and target_role != 'ADMIN':
+                    user.remove_role(RoleChoices.ADMIN)
+            if target_department is not None and target_department.strip():
+                profile.department = target_department.strip()
+                updated_profile_fields.append('department')
+
+            if updated_profile_fields:
+                updated_profile_fields.append('updated_at')
+                profile.save(update_fields=updated_profile_fields)
+
+            corr_id = getattr(request, 'correlation_id', '')
+            record_audit_entry(
+                event_type="staff.member.updated",
+                action="staff:update",
+                resource_type="User",
+                resource_id=str(user.id),
+                actor_id=request.user.id,
+                correlation_id=corr_id,
+                metadata={
+                    "target_email": user.email,
+                    "new_status": target_status,
+                    "new_role": target_role,
+                    "new_department": target_department,
+                },
+            )
+
+        user.refresh_from_db()
+        return Response({
+            "status": "success",
+            "message": "Staff member updated successfully.",
+            "staff_member": StaffMemberSerializer(user).data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationListView(views.APIView):
+    """GET /api/v1/admin/staff/invitations/
+    List and filter pending, accepted, and expired staff invitations.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    def get(self, request):
+        now = timezone.now()
+        qs = StaffInviteToken.objects.all().select_related('user__staff_profile__staff_role').order_by('-created_at')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                models.Q(user__email__icontains=search) |
+                models.Q(user__first_name__icontains=search) |
+                models.Q(user__last_name__icontains=search)
+            )
+
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param == 'PENDING':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__gt=now)
+        elif status_param == 'EXPIRED':
+            qs = qs.filter(consumed_at__isnull=True, expires_at__lte=now)
+        elif status_param == 'ACCEPTED':
+            qs = qs.filter(consumed_at__isnull=False)
+
+        data = StaffInvitationSerializer(qs, many=True).data
+        return Response({
+            "status": "success",
+            "count": len(data),
+            "results": data,
+        }, status=status.HTTP_200_OK)
+
+
+class StaffInvitationResendView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/resend/
+    Generates a new secure token, extends validity to 48 hours, and dispatches an invitation email.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        import secrets
+        import hashlib
+        from datetime import timedelta
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user__staff_profile__staff_role').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot resend invitation for an account that has already been activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Invalidate existing token and issue a fresh one
+        raw_token = secrets.token_urlsafe(32)
+        invite.token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+        invite.expires_at = timezone.now() + timedelta(days=2)
+        invite.save(update_fields=['token_hash', 'expires_at', 'updated_at'])
+
+        user = invite.user
+        staff_role_name = user.staff_profile.staff_role.name if (hasattr(user, 'staff_profile') and user.staff_profile.staff_role) else "Operations Staff"
+        department = user.staff_profile.department if hasattr(user, 'staff_profile') else "Operations"
+
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+        invite_link = f"{frontend_url}/set-password?token={raw_token}"
+
+        try:
+            send_mail(
+                subject="DriverXtra Staff Invitation (Resent)",
+                message=(
+                    f"Hello {user.full_name or user.email},\n\n"
+                    f"Your invitation to join DriverXtra Operations as a {staff_role_name} ({department}) has been refreshed.\n\n"
+                    f"Please set your password using this link:\n{invite_link}\n\n"
+                    f"This link expires in 48 hours.\n\nDriverXtra Operations Team"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+        except Exception as mail_exc:
+            logger.error("Failed to deliver resent staff invitation email to %s: %s", user.email, str(mail_exc))
+            corr_id = getattr(request, 'correlation_id', '')
+            record_denied_audit_entry(
+                action="staff:invite_resend",
+                resource_type="User",
+                resource_id=str(user.id),
+                actor_id=request.user.id,
+                reason_code="EMAIL_DELIVERY_FAILED",
+                correlation_id=corr_id,
+                metadata={"email": user.email, "error": str(mail_exc)},
+            )
+            return Response({
+                "error": "Failed to deliver invitation email. Please verify the email server or recipient address."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.resent",
+            action="staff:invite_resend",
+            resource_type="User",
+            resource_id=str(user.id),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": user.email, "invite_id": str(invite.id)},
+        )
+
+        resp = {
+            "status": "success",
+            "message": "Staff invitation dispatched successfully.",
+            "email": user.email,
+        }
+        if getattr(settings, 'DEBUG', False):
+            resp["invite_token"] = raw_token
+        return Response(resp, status=status.HTTP_200_OK)
+
+
+class StaffInvitationRevokeView(views.APIView):
+    """POST /api/v1/admin/staff/invitations/<pk>/revoke/
+    DELETE /api/v1/admin/staff/invitations/<pk>/revoke/
+    Revokes a pending staff invitation and safely cleans up unactivated invite records.
+    """
+    permission_classes = [IsMarketplaceAdmin]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        return self._revoke(request, pk)
+
+    @transaction.atomic
+    def delete(self, request, pk):
+        return self._revoke(request, pk)
+
+    def _revoke(self, request, pk):
+        import uuid
+        try:
+            uuid.UUID(str(pk))
+        except (ValueError, TypeError, AttributeError):
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        invite = StaffInviteToken.objects.filter(models.Q(id=pk) | models.Q(user__id=pk)).select_related('user').first()
+        if not invite:
+            return Response({"error": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if invite.consumed_at is not None or invite.user.status == AccountStatusChoices.ACTIVE:
+            return Response({
+                "error": "Cannot revoke an invitation that has already been accepted and activated."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = invite.user
+        email = user.email
+
+        # Delete token and pending user record safely
+        invite.delete()
+        if user.status == AccountStatusChoices.PENDING and not user.has_usable_password():
+            user.delete()
+
+        corr_id = getattr(request, 'correlation_id', '')
+        record_audit_entry(
+            event_type="staff.invite.revoked",
+            action="staff:invite_revoke",
+            resource_type="StaffInviteToken",
+            resource_id=str(pk),
+            actor_id=request.user.id,
+            correlation_id=corr_id,
+            metadata={"email": email},
+        )
+
+        return Response({
+            "status": "success",
+            "message": "Staff invitation successfully revoked.",
+        }, status=status.HTTP_200_OK)
+
+

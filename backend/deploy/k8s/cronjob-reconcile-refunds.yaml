@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: driverxtra-refund-reconciler
+  namespace: driverxtra
+  labels:
+    app.kubernetes.io/name: driverxtra-refund-reconciler
+    app.kubernetes.io/part-of: driverxtra-platform
+    app.kubernetes.io/component: background-worker
+spec:
+  # Run every 10 minutes to process pending-unknown refunds
+  schedule: "*/10 * * * *"
+  # Strict concurrency policy: never allow overlapping job runs
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 120
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: driverxtra-refund-reconciler
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: reconciler
+              image: driverxtra-backend:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - manage.py
+                - reconcile_refunds
+                - --batch
+                - "50"
+              envFrom:
+                - configMapRef:
+                    name: driverxtra-backend-config
+                - secretRef:
+                    name: driverxtra-backend-secrets
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+# ==============================================================================
+# DEPLOYMENT & OPERATIONAL INSTRUCTIONS
+# ==============================================================================
+# NOTE: Automated background scheduling is NOT active simply because this
+# manifest exists in the repository. It must be explicitly deployed to the target
+# Kubernetes cluster.
+#
+# 1. Verification of Prerequisites:
+#    Ensure driverxtra-backend-config and driverxtra-backend-secrets exist in namespace:
+#      kubectl -n driverxtra get secret driverxtra-backend-secrets
+#
+# 2. Deploying the CronJob:
+#      kubectl apply -f backend/deploy/k8s/cronjob-reconcile-refunds.yaml
+#
+# 3. Verifying Scheduled Execution:
+#      kubectl -n driverxtra get cronjob driverxtra-refund-reconciler
+#
+# 4. Triggering a Manual Test Run:
+#      kubectl -n driverxtra create job --from=cronjob/driverxtra-refund-reconciler test-reconcile-manual-01
+#      kubectl -n driverxtra logs -l job-name=test-reconcile-manual-01
+#
+# 5. Monitoring & Alerting:
+#      Alert when failedJobsHistoryLimit is reached or Prometheus metric
+#      kube_cronjob_status_last_failed_time increases.
+

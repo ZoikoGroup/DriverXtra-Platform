@@ -44,11 +44,11 @@ export interface AuthContextType {
   isInitialized: boolean;
   isLoading: boolean;
   authError: string | null;
-  mfaChallenge: { preAuthToken: string; email: string } | null;
+  mfaChallenge: { preAuthToken: string; email: string; enrollmentRequired?: boolean } | null;
   clearMfaChallenge: () => void;
   clearAuthError: () => void;
-  login: (email: string, password?: string, code?: string) => Promise<{ success: boolean; mfaRequired?: boolean }>;
-  verifyMfaLogin: (code: string) => Promise<boolean>;
+  login: (email: string, password?: string, code?: string) => Promise<{ success: boolean; mfaRequired?: boolean; activeRole?: string; user?: PrototypeUser; error?: string }>;
+  verifyMfaLogin: (code: string) => Promise<{ success: boolean; activeRole?: string; user?: PrototypeUser; error?: string }>;
   register: (payload: RegisterPayload) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   switchRole: (role: CanonicalRole | string) => Promise<boolean>;
