@@ -3211,6 +3211,7 @@ export const api = {
     },
   },
 
+<<<<<<< HEAD
   // Phase 4: Customer Support & Ticketing System
   support: {
     async getMyTickets(statusFilter?: string): Promise<{ tickets: SupportTicketSummary[]; count: number }> {
@@ -3375,9 +3376,104 @@ export const api = {
         method: "GET",
         requiresAuth: true,
       });
+=======
+  commercial: {
+    // Admin: SKU catalogue
+    listSkus(params?: Record<string, string>): Promise<CommercialPage<CommercialSku>> {
+      return apiRequest<CommercialPage<CommercialSku>>(`/commercial/admin/skus/${commercialQuery(params)}`, { method: "GET" });
+    },
+    createSku(payload: CommercialSkuPayload): Promise<CommercialSku> {
+      return apiRequest<CommercialSku>("/commercial/admin/skus/", { method: "POST", body: JSON.stringify(payload) });
+    },
+    updateSku(id: string, payload: Partial<CommercialSkuPayload>): Promise<CommercialSku> {
+      return apiRequest<CommercialSku>(`/commercial/admin/skus/${id}/`, { method: "PATCH", body: JSON.stringify(payload) });
+    },
+    transitionSku(id: string, payload: CommercialStatusTransition): Promise<CommercialSku> {
+      return apiRequest<CommercialSku>(`/commercial/admin/skus/${id}/status/`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    newSkuVersion(id: string): Promise<CommercialSku> {
+      return apiRequest<CommercialSku>(`/commercial/admin/skus/${id}/new-version/`, { method: "POST" });
+    },
+
+    // Admin: rate schedules
+    listRates(params?: Record<string, string>): Promise<CommercialPage<CommercialRateSchedule>> {
+      return apiRequest<CommercialPage<CommercialRateSchedule>>(`/commercial/admin/rate-schedules/${commercialQuery(params)}`, { method: "GET" });
+    },
+    createRate(payload: CommercialRatePayload): Promise<CommercialRateSchedule> {
+      return apiRequest<CommercialRateSchedule>("/commercial/admin/rate-schedules/", { method: "POST", body: JSON.stringify(payload) });
+    },
+    transitionRate(id: string, payload: CommercialStatusTransition): Promise<CommercialRateSchedule> {
+      return apiRequest<CommercialRateSchedule>(`/commercial/admin/rate-schedules/${id}/status/`, { method: "POST", body: JSON.stringify(payload) });
+    },
+
+    // Admin: party role profiles
+    listRoleProfiles(params?: Record<string, string>): Promise<CommercialPage<PartyRoleProfile>> {
+      return apiRequest<CommercialPage<PartyRoleProfile>>(`/commercial/admin/role-profiles/${commercialQuery(params)}`, { method: "GET" });
+    },
+    createRoleProfile(payload: PartyRoleProfilePayload): Promise<PartyRoleProfile> {
+      return apiRequest<PartyRoleProfile>("/commercial/admin/role-profiles/", { method: "POST", body: JSON.stringify(payload) });
+    },
+    transitionRoleProfile(id: string, payload: CommercialStatusTransition): Promise<PartyRoleProfile> {
+      return apiRequest<PartyRoleProfile>(`/commercial/admin/role-profiles/${id}/status/`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    newRoleProfileVersion(id: string): Promise<PartyRoleProfile> {
+      return apiRequest<PartyRoleProfile>(`/commercial/admin/role-profiles/${id}/new-version/`, { method: "POST" });
+    },
+
+    // Admin: country gates
+    listGates(params?: Record<string, string>): Promise<CommercialPage<CountryGate>> {
+      return apiRequest<CommercialPage<CountryGate>>(`/commercial/admin/country-gates/${commercialQuery(params)}`, { method: "GET" });
+    },
+    getGate(id: string): Promise<CountryGate> {
+      return apiRequest<CountryGate>(`/commercial/admin/country-gates/${id}/`, { method: "GET" });
+    },
+    createGate(payload: CountryGatePayload): Promise<CountryGate> {
+      return apiRequest<CountryGate>("/commercial/admin/country-gates/", { method: "POST", body: JSON.stringify(payload) });
+    },
+    updateGateConfig(id: string, payload: Partial<Pick<CountryGatePayload, "allowed_currencies" | "tax_schedule_reference" | "notes">>): Promise<CountryGate> {
+      return apiRequest<CountryGate>(`/commercial/admin/country-gates/${id}/`, { method: "PATCH", body: JSON.stringify(payload) });
+    },
+    transitionGate(id: string, payload: { to_status: string; reason: string; evidence_reference?: string }): Promise<CountryGate> {
+      return apiRequest<CountryGate>(`/commercial/admin/country-gates/${id}/transition/`, { method: "POST", body: JSON.stringify(payload) });
+    },
+
+    // Admin: preview, quotes, outbox
+    previewQuote(payload: CommercialQuoteRequest): Promise<CommercialQuotePreview> {
+      return apiRequest<CommercialQuotePreview>("/commercial/admin/quote-preview/", { method: "POST", body: JSON.stringify(payload) });
+    },
+    listAdminQuotes(params?: Record<string, string>): Promise<CommercialPage<CommercialQuote>> {
+      return apiRequest<CommercialPage<CommercialQuote>>(`/commercial/admin/quotes/${commercialQuery(params)}`, { method: "GET" });
+    },
+    listOutbox(params?: Record<string, string>): Promise<CommercialPage<OutboxEventRecord>> {
+      return apiRequest<CommercialPage<OutboxEventRecord>>(`/commercial/admin/outbox/${commercialQuery(params)}`, { method: "GET" });
+    },
+
+    // Public plans and customer quotes
+    getPlans(market: string, vertical?: string): Promise<CommercialPlansResponse> {
+      return apiRequest<CommercialPlansResponse>(`/commercial/plans/${commercialQuery({ market, ...(vertical ? { vertical } : {}) })}`, {
+        method: "GET",
+        requiresAuth: false,
+      });
+    },
+    createQuote(payload: CommercialQuoteRequest): Promise<CommercialQuote> {
+      return apiRequest<CommercialQuote>("/commercial/quotes/", { method: "POST", body: JSON.stringify(payload) });
+    },
+    getQuote(id: string): Promise<CommercialQuote> {
+      return apiRequest<CommercialQuote>(`/commercial/quotes/${id}/`, { method: "GET" });
+    },
+    acceptQuote(id: string, payload: { terms_hash: string; consent_notice_version: string }): Promise<CommercialQuote> {
+      return apiRequest<CommercialQuote>(`/commercial/quotes/${id}/accept/`, { method: "POST", body: JSON.stringify(payload) });
+>>>>>>> origin/main
     },
   },
 };
+
+function commercialQuery(params?: Record<string, string>): string {
+  if (!params) return "";
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== "" && value !== undefined));
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
 
 // ==========================================
 // Phase 4 Support & Ticketing Type Definitions
@@ -5578,4 +5674,310 @@ export interface WorkshopTechnicianMember {
   role: string;
   role_display?: string;
   is_active?: boolean;
+}
+
+// ==========================================
+// R1 Commercial Control Plane Type Definitions
+// ==========================================
+
+export interface CommercialPage<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
+export type CommercialCatalogueStatus = "DRAFT" | "ILLUSTRATIVE" | "APPROVED" | "RETIRED";
+export type CountryGateStatus =
+  | "DESIGNED"
+  | "LEGALLY_REVIEWED"
+  | "PARTNER_VERIFIED"
+  | "FINANCE_SIGNED"
+  | "TECHNICAL_REHEARSED"
+  | "ENABLED"
+  | "SUSPENDED"
+  | "WITHDRAWN";
+
+export interface CommercialStatusTransition {
+  to_status: string;
+  reason: string;
+  approval_reference?: string;
+}
+
+export interface CommercialSkuPayload {
+  sku_code: string;
+  name: string;
+  description?: string;
+  family: string;
+  revenue_code: string;
+  vertical: string;
+  fee_basis: string;
+  entitlement_type?: string;
+  billing_interval?: string;
+  tax_class?: string;
+  refund_policy_id?: string;
+  illustrative_band_note?: string;
+}
+
+export interface CommercialSku extends Required<Omit<CommercialSkuPayload, "description">> {
+  id: string;
+  version: number;
+  description: string;
+  is_regulated: boolean;
+  status: CommercialCatalogueStatus;
+  status_reason: string;
+  approval_reference: string;
+  approved_at: string | null;
+  created_by_email: string | null;
+  approved_by_email: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CommercialRatePayload {
+  sku: string;
+  name: string;
+  country_code: string;
+  currency: string;
+  payer_role: string;
+  plan_code?: string;
+  priority?: number;
+  effective_from: string;
+  effective_to?: string | null;
+  flat_amount_minor?: number | null;
+  percentage_bps?: number | null;
+  min_fee_minor?: number | null;
+  max_fee_minor?: number | null;
+}
+
+export interface CommercialRateSchedule {
+  id: string;
+  name: string;
+  sku: string;
+  sku_code: string;
+  sku_version: number;
+  fee_basis: string;
+  country_code: string;
+  vertical: string;
+  currency: string;
+  currency_exponent: number | null;
+  payer_role: string;
+  plan_code: string;
+  priority: number;
+  effective_from: string;
+  effective_to: string | null;
+  flat_amount_minor: number | null;
+  percentage_bps: number | null;
+  min_fee_minor: number | null;
+  max_fee_minor: number | null;
+  status: CommercialCatalogueStatus;
+  status_reason: string;
+  approval_reference: string;
+  approved_at: string | null;
+  created_by_email: string | null;
+  approved_by_email: string | null;
+  created_at: string;
+}
+
+export interface PartyRoleProfilePayload {
+  code: string;
+  name: string;
+  profile_type: string;
+  country_code: string;
+  vertical: string;
+  seller_of_record: string;
+  service_performer: string;
+  platform_role: string;
+  payment_role: string;
+  tax_party: string;
+  invoice_issuer: string;
+  licensed_partner_required?: boolean;
+  legal_memo_reference?: string;
+  effective_from: string;
+  effective_to?: string | null;
+}
+
+export interface PartyRoleProfile extends PartyRoleProfilePayload {
+  id: string;
+  version: number;
+  is_gated: boolean;
+  status: "DRAFT" | "APPROVED" | "RETIRED";
+  status_reason: string;
+  approval_reference: string;
+  approved_at: string | null;
+  created_by_email: string | null;
+  approved_by_email: string | null;
+  created_at: string;
+}
+
+export interface CountryGatePayload {
+  country_code: string;
+  vertical: string;
+  capability: string;
+  allowed_currencies?: string[];
+  tax_schedule_reference?: string;
+  notes?: string;
+}
+
+export interface CountryGateTransitionRecord {
+  id: string;
+  from_status: CountryGateStatus;
+  to_status: CountryGateStatus;
+  version_after: number;
+  actor_email: string;
+  reason: string;
+  evidence_reference: string;
+  created_at: string;
+}
+
+export interface CountryGate {
+  id: string;
+  country_code: string;
+  vertical: string;
+  capability: string;
+  status: CountryGateStatus;
+  version: number;
+  is_open: boolean;
+  is_regulated: boolean;
+  allowed_currencies: string[];
+  tax_schedule_reference: string;
+  notes: string;
+  allowed_next_statuses: CountryGateStatus[];
+  transitions?: CountryGateTransitionRecord[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CommercialFeeItem {
+  sku_code: string;
+  payer_role: string;
+  quantity?: number;
+  plan_code?: string;
+}
+
+export interface CommercialQuoteRequest {
+  country_code: string;
+  vertical: string;
+  currency: string;
+  customer_role: string;
+  role_profile_code: string;
+  fee_items: CommercialFeeItem[];
+  face_value_minor?: number;
+  discount_minor?: number;
+  delivery_minor?: number;
+  tax_minor?: number;
+  terms_version?: string;
+  tax_determination_reference?: string;
+  organisation_id?: string | null;
+  seller_organisation_id?: string | null;
+}
+
+export interface CommercialQuoteLine {
+  position?: number;
+  line_type: "FACE_VALUE" | "DISCOUNT" | "DELIVERY" | "TAX" | "PLATFORM_FEE";
+  description: string;
+  sku_code: string;
+  sku_version: number | null;
+  quantity: number;
+  amount_minor: number;
+  payer_role: string;
+  is_customer_payable: boolean;
+  sku_status?: string | null;
+  rate_status?: string | null;
+}
+
+export interface CommercialBlockingReason {
+  rule: string;
+  message: string;
+}
+
+export interface CommercialQuotePreview {
+  binding: false;
+  pricing_label: "NON_BINDING_PREVIEW";
+  country_code: string;
+  vertical: string;
+  currency: string;
+  currency_exponent: number;
+  face_value_minor: number;
+  discount_minor: number;
+  delivery_minor: number;
+  tax_minor: number;
+  commissionable_base_minor: number;
+  platform_fee_minor: number;
+  customer_total_minor: number;
+  lines: CommercialQuoteLine[];
+  parties: Record<string, string | number | boolean> | null;
+  blocking_reasons: CommercialBlockingReason[];
+  would_be_binding: boolean;
+}
+
+export interface CommercialQuote {
+  id: string;
+  quote_number: string;
+  customer_email: string;
+  customer_role: string;
+  country_code: string;
+  vertical: string;
+  currency: string;
+  currency_exponent: number;
+  face_value_minor: number;
+  discount_minor: number;
+  delivery_minor: number;
+  tax_minor: number;
+  commissionable_base_minor: number;
+  platform_fee_minor: number;
+  customer_total_minor: number;
+  gate_version: number;
+  terms_version: string;
+  terms_hash: string;
+  expires_at: string;
+  status: "ISSUED" | "ACCEPTED" | "EXPIRED" | "VOID";
+  effective_status: "ISSUED" | "ACCEPTED" | "EXPIRED" | "VOID";
+  accepted_at: string | null;
+  lines: CommercialQuoteLine[];
+  created_at: string;
+}
+
+export interface OutboxEventRecord {
+  id: string;
+  topic: string;
+  schema_version: number;
+  aggregate_type: string;
+  aggregate_id: string;
+  payload: Record<string, unknown>;
+  correlation_id: string;
+  occurred_at: string;
+  status: "PENDING" | "PUBLISHED" | "FAILED";
+  attempts: number;
+  published_at: string | null;
+  last_error: string;
+}
+
+export interface CommercialPlansResponse {
+  market: string;
+  activated_verticals: string[];
+  plans: Array<{
+    sku_code: string;
+    version: number;
+    name: string;
+    description: string;
+    family: string;
+    vertical: string;
+    fee_basis: string;
+    billing_interval: string;
+    entitlement_type: string;
+    rates: Array<{
+      currency: string;
+      currency_exponent: number;
+      payer_role: string;
+      plan_code: string;
+      flat_amount_minor: number | null;
+      percentage_bps: number | null;
+      min_fee_minor: number | null;
+      max_fee_minor: number | null;
+      effective_from: string;
+      effective_to: string | null;
+    }>;
+  }>;
+  disclosure: string;
 }

@@ -22,6 +22,7 @@ import AdminDisputesRefundsView from "@/components/platform/AdminDisputesRefunds
 import AdminApprovalsView from "@/components/platform/AdminApprovalsView";
 import SupportAgentLandingView from "@/components/platform/SupportAgentLandingView";
 import CustomerSupportTicketsView from "@/components/platform/CustomerSupportTicketsView";
+import CommercialAdminView from "@/components/platform/CommercialAdminView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
 import BuyerOrdersView from "@/components/platform/BuyerOrdersView";
@@ -139,6 +140,7 @@ export default function PlatformDashboardPage() {
       admin_approvals: "Maker-Checker Dual Authorization & Approvals Queue",
       support_overview: "Support Operations & Customer Inquiries Workspace",
       my_tickets: "Help & Support — Customer Inquiries",
+      commercial_admin: "Commercial Control Plane — SKUs, Gates, Rates & Quotes",
       profile: "User Profile & Account Settings",
       organisations: "Organisations & Teams",
       garage: "My Garage — Vehicle Management",
@@ -298,6 +300,12 @@ export default function PlatformDashboardPage() {
           ) : currentTab === "admin_staff_management" ? (
             isPlatformAdmin ? (
               <AdminStaffManagementView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "commercial_admin" ? (
+            isAdmin ? (
+              <CommercialAdminView />
             ) : (
               <MarketplaceBrowseView />
             )

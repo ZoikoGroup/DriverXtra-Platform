@@ -20,6 +20,7 @@ import {
   ClipboardCheck,
   Scale,
   Headphones,
+  Landmark,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -97,6 +98,7 @@ export default function Sidebar({
       { id: "admin_workshop_oversight", label: "Workshop Oversight", icon: ClipboardCheck, badge: "Audit" },
       { id: "admin_staff_management", label: "Staff Invitations & Roles", icon: UserPlus, badge: "Admin" },
       { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
+      { id: "commercial_admin", label: "Commercial Control Plane", icon: Landmark, badge: "R1" },
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
