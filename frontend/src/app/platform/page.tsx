@@ -18,6 +18,10 @@ import BuyerWorkshopsView from "@/components/platform/BuyerWorkshopsView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import AdminWorkshopOversightView from "@/components/platform/AdminWorkshopOversightView";
+import AdminDisputesRefundsView from "@/components/platform/AdminDisputesRefundsView";
+import AdminApprovalsView from "@/components/platform/AdminApprovalsView";
+import SupportAgentLandingView from "@/components/platform/SupportAgentLandingView";
+import CustomerSupportTicketsView from "@/components/platform/CustomerSupportTicketsView";
 import CommercialAdminView from "@/components/platform/CommercialAdminView";
 import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
@@ -28,8 +32,24 @@ import NotificationDrawer, { useNotificationUnreadCount } from "@/components/pla
 function getDefaultTabForRole(user?: PrototypeUser | null): string {
   if (!user) return "marketplace_browse";
   const activeRole = user.activeRole || (user.rawRoles && user.rawRoles[0]) || "BUYER";
-  if (activeRole === "ADMIN" || activeRole === "STAFF") {
+  const staffRoleCode = user.staff_role?.code?.toUpperCase();
+
+  if (activeRole === "ADMIN") {
     return "admin_marketplace_review";
+  }
+  if (activeRole === "STAFF") {
+    switch (staffRoleCode) {
+      case "DISPUTE_MANAGER":
+        return "admin_disputes_refunds";
+      case "FINANCE_OFFICER":
+        return "admin_approvals";
+      case "VERIFICATION_OFFICER":
+        return "admin_marketplace_review";
+      case "SUPPORT_AGENT":
+        return "support_overview";
+      default:
+        return "marketplace_browse";
+    }
   }
   const hasSeller = Boolean(user.rawRoles?.includes("SELLER") || activeRole === "SELLER");
   const hasWorkshop = Boolean(user.rawRoles?.includes("WORKSHOP") || activeRole === "WORKSHOP");
@@ -57,14 +77,14 @@ export default function PlatformDashboardPage() {
 
   const activeRole = user?.activeRole || (user?.rawRoles && user?.rawRoles[0]) || "BUYER";
 
-  // Sync tab with URL search parameter if present (redirecting legacy dispute tabs to customer orders)
+  // Sync tab with URL search parameter if present
   useEffect(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
       if (tabParam) {
         queueMicrotask(() => {
-          if (tabParam === "seller_disputes" || tabParam === "admin_disputes_refunds") {
+          if (tabParam === "seller_disputes") {
             setSelectedTab({ role: activeRole, tab: "seller_orders", itemData: { type: "tab", id: "disputes" } });
           } else {
             setSelectedTab({ role: activeRole, tab: tabParam });
@@ -72,7 +92,7 @@ export default function PlatformDashboardPage() {
         });
       }
     }
-  }, [activeRole]);
+  }, [activeRole, router, user]);
 
   // Protected route check
   useEffect(() => {
@@ -97,13 +117,13 @@ export default function PlatformDashboardPage() {
   }
 
   const isSellerOnlyTab = (tab: string) =>
-    tab === "seller_orders" || tab === "seller_disputes" || tab === "admin_disputes_refunds";
+    tab === "seller_orders" || tab === "seller_disputes";
 
   const getTabLabel = (tab: string) => {
     if (isAdmin && isSellerOnlyTab(tab)) {
       return "Admin Moderation — Listing Review Queue";
     }
-    if (tab === "seller_disputes" || tab === "admin_disputes_refunds") {
+    if (tab === "seller_disputes") {
       return "Customer Orders — Customer Disputes";
     }
     const map: Record<string, string> = {
@@ -116,6 +136,10 @@ export default function PlatformDashboardPage() {
       admin_marketplace_review: "Admin Moderation — Listing Review Queue",
       admin_staff_management: "Staff Administration & Access Control",
       admin_workshop_oversight: "Workshop Operations Oversight (Platform Administration)",
+      admin_disputes_refunds: "Disputes & Refunds Adjudication Console",
+      admin_approvals: "Maker-Checker Dual Authorization & Approvals Queue",
+      support_overview: "Support Operations & Customer Inquiries Workspace",
+      my_tickets: "Help & Support — Customer Inquiries",
       commercial_admin: "Commercial Control Plane — SKUs, Gates, Rates & Quotes",
       profile: "User Profile & Account Settings",
       organisations: "Organisations & Teams",
@@ -133,6 +157,42 @@ export default function PlatformDashboardPage() {
   const isPlatformAdmin = activeRole === "ADMIN" || Boolean(user?.is_superuser || user?.rawRoles?.includes("ADMIN"));
   const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF" || Boolean(user?.is_staff || user?.is_superuser);
   const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP" || Boolean(user?.rawRoles?.includes("SELLER") || user?.rawRoles?.includes("WORKSHOP"));
+
+  const userPerms = Array.isArray(user?.permissions) ? user.permissions : [];
+  const hasPerm = (code: string) => isPlatformAdmin || userPerms.includes(code);
+  const staffRoleCode = user?.staff_role?.code?.toUpperCase();
+
+  const canAccessDisputes = Boolean(
+    isPlatformAdmin ||
+    hasPerm("dispute.manage") ||
+    hasPerm("order.refund") ||
+    staffRoleCode === "DISPUTE_MANAGER" ||
+    staffRoleCode === "FINANCE_OFFICER"
+  );
+
+  const canAccessApprovals = Boolean(
+    isPlatformAdmin ||
+    hasPerm("finance.payout") ||
+    staffRoleCode === "FINANCE_OFFICER"
+  );
+
+  const canAccessListingReview = Boolean(
+    isPlatformAdmin ||
+    hasPerm("listing.review") ||
+    staffRoleCode === "VERIFICATION_OFFICER"
+  );
+
+  const canAccessSellerReview = Boolean(
+    isPlatformAdmin ||
+    hasPerm("seller.verify") ||
+    staffRoleCode === "VERIFICATION_OFFICER"
+  );
+
+  const canAccessSupport = Boolean(
+    isPlatformAdmin ||
+    hasPerm("support.ticket.manage") ||
+    staffRoleCode === "SUPPORT_AGENT"
+  );
 
   const activeItemData = selectedTab?.role === activeRole && selectedTab.tab === currentTab ? selectedTab.itemData : undefined;
 
@@ -163,7 +223,7 @@ export default function PlatformDashboardPage() {
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
               initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
             />
-          ) : currentTab === "seller_orders" || currentTab === "seller_disputes" || currentTab === "admin_disputes_refunds" ? (
+          ) : currentTab === "seller_orders" || currentTab === "seller_disputes" ? (
             isAdmin ? (
               <AdminMarketplaceReviewView />
             ) : (
@@ -171,13 +231,32 @@ export default function PlatformDashboardPage() {
                 initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
                 initialMainTab={
                   currentTab === "seller_disputes" ||
-                  currentTab === "admin_disputes_refunds" ||
                   (activeItemData?.type === "tab" && activeItemData.id === "disputes")
                     ? "disputes"
                     : "orders"
                 }
               />
             )
+          ) : currentTab === "admin_disputes_refunds" ? (
+            canAccessDisputes ? (
+              <AdminDisputesRefundsView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_approvals" ? (
+            canAccessApprovals ? (
+              <AdminApprovalsView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "support_overview" ? (
+            canAccessSupport ? (
+              <SupportAgentLandingView onNavigateTab={(tab) => setSelectedTab({ role: activeRole, tab })} />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "my_tickets" ? (
+            <CustomerSupportTicketsView />
           ) : currentTab === "favourites" ? (
             <BuyerFavouritesView
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
@@ -204,7 +283,7 @@ export default function PlatformDashboardPage() {
               <Phase2SellerOnboardingView initialTab="my_application" />
             )
           ) : currentTab === "admin_marketplace_review" ? (
-            isAdmin ? (
+            canAccessListingReview ? (
               <AdminMarketplaceReviewView
                 initialVehicleId={activeItemData?.type === "admin_vehicle" ? activeItemData.id : undefined}
                 initialPartId={activeItemData?.type === "admin_part" ? activeItemData.id : undefined}
@@ -245,7 +324,7 @@ export default function PlatformDashboardPage() {
           ) : currentTab === "seller_onboarding" ? (
             <Phase2SellerOnboardingView initialTab="my_application" />
           ) : currentTab === "seller_reviews" ? (
-            isAdmin ? (
+            canAccessSellerReview ? (
               <Phase2SellerOnboardingView initialTab="admin_queue" />
             ) : (
               <Phase2SellerOnboardingView initialTab="my_application" />

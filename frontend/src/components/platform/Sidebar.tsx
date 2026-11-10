@@ -18,6 +18,8 @@ import {
   Package,
   Boxes,
   ClipboardCheck,
+  Scale,
+  Headphones,
   Landmark,
 } from "lucide-react";
 
@@ -90,6 +92,9 @@ export default function Sidebar({
   if (isPlatformAdmin) {
     roleNavItems = [
       { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
+      { id: "admin_disputes_refunds", label: "Disputes & Refunds", icon: Scale, badge: "Disputes" },
+      { id: "support_overview", label: "Support Ticketing", icon: Headphones, badge: "Support" },
+      { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
       { id: "admin_workshop_oversight", label: "Workshop Oversight", icon: ClipboardCheck, badge: "Audit" },
       { id: "admin_staff_management", label: "Staff Invitations & Roles", icon: UserPlus, badge: "Admin" },
       { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
@@ -99,24 +104,54 @@ export default function Sidebar({
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
-      { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
       { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Management" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else if (isPlatformStaff) {
-    roleNavItems = [
-      { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
-      { id: "admin_workshop_oversight", label: "Workshop Oversight", icon: ClipboardCheck, badge: "Audit" },
+    const staffRoleCode = user.staff_role?.code?.toUpperCase();
+    const userPerms = Array.isArray(user.permissions) ? user.permissions : [];
+    const hasPerm = (p: string) => userPerms.includes(p);
+
+    const staffItems: {
+      id: string;
+      label: string;
+      icon: React.ComponentType<{ className?: string }>;
+      badge?: string;
+    }[] = [];
+
+    // 1. Role-specific primary operational workspaces
+    if (hasPerm("listing.review") || staffRoleCode === "VERIFICATION_OFFICER") {
+      staffItems.push({ id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" });
+    }
+
+    if (hasPerm("seller.verify") || staffRoleCode === "VERIFICATION_OFFICER") {
+      staffItems.push({ id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" });
+    }
+
+    if (hasPerm("dispute.manage") || hasPerm("order.refund") || staffRoleCode === "DISPUTE_MANAGER" || staffRoleCode === "FINANCE_OFFICER") {
+      staffItems.push({ id: "admin_disputes_refunds", label: "Disputes & Refunds", icon: Scale, badge: "Disputes" });
+    }
+
+    if (hasPerm("support.ticket.manage") || staffRoleCode === "SUPPORT_AGENT") {
+      staffItems.push({ id: "support_overview", label: "Support Operations", icon: Headphones, badge: "Support" });
+    }
+
+    // 2. Workshop operations oversight
+    staffItems.push({ id: "admin_workshop_oversight", label: "Workshop Oversight", icon: ClipboardCheck, badge: "Audit" });
+
+    // 3. General platform workspaces accessible to operational staff
+    staffItems.push(
       { id: "workshops_browse", label: "Workshops & Bookings", icon: Wrench, badge: "Book" },
-      { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "marketplace_browse", label: "Marketplace (Browse)", icon: ShoppingBag, badge: "Browse" },
+      { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
-      { id: "seller_reviews", label: "Seller Compliance Queue", icon: FileCheck2, badge: "Review" },
       { id: "organisations", label: "Organisations & Teams", icon: Building2, badge: "Operations" },
-      { id: "profile", label: "My Profile", icon: User },
-    ];
+      { id: "profile", label: "My Profile", icon: User }
+    );
+
+    roleNavItems = staffItems;
   } else if (hasSeller && hasWorkshop) {
     // Both roles approved: access to both seller features and workshop hub
     roleNavItems = [
@@ -131,6 +166,7 @@ export default function Sidebar({
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
       { id: "seller_onboarding", label: "Partner & Seller Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Workshop Teams", icon: Building2, badge: "Organisation" },
+      { id: "my_tickets", label: "Help & Support", icon: Headphones, badge: "Help" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else if (hasSeller) {
@@ -146,6 +182,7 @@ export default function Sidebar({
       { id: "seller_onboarding", label: "Seller Verification Status", icon: FileCheck2, badge: "Verified" },
       { id: "organisations", label: "Dealership & Teams", icon: Building2, badge: "Organisation" },
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
+      { id: "my_tickets", label: "Help & Support", icon: Headphones, badge: "Help" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else if (hasWorkshop && isWorkshopStaffOnly) {
@@ -158,6 +195,7 @@ export default function Sidebar({
       { id: "my_orders", label: "My Orders", icon: Package, badge: "Purchases" },
       { id: "favourites", label: "Saved Items", icon: Heart, badge: "Saved" },
       { id: "my_enquiries", label: "My Enquiries", icon: MessageSquare, badge: "Direct" },
+      { id: "my_tickets", label: "Help & Support", icon: Headphones, badge: "Help" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else if (hasWorkshop) {
@@ -172,6 +210,7 @@ export default function Sidebar({
       { id: "garage", label: "Vehicle Garage", icon: Layers, badge: "Vehicles" },
       { id: "seller_onboarding", label: "Partner Status", icon: FileCheck2, badge: "Workshop" },
       { id: "organisations", label: "Workshop & Teams", icon: Building2, badge: "Organisation" },
+      { id: "my_tickets", label: "Help & Support", icon: Headphones, badge: "Help" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   } else {
@@ -185,6 +224,7 @@ export default function Sidebar({
       { id: "garage", label: "My Garage", icon: Layers, badge: "Vehicles" },
       { id: "seller_onboarding", label: "Apply to sell / Apply as workshop", icon: FileCheck2, badge: "Apply" },
       { id: "organisations", label: "Organisations & Teams", icon: Building2 },
+      { id: "my_tickets", label: "Help & Support", icon: Headphones, badge: "Help" },
       { id: "profile", label: "My Profile", icon: User },
     ];
   }

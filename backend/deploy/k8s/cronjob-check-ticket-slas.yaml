@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: driverxtra-ticket-sla-checker
+  namespace: driverxtra
+  labels:
+    app.kubernetes.io/name: driverxtra-ticket-sla-checker
+    app.kubernetes.io/part-of: driverxtra-platform
+    app.kubernetes.io/component: background-worker
+spec:
+  # Run every two minutes to evaluate ticket SLAs and escalations
+  schedule: "*/2 * * * *"
+  # Strict concurrency policy: never allow overlapping job runs
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 60
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: driverxtra-ticket-sla-checker
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: sla-checker
+              image: driverxtra-backend:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - manage.py
+                - check_ticket_slas
+              envFrom:
+                - configMapRef:
+                    name: driverxtra-backend-config
+                - secretRef:
+                    name: driverxtra-backend-secrets
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+# ==============================================================================
+# DEPLOYMENT & OPERATIONAL INSTRUCTIONS
+# ==============================================================================
+# NOTE: Automated background scheduling is NOT active simply because this
+# manifest exists in the repository. It must be explicitly deployed to the target
+# Kubernetes cluster.
+#
+# 1. Verification of Prerequisites:
+#    Ensure driverxtra-backend-config and driverxtra-backend-secrets exist in namespace:
+#      kubectl -n driverxtra get secret driverxtra-backend-secrets
+#
+# 2. Deploying the CronJob:
+#      kubectl apply -f backend/deploy/k8s/cronjob-check-ticket-slas.yaml
+#
+# 3. Verifying Scheduled Execution:
+#      kubectl -n driverxtra get cronjob driverxtra-ticket-sla-checker
+#
+# 4. Triggering a Manual Test Run:
+#      kubectl -n driverxtra create job --from=cronjob/driverxtra-ticket-sla-checker test-sla-manual-01
+#      kubectl -n driverxtra logs -l job-name=test-sla-manual-01
+#
+# 5. Monitoring & Alerting:
+#      Alert when failedJobsHistoryLimit is reached or Prometheus metric
+#      kube_cronjob_status_last_failed_time increases.
+

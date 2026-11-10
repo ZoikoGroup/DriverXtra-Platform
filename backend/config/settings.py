@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     "apps.marketplace",
     "apps.notifications",
     "apps.workshops",
+    "apps.support",
     "apps.commercial",
 
     # Platform audit
@@ -362,6 +363,18 @@ EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 NOTIFICATIONS_EMAIL_ENABLED = os.getenv("NOTIFICATIONS_EMAIL_ENABLED", "False").lower() in ("true", "1", "yes")
 NOTIFICATIONS_EMAIL_MAX_ATTEMPTS = int(os.getenv("NOTIFICATIONS_EMAIL_MAX_ATTEMPTS", "5"))
 
+# =========================================================
+# CUSTOMER SUPPORT & TICKETING CONFIGURATION
+# =========================================================
+SUPPORT_SLA_TIMEZONE = os.getenv("SUPPORT_SLA_TIMEZONE", "UTC")
+_holidays_raw = os.getenv("SUPPORT_PUBLIC_HOLIDAYS", "")
+SUPPORT_PUBLIC_HOLIDAYS = [h.strip() for h in _holidays_raw.split(",") if h.strip()]
+PRIVATE_STORAGE_ROOT = Path(os.getenv("PRIVATE_STORAGE_ROOT", BASE_DIR / "private_media"))
+SUPPORT_ATTACHMENT_MAX_BYTES = int(os.getenv("SUPPORT_ATTACHMENT_MAX_BYTES", "10485760"))  # 10 MB per file
+SUPPORT_ATTACHMENT_MAX_FILES_PER_MESSAGE = int(os.getenv("SUPPORT_ATTACHMENT_MAX_FILES_PER_MESSAGE", "5"))
+SUPPORT_INACTIVITY_CLOSE_DAYS = int(os.getenv("SUPPORT_INACTIVITY_CLOSE_DAYS", "5"))
+SUPPORT_REOPEN_WINDOW_HOURS = int(os.getenv("SUPPORT_REOPEN_WINDOW_HOURS", "72"))
+
 
 # =========================================================
 # MARKETPLACE PRICING & REVIEW CONFIGURATION
@@ -416,4 +429,26 @@ CURRENCY_EXCHANGE_RATES = {
 # UK VAT rate (isolated from Indian GST rules)
 UK_VAT_RATE = Decimal(os.getenv("UK_VAT_RATE", "0.00"))
 
+# =========================================================
+# MAKER-CHECKER APPROVAL CONFIGURATION
+# =========================================================
+
+# High-value operations require maker-checker dual authorization.
+# Proposed default dual-authorization thresholds pending formal business approval.
+# Configurable via environment variables (MAKER_CHECKER_THRESHOLD_GBP, MAKER_CHECKER_THRESHOLD_INR).
+MAKER_CHECKER_THRESHOLDS = {
+    "GBP": Decimal(os.getenv("MAKER_CHECKER_THRESHOLD_GBP", "500.00")),
+    "INR": Decimal(os.getenv("MAKER_CHECKER_THRESHOLD_INR", "50000.00")),
+}
+MAKER_CHECKER_DEFAULT_THRESHOLD = Decimal(os.getenv("MAKER_CHECKER_DEFAULT_THRESHOLD", "500.00"))
+
+# =========================================================
+# MULTI-FACTOR AUTHENTICATION (MFA) CONFIGURATION
+# =========================================================
+
+# Controls whether mandatory TOTP MFA enforcement is required.
+# Default is False in both local and deployed environments so that users across
+# all roles (ADMIN, BUYER, SELLER, WORKSHOP) can authenticate using email and password only.
+# Set MFA_MANDATORY_ENFORCED=True to re-enable mandatory dual-factor login.
+MFA_MANDATORY_ENFORCED = os.getenv("MFA_MANDATORY_ENFORCED", "False").lower() in ("true", "1", "yes")
 

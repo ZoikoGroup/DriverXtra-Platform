@@ -24,7 +24,7 @@ from django.db.models.functions import Cast
 from django.utils import timezone
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.pagination import PageNumberPagination
-from common.permissions import IsPlatformStaff, HasPermission
+from common.permissions import IsPlatformStaff, HasPermission, HasAnyPermission
 from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
 from apps.catalogue.models import Part, PartCompatibility, FitmentTypeChoices
 from apps.garage.models import GarageVehicle
@@ -3464,7 +3464,10 @@ class SellerOrderShipmentListCreateView(views.APIView):
                 status=status.HTTP_201_CREATED,
             )
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class SellerShipmentDetailView(views.APIView):
@@ -3529,7 +3532,10 @@ class SellerShipmentStatusUpdateView(views.APIView):
                 status=status.HTTP_200_OK,
             )
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class SellerShipmentTrackingEventCreateView(views.APIView):
@@ -3829,7 +3835,10 @@ class BuyerOrderReturnRequestCreateView(views.APIView):
                 "return_request": ReturnRequestSerializer(req).data,
             }, status=status.HTTP_201_CREATED)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class BuyerReturnRequestListView(generics.ListAPIView):
@@ -3884,7 +3893,10 @@ class BuyerReturnRequestCancelView(views.APIView):
                 "return_request": ReturnRequestSerializer(updated).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class SellerReturnRequestListView(generics.ListAPIView):
@@ -3971,7 +3983,10 @@ class SellerReturnRequestReviewView(views.APIView):
                 "return_request": ReturnRequestSerializer(updated).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class SellerReturnRequestCompleteView(views.APIView):
@@ -4002,7 +4017,10 @@ class SellerReturnRequestCompleteView(views.APIView):
                 "return_request": ReturnRequestSerializer(completed).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class BuyerOrderDisputeCreateView(views.APIView):
@@ -4039,7 +4057,10 @@ class BuyerOrderDisputeCreateView(views.APIView):
                 "dispute": DisputeSerializer(dispute).data,
             }, status=status.HTTP_201_CREATED)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class BuyerDisputeListView(generics.ListAPIView):
@@ -4164,9 +4185,9 @@ class AdminOrderRefundCreateView(views.APIView):
     """
     POST /api/v1/marketplace/admin/orders/<identifier>/refund/
     Staff or Admin issues a refund for an order.
-    Requires 'order.refund' permission.
+    Requires 'order.refund' or 'finance.payout' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsPlatformStaff, HasAnyPermission('order.refund', 'finance.payout')]
 
     def post(self, request, identifier):
         order = _resolve_order_by_identifier(identifier)
@@ -4207,20 +4228,23 @@ class AdminOrderRefundCreateView(views.APIView):
                 "refund": RefundSerializer(refund).data,
             }, status=status.HTTP_201_CREATED)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminRefundListView(generics.ListAPIView):
     """
     GET /api/v1/marketplace/admin/refunds/
-    Lists all platform refunds for operations staff.
+    Lists all platform refunds for operations staff with refund/payout permissions.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsPlatformStaff, HasAnyPermission('order.refund', 'finance.payout')]
     serializer_class = RefundSerializer
 
     def get_queryset(self):
         user = self.request.user
-        if not (_is_staff_or_admin(user) or _has_permission(user, 'order.refund') or _has_permission(user, 'finance.payout')):
+        if not (_has_permission(user, 'order.refund') or _has_permission(user, 'finance.payout')):
             raise PermissionDenied("You do not have permission to view platform refunds.")
         qs = Refund.objects.all().select_related('order', 'return_request', 'dispute', 'created_by', 'approved_by')
         st = self.request.query_params.get('status')
@@ -4233,8 +4257,9 @@ class AdminRefundProcessView(views.APIView):
     """
     POST /api/v1/marketplace/admin/refunds/<identifier>/process/
     Marks a pending or manual refund as processed/settled.
+    Requires 'order.refund' or 'finance.payout' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsPlatformStaff, HasAnyPermission('order.refund', 'finance.payout')]
 
     def post(self, request, identifier):
         refund = _resolve_refund_by_identifier(identifier)
@@ -4257,16 +4282,19 @@ class AdminRefundProcessView(views.APIView):
                 "refund": RefundSerializer(processed).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminRefundApproveView(views.APIView):
     """
     POST /api/v1/marketplace/admin/refunds/<identifier>/approve/
     Staff or Admin approves a pending refund and triggers gateway refund dispatch or manual settlement.
-    Requires 'order.refund' permission.
+    Requires 'order.refund' or 'finance.payout' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsPlatformStaff, HasAnyPermission('order.refund', 'finance.payout')]
 
     def post(self, request, identifier):
         refund = _resolve_refund_by_identifier(identifier)
@@ -4286,16 +4314,19 @@ class AdminRefundApproveView(views.APIView):
                 "refund": RefundSerializer(approved).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminRefundRejectView(views.APIView):
     """
     POST /api/v1/marketplace/admin/refunds/<identifier>/reject/
     Staff or Admin rejects a refund request, recording cancellation and failure reason.
-    Requires 'order.refund' permission.
+    Requires 'order.refund' or 'finance.payout' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsPlatformStaff, HasAnyPermission('order.refund', 'finance.payout')]
 
     def post(self, request, identifier):
         refund = _resolve_refund_by_identifier(identifier)
@@ -4318,7 +4349,94 @@ class AdminRefundRejectView(views.APIView):
                 "refund": RefundSerializer(rejected).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminRefundDispatchView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/refunds/<identifier>/dispatch/
+    Dispatches an approved refund to the payment gateway (Razorpay/Stripe).
+    Strictly requires 'finance.payout' permission.
+    """
+    permission_classes = [IsPlatformStaff, HasPermission('finance.payout')]
+
+    def post(self, request, identifier):
+        refund = _resolve_refund_by_identifier(identifier)
+        if not refund:
+            return Response({"error": "Refund not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            dispatched = RefundService.dispatch_gateway_refund(
+                refund=refund,
+                actor=request.user,
+            )
+            return Response({
+                "status": "success",
+                "message": f"Gateway refund {dispatched.gateway_refund_id} dispatched successfully.",
+                "refund": RefundSerializer(dispatched).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminRefundReconcileView(views.APIView):
+    """
+    POST /api/v1/marketplace/admin/refunds/<identifier>/reconcile/
+    Staff or Admin queries the payment gateway to reconcile an ambiguous (PROCESSING_UNKNOWN) refund.
+    Requires 'finance.payout' permission.
+    """
+    permission_classes = [IsPlatformStaff, HasPermission('finance.payout')]
+
+    def post(self, request, identifier):
+        refund = _resolve_refund_by_identifier(identifier)
+        if not refund:
+            return Response({"error": "Refund not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            manual_resolution = request.data.get('manual_resolution')
+            reason = request.data.get('reason', '')
+            evidence = request.data.get('evidence')
+            gateway_reference = request.data.get('gateway_reference')
+            ticket_reference = request.data.get('ticket_reference')
+            if manual_resolution:
+                reconciled = RefundService.manual_resolve_unknown_refund(
+                    refund=refund,
+                    actor=request.user,
+                    resolution=manual_resolution,
+                    reason=reason,
+                    evidence=evidence,
+                    gateway_reference=gateway_reference,
+                    ticket_reference=ticket_reference,
+                )
+                return Response({
+                    "status": "success",
+                    "outcome": f"MANUAL_{reconciled.status}",
+                    "message": f"Refund {reconciled.refund_number} manually resolved to {reconciled.status}.",
+                    "refund": RefundSerializer(reconciled).data,
+                }, status=status.HTTP_200_OK)
+
+            reconciled, outcome = RefundService.reconcile_refund(
+                refund=refund,
+                actor=request.user,
+            )
+            return Response({
+                "status": "success",
+                "outcome": outcome,
+                "message": f"Refund {reconciled.refund_number} reconciliation outcome: {outcome} (current status: {reconciled.status}).",
+                "refund": RefundSerializer(reconciled).data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 class BuyerRefundListView(generics.ListAPIView):
@@ -4343,12 +4461,12 @@ class AdminDisputeListView(generics.ListAPIView):
     GET /api/v1/marketplace/admin/disputes/
     Lists all commercial disputes for adjudication by staff with 'dispute.manage'.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsPlatformStaff, HasPermission('dispute.manage')]
     serializer_class = DisputeSerializer
 
     def get_queryset(self):
         user = self.request.user
-        if not (_is_staff_or_admin(user) or _has_permission(user, 'dispute.manage')):
+        if not _has_permission(user, 'dispute.manage'):
             raise PermissionDenied("You do not have permission to review disputes.")
         qs = Dispute.objects.all().select_related('order', 'buyer', 'seller', 'resolved_by').prefetch_related('events__actor')
         st = self.request.query_params.get('status')
@@ -4366,7 +4484,7 @@ class AdminDisputeStatusUpdateView(views.APIView):
     Adjudicates a dispute, changes its status, and records official decisions.
     Requires 'dispute.manage' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsPlatformStaff, HasPermission('dispute.manage')]
 
     def post(self, request, identifier):
         dispute = _resolve_dispute_by_identifier(identifier)
@@ -4391,7 +4509,10 @@ class AdminDisputeStatusUpdateView(views.APIView):
                 "dispute": DisputeSerializer(updated).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # =============================================================================
@@ -4485,7 +4606,10 @@ class BuyerOrderReviewCreateView(views.APIView):
             )
             return Response(ProductReviewSerializer(review).data, status=status.HTTP_201_CREATED)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ProductReviewListCreateView(views.APIView):
@@ -4563,7 +4687,10 @@ class ProductReviewListCreateView(views.APIView):
             )
             return Response(ProductReviewSerializer(review).data, status=status.HTTP_201_CREATED)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ProductReviewDetailUpdateDeleteView(views.APIView):
@@ -4609,7 +4736,10 @@ class ProductReviewDetailUpdateDeleteView(views.APIView):
             )
             return Response(ProductReviewSerializer(updated).data, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, id):
         review = ProductReview.objects.filter(id=id).first()
@@ -4672,7 +4802,10 @@ class ProductReviewReportView(views.APIView):
                 "report_id": str(report.id),
             }, status=status.HTTP_201_CREATED)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ProductReviewHelpfulVoteView(views.APIView):
@@ -4998,7 +5131,10 @@ class SellerRatingReportView(views.APIView):
                 "report_id": str(report.id),
             }, status=status.HTTP_201_CREATED)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminReviewListView(generics.ListAPIView):
@@ -5074,7 +5210,10 @@ class AdminReviewModerationView(views.APIView):
                 "review": ProductReviewSerializer(updated).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminReviewReportListView(generics.ListAPIView):
@@ -5131,6 +5270,9 @@ class AdminReviewReportResolveView(views.APIView):
                 "report": ReviewReportSerializer(resolved).data,
             }, status=status.HTTP_200_OK)
         except DjangoValidationError as e:
-            return Response({"error": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            msg = e.message if hasattr(e, 'message') else str(e)
+            if "permission denied" in msg.lower():
+                return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
 

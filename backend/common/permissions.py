@@ -99,3 +99,24 @@ def HasPermission(permission_code: str):
             return False
 
     return _HasPermission
+
+
+def HasAnyPermission(*permission_codes: str):
+    """DRF permission class factory requiring the user to hold at least one of the specified permission codes.
+
+    Platform administrators (ADMIN / Superuser) bypass all checks.
+    """
+    class _HasAnyPermission(permissions.BasePermission):
+        message = f"You do not have any of the required permissions: {', '.join(permission_codes)}."
+
+        def has_permission(self, request, view):
+            user = request.user
+            if not (user and user.is_authenticated):
+                return False
+            if user.is_superuser or user.has_role('ADMIN') or user.has_role('MARKETPLACE_ADMIN'):
+                return True
+            if hasattr(user, 'has_permission'):
+                return any(user.has_permission(code) for code in permission_codes)
+            return False
+
+    return _HasAnyPermission

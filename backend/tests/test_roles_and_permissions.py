@@ -1,4 +1,5 @@
 import pytest
+from django.test import override_settings
 from rest_framework import status
 from apps.identity.models import User, RoleChoices
 
@@ -94,7 +95,7 @@ class TestRolesAndPermissions:
 
         support_role = StaffRole.objects.get(code='SUPPORT_AGENT')
         support_perm_codes = list(support_role.role_permissions.values_list('permission__code', flat=True))
-        assert 'dispute.manage' in support_perm_codes
+        assert 'dispute.manage' not in support_perm_codes
         assert 'seller.verify' not in support_perm_codes
 
     def test_has_permission_drf_class(self, admin_user, staff_user, buyer_user):
@@ -110,7 +111,7 @@ class TestRolesAndPermissions:
         profile.staff_role = support_role
         profile.save()
 
-        assert staff_user.has_permission('dispute.manage') is True
+        assert staff_user.has_permission('dispute.manage') is False
         assert staff_user.has_permission('seller.verify') is False
         assert staff_user.has_permission('listing.review') is False
 
@@ -209,6 +210,7 @@ class TestRolesAndPermissions:
         bad_switch = api_client.post('/api/v1/auth/switch-role/', {'role': 'ADMIN'}, format='json')
         assert bad_switch.status_code == status.HTTP_400_BAD_REQUEST
 
+    @override_settings(MFA_MANDATORY_ENFORCED=True)
     def test_staff_totp_mfa_flow_and_15_minute_tokens(self, api_client, staff_user):
         import pyotp
         import jwt

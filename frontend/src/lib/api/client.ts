@@ -441,6 +441,7 @@ export interface LoginResponse {
   code?: string;
   active_role?: string;
   mfa_required?: boolean;
+  mfa_enrollment_required?: boolean;
   pre_auth_token?: string;
   email?: string;
   tokens?: {
@@ -541,6 +542,108 @@ export interface StaffInviteResponse {
   invite_token?: string | null;
 }
 
+export interface StaffRoleItem {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  permissions: string[];
+}
+
+export interface StaffMemberItem {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  phone_number: string;
+  status: "ACTIVE" | "PENDING" | "SUSPENDED";
+  is_active: boolean;
+  is_staff: boolean;
+  is_superuser: boolean;
+  roles: string[];
+  staff_role: {
+    id: string;
+    code: string;
+    name: string;
+    description: string;
+    permissions: string[];
+  } | null;
+  department: string;
+  has_mfa_enabled: boolean;
+  last_login: string | null;
+  date_joined: string;
+  created_at: string;
+  pending_invite?: {
+    id: string;
+    created_at: string;
+    expires_at: string;
+    is_expired: boolean;
+  } | null;
+}
+
+export interface StaffInvitationItem {
+  id: string;
+  user_id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  staff_role: string;
+  staff_role_name: string;
+  department: string;
+  status: "PENDING" | "ACCEPTED" | "EXPIRED" | "REVOKED";
+  is_expired: boolean;
+  is_consumed: boolean;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+}
+
+export interface StaffMetrics {
+  total_staff: number;
+  active_staff: number;
+  suspended_staff: number;
+  pending_invitations: number;
+  mfa_enrolled_count: number;
+  mfa_adoption_percentage: number;
+  role_distribution: Record<string, number>;
+}
+
+export interface ApprovalActorBrief {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  staff_role: string;
+}
+
+export interface ApprovalRequestItem {
+  id: string;
+  action_type: string;
+  target_type: string;
+  target_id: string;
+  amount: string | null;
+  currency: string;
+  reason: string;
+  payload: Record<string, unknown>;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED" | "EXECUTED";
+  rejection_reason: string;
+  notes: string;
+  requested_at: string;
+  reviewed_at: string | null;
+  executed_at: string | null;
+  execution_error: string;
+  requester: ApprovalActorBrief;
+  approver: ApprovalActorBrief | null;
+  executed_by: ApprovalActorBrief | null;
+  can_approve: boolean;
+  can_execute: boolean;
+  can_cancel: boolean;
+  is_requester: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export const api = {
   auth: {
     async login(email: string, password: string, code?: string): Promise<LoginResponse> {
@@ -549,7 +652,16 @@ export const api = {
         requiresAuth: false,
         body: JSON.stringify({ email, password, code }),
       });
-      if (data?.mfa_required) {
+      const isMfaChallenge = Boolean(
+        data?.mfa_required ||
+        data?.mfa_enrollment_required ||
+        data?.status === "mfa_required" ||
+        data?.status === "mfa_enrollment_required" ||
+        data?.code === "MFA_REQUIRED" ||
+        data?.code === "MFA_ENROLLMENT_REQUIRED" ||
+        Boolean(data?.pre_auth_token)
+      );
+      if (isMfaChallenge) {
         return data;
       }
       if (!data?.tokens?.access || !data?.tokens?.refresh) {
@@ -571,10 +683,11 @@ export const api = {
       return data;
     },
 
-    async enrolMfa(): Promise<{ status: string; secret: string; qr_code_uri: string; message: string }> {
+    async enrolMfa(pre_auth_token?: string): Promise<{ status: string; secret: string; qr_code_uri: string; message: string }> {
       return apiRequest<{ status: string; secret: string; qr_code_uri: string; message: string }>("/auth/mfa/enrol/", {
         method: "POST",
-        requiresAuth: true,
+        requiresAuth: !pre_auth_token,
+        body: pre_auth_token ? JSON.stringify({ pre_auth_token }) : undefined,
       });
     },
 
@@ -665,6 +778,125 @@ export const api = {
         method: "POST",
         requiresAuth: true,
         body: JSON.stringify(payload),
+      });
+    },
+
+    async listStaff(params?: { search?: string; role?: string; status?: string; mfa?: boolean }): Promise<{ status: string; count: number; results: StaffMemberItem[] }> {
+      const query = new URLSearchParams();
+      if (params?.search) query.set("search", params.search);
+      if (params?.role) query.set("role", params.role);
+      if (params?.status) query.set("status", params.status);
+      if (params?.mfa !== undefined) query.set("mfa", String(params.mfa));
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      return apiRequest<{ status: string; count: number; results: StaffMemberItem[] }>(`/admin/staff/${qs}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getStaff(id: string): Promise<{ status: string; staff_member: StaffMemberItem }> {
+      return apiRequest<{ status: string; staff_member: StaffMemberItem }>(`/admin/staff/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async updateStaff(id: string, payload: { staff_role?: string; department?: string; status?: string }): Promise<{ status: string; message: string; staff_member: StaffMemberItem }> {
+      return apiRequest<{ status: string; message: string; staff_member: StaffMemberItem }>(`/admin/staff/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listStaffRoles(): Promise<{ status: string; roles: StaffRoleItem[] }> {
+      return apiRequest<{ status: string; roles: StaffRoleItem[] }>("/admin/staff/roles/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getStaffMetrics(): Promise<{ status: string; metrics: StaffMetrics }> {
+      return apiRequest<{ status: string; metrics: StaffMetrics }>("/admin/staff/metrics/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async listInvitations(params?: { search?: string; status?: string }): Promise<{ status: string; count: number; results: StaffInvitationItem[] }> {
+      const query = new URLSearchParams();
+      if (params?.search) query.set("search", params.search);
+      if (params?.status) query.set("status", params.status);
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      return apiRequest<{ status: string; count: number; results: StaffInvitationItem[] }>(`/admin/staff/invitations/${qs}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async resendInvitation(id: string): Promise<{ status: string; message: string; email: string; invite_token?: string }> {
+      return apiRequest<{ status: string; message: string; email: string; invite_token?: string }>(`/admin/staff/invitations/${id}/resend/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async revokeInvitation(id: string): Promise<{ status: string; message: string }> {
+      return apiRequest<{ status: string; message: string }>(`/admin/staff/invitations/${id}/revoke/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+  },
+
+  approvals: {
+    async list(params?: { status?: string; action_type?: string; search?: string }): Promise<{ status: string; count: number; results: ApprovalRequestItem[] }> {
+      const query = new URLSearchParams();
+      if (params?.status) query.set("status", params.status);
+      if (params?.action_type) query.set("action_type", params.action_type);
+      if (params?.search) query.set("search", params.search);
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      return apiRequest<{ status: string; count: number; results: ApprovalRequestItem[] }>(`/admin/approvals/${qs}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async get(id: string): Promise<{ status: string; approval_request: ApprovalRequestItem }> {
+      return apiRequest<{ status: string; approval_request: ApprovalRequestItem }>(`/admin/approvals/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async approve(id: string, notes?: string): Promise<{ status: string; message: string; approval_request: ApprovalRequestItem }> {
+      return apiRequest<{ status: string; message: string; approval_request: ApprovalRequestItem }>(`/admin/approvals/${id}/approve/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ notes: notes || "" }),
+      });
+    },
+
+    async reject(id: string, reason: string, notes?: string): Promise<{ status: string; message: string; approval_request: ApprovalRequestItem }> {
+      return apiRequest<{ status: string; message: string; approval_request: ApprovalRequestItem }>(`/admin/approvals/${id}/reject/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason, notes: notes || "" }),
+      });
+    },
+
+    async cancel(id: string, notes?: string): Promise<{ status: string; message: string; approval_request: ApprovalRequestItem }> {
+      return apiRequest<{ status: string; message: string; approval_request: ApprovalRequestItem }>(`/admin/approvals/${id}/cancel/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ notes: notes || "" }),
+      });
+    },
+
+    async execute(id: string): Promise<{ status: string; message: string; approval_request: ApprovalRequestItem }> {
+      return apiRequest<{ status: string; message: string; approval_request: ApprovalRequestItem }>(`/admin/approvals/${id}/execute/`, {
+        method: "POST",
+        requiresAuth: true,
       });
     },
   },
@@ -2044,6 +2276,25 @@ export const api = {
       });
     },
 
+    async reconcileAdminRefund(
+      identifier: string
+    ): Promise<{
+      status: string;
+      outcome: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        outcome: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/admin/refunds/${identifier}/reconcile/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
     async listBuyerRefunds(status?: string): Promise<PlatformRefund[]> {
       const q = status && status !== "ALL" ? `?status=${encodeURIComponent(status)}` : "";
       const res = await apiRequest<PlatformRefund[] | { results: PlatformRefund[] }>(
@@ -2960,6 +3211,173 @@ export const api = {
     },
   },
 
+  // Phase 4: Customer Support & Ticketing System
+  support: {
+    async getMyTickets(statusFilter?: string): Promise<{ tickets: SupportTicketSummary[]; count: number }> {
+      const q = statusFilter && statusFilter !== "ALL" ? `?status=${encodeURIComponent(statusFilter)}` : "";
+      return apiRequest<{ tickets: SupportTicketSummary[]; count: number }>(`/support/tickets/${q}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getMyTicket(identifier: string): Promise<{ ticket: SupportTicketDetail }> {
+      return apiRequest<{ ticket: SupportTicketDetail }>(`/support/tickets/${identifier}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async createTicket(payload: CreateSupportTicketPayload): Promise<{ ticket: SupportTicketDetail; message: string }> {
+      return apiRequest<{ ticket: SupportTicketDetail; message: string }>("/support/tickets/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async sendCustomerMessage(identifier: string, payload: { message: string }): Promise<{ message: SupportTicketMessage }> {
+      return apiRequest<{ message: SupportTicketMessage }>(`/support/tickets/${identifier}/messages/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async closeCustomerTicket(identifier: string, reason?: string): Promise<{ status: string; message: string; ticket: SupportTicketDetail }> {
+      return apiRequest<{ status: string; message: string; ticket: SupportTicketDetail }>(`/support/tickets/${identifier}/close/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
+      });
+    },
+
+    async getStaffTickets(params?: {
+      queue?: string;
+      status?: string;
+      priority?: string;
+      category?: string;
+      is_escalated?: boolean;
+      sla_breached?: boolean;
+      search?: string;
+    }): Promise<{ tickets: SupportTicketSummary[]; count: number }> {
+      const query = new URLSearchParams();
+      if (params?.queue) query.set("queue", params.queue);
+      if (params?.status && params.status !== "ALL") query.set("status", params.status);
+      if (params?.priority && params.priority !== "ALL") query.set("priority", params.priority);
+      if (params?.category && params.category !== "ALL") query.set("category", params.category);
+      if (params?.is_escalated) query.set("is_escalated", "true");
+      if (params?.sla_breached) query.set("sla_breached", "true");
+      if (params?.search) query.set("search", params.search);
+      const qs = query.toString();
+      return apiRequest<{ tickets: SupportTicketSummary[]; count: number }>(`/support/agent/tickets/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getStaffTicket(identifier: string): Promise<{ ticket: SupportTicketDetail }> {
+      return apiRequest<{ ticket: SupportTicketDetail }>(`/support/agent/tickets/${identifier}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async assignStaffTicket(identifier: string, targetAgentId: string | null): Promise<{ status: string; message: string; ticket: SupportTicketDetail }> {
+      return apiRequest<{ status: string; message: string; ticket: SupportTicketDetail }>(`/support/agent/tickets/${identifier}/assign/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ target_agent_id: targetAgentId }),
+      });
+    },
+
+    async updateStaffTicketStatus(
+      identifier: string,
+      payload: { status: SupportTicketStatus; resolution_summary?: string; notes?: string }
+    ): Promise<{ status: string; message: string; ticket: SupportTicketDetail }> {
+      return apiRequest<{ status: string; message: string; ticket: SupportTicketDetail }>(`/support/agent/tickets/${identifier}/status/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async updateStaffTicketPriority(
+      identifier: string,
+      priority: SupportTicketPriority,
+      notes?: string
+    ): Promise<{ status: string; message: string; ticket: SupportTicketDetail }> {
+      return apiRequest<{ status: string; message: string; ticket: SupportTicketDetail }>(`/support/agent/tickets/${identifier}/priority/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ priority, notes }),
+      });
+    },
+
+    async sendStaffMessage(
+      identifier: string,
+      payload: { message: string; is_internal_note?: boolean }
+    ): Promise<{ status: string; message: string; data: SupportTicketMessage }> {
+      return apiRequest<{ status: string; message: string; data: SupportTicketMessage }>(`/support/agent/tickets/${identifier}/messages/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async escalateStaffTicket(
+      identifier: string,
+      payload: { reason: string; stage?: number }
+    ): Promise<{ status: string; message: string; ticket: SupportTicketDetail }> {
+      return apiRequest<{ status: string; message: string; ticket: SupportTicketDetail }>(`/support/agent/tickets/${identifier}/escalate/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getStaffMetrics(): Promise<{ status: string; metrics: SupportMetrics }> {
+      return apiRequest<{ status: string; metrics: SupportMetrics }>("/support/agent/metrics/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getStaffMembers(): Promise<{ status: string; staff: SupportStaffMember[] }> {
+      return apiRequest<{ status: string; staff: SupportStaffMember[] }>("/support/agent/staff-list/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async uploadAttachment(
+      ticketIdentifier: string,
+      file: File,
+      options?: { isInternal?: boolean; messageId?: string }
+    ): Promise<{ status: string; message: string; attachment: SupportTicketAttachment }> {
+      const formData = new FormData();
+      formData.append("file", file);
+      if (options?.isInternal) formData.append("is_internal", "true");
+      if (options?.messageId) formData.append("message_id", options.messageId);
+
+      return apiRequest<{ status: string; message: string; attachment: SupportTicketAttachment }>(
+        `/support/tickets/${ticketIdentifier}/attachments/`,
+        {
+          method: "POST",
+          requiresAuth: true,
+          body: formData,
+        }
+      );
+    },
+
+    async downloadAttachment(attachmentId: string): Promise<Blob> {
+      return apiRequestBlob(`/support/attachments/${attachmentId}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+  },
+
   commercial: {
     // Admin: SKU catalogue
     listSkus(params?: Record<string, string>): Promise<CommercialPage<CommercialSku>> {
@@ -3055,6 +3473,160 @@ function commercialQuery(params?: Record<string, string>): string {
   const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== "" && value !== undefined));
   const text = query.toString();
   return text ? `?${text}` : "";
+}
+
+// ==========================================
+// Phase 4 Support & Ticketing Type Definitions
+// ==========================================
+
+export type SupportTicketCategory =
+  | "GENERAL_INQUIRY"
+  | "ORDER_ISSUE"
+  | "PART_COMPATIBILITY"
+  | "WORKSHOP_BOOKING"
+  | "PAYMENT_BILLING"
+  | "ACCOUNT_SECURITY"
+  | "RETURNS_ASSISTANCE"
+  | "TECHNICAL_SUPPORT";
+
+export type SupportTicketPriority = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+export type SupportTicketStatus =
+  | "OPEN"
+  | "IN_PROGRESS"
+  | "WAITING_FOR_CUSTOMER"
+  | "RESOLVED"
+  | "CLOSED";
+
+export interface SupportTicketAttachment {
+  id: string;
+  file_name: string;
+  file_size: number;
+  content_type: string;
+  is_internal: boolean;
+  download_url: string;
+  uploader_email: string;
+  created_at: string;
+}
+
+export interface SupportTicketMessage {
+  id: string;
+  sender_type: "CUSTOMER" | "STAFF" | "SYSTEM";
+  sender_email: string;
+  sender_name: string;
+  message: string;
+  is_internal_note: boolean;
+  attachments?: SupportTicketAttachment[];
+  created_at: string;
+}
+
+export interface SupportTicketActivity {
+  id: string;
+  activity_type: string;
+  actor_email: string;
+  actor_name: string;
+  old_value?: string;
+  new_value?: string;
+  notes?: string;
+  created_at: string;
+}
+
+export interface SupportTicketUserBasic {
+  id: string;
+  email: string;
+  full_name: string;
+  role?: string;
+}
+
+export interface SupportTicketSummary {
+  id: string;
+  ticket_number: string;
+  subject: string;
+  category: SupportTicketCategory;
+  category_display?: string;
+  priority: SupportTicketPriority;
+  priority_display?: string;
+  status: SupportTicketStatus;
+  status_display?: string;
+  is_confidential: boolean;
+  order_reference?: string;
+  first_response_due_at?: string | null;
+  resolution_due_at?: string | null;
+  first_responded_at?: string | null;
+  resolved_at?: string | null;
+  closed_at?: string | null;
+  sla_breached: boolean;
+  is_first_response_overdue: boolean;
+  is_resolution_overdue: boolean;
+  is_escalated: boolean;
+  escalation_stage: number;
+  reopen_count: number;
+  customer?: SupportTicketUserBasic;
+  assigned_to?: SupportTicketUserBasic | null;
+  last_customer_activity_at?: string;
+  last_agent_activity_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupportTicketDetail extends SupportTicketSummary {
+  description: string;
+  resolution_summary?: string;
+  resolved_by?: SupportTicketUserBasic | null;
+  escalated_at?: string | null;
+  escalation_reason?: string;
+  messages: SupportTicketMessage[];
+  activities?: SupportTicketActivity[];
+  attachments?: SupportTicketAttachment[];
+}
+
+export interface SupportMetrics {
+  open: number;
+  in_progress: number;
+  waiting_for_customer: number;
+  resolved: number;
+  closed: number;
+  total_active: number;
+  sla_breached_count: number;
+  first_response_overdue_count: number;
+  resolution_overdue_count: number;
+  escalated_count: number;
+  unassigned_count: number;
+  my_tickets_count: number;
+}
+
+export interface SupportStaffMember {
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  department?: string;
+  active_tickets_count: number;
+}
+
+export interface CreateSupportTicketPayload {
+  subject: string;
+  category?: SupportTicketCategory;
+  priority?: SupportTicketPriority;
+  description: string;
+  order_reference?: string;
+  is_confidential?: boolean;
+}
+
+export interface SendSupportMessagePayload {
+  message: string;
+  is_internal_note?: boolean;
+}
+
+export interface UpdateSupportStatusPayload {
+  status: SupportTicketStatus;
+  resolution_summary?: string;
+  notes?: string;
+}
+
+export interface EscalateSupportTicketPayload {
+  reason: string;
+  stage?: number;
 }
 
 // ==========================================
@@ -4234,7 +4806,7 @@ export interface PlatformReturnRequest {
   updated_at: string;
 }
 
-export type RefundStatus = "PENDING" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type RefundStatus = "PENDING" | "PROCESSING" | "PROCESSING_UNKNOWN" | "SUCCEEDED" | "FAILED" | "CANCELLED";
 export type RefundMethod = "ORIGINAL_PAYMENT" | "BANK_TRANSFER" | "MANUAL_PAYOUT";
 
 export interface PlatformRefund {
