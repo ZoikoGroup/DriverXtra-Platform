@@ -119,8 +119,9 @@ def other_vehicle(db, other_seller, make_bmw, model_m3):
 def test_public_vehicle_detail_includes_authorized_seller_info(api_client, approved_vehicle, approved_seller_app):
     """
     Ensures buyers viewing a vehicle detail see authorized seller information:
-    business name, verified badge, dealership type, location, and sanitized WhatsApp link.
-    Private personal credentials or tokens are never exposed.
+    business name, verified badge, dealership type, location, and can_enquire flag.
+    Direct phone numbers and WhatsApp links are NOT exposed to enforce communication
+    exclusively through DriverXtra's internal Vehicle Enquiry system.
     """
     url = f"/api/v1/marketplace/browse/vehicles/{approved_vehicle.id}/"
     response = api_client.get(url)
@@ -134,10 +135,12 @@ def test_public_vehicle_detail_includes_authorized_seller_info(api_client, appro
     assert seller_info["is_verified"] is True
     assert seller_info["seller_type"] == "DEALERSHIP"
     assert seller_info["location_city"] == "Manchester"
-    assert seller_info["phone"] == "+44 161 999 8888"
-    assert seller_info["has_phone"] is True
-    assert seller_info["whatsapp_url"] == "https://wa.me/441619998888"
     assert seller_info["can_enquire"] is True
+
+    # Direct contact channels must NOT be leaked
+    assert "phone" not in seller_info
+    assert "has_phone" not in seller_info
+    assert "whatsapp_url" not in seller_info
 
     # Security check: Private sensitive info must not be in seller_info
     assert "password" not in str(seller_info).lower()
@@ -148,7 +151,7 @@ def test_public_vehicle_detail_includes_authorized_seller_info(api_client, appro
 def test_unverified_private_seller_phone_is_masked(api_client, other_vehicle):
     """
     For an unverified private seller with no approved business application,
-    personal phone number must NOT be disclosed.
+    personal phone number and direct contact channels are NOT disclosed.
     """
     url = f"/api/v1/marketplace/browse/vehicles/{other_vehicle.id}/"
     response = api_client.get(url)
@@ -158,9 +161,9 @@ def test_unverified_private_seller_phone_is_masked(api_client, other_vehicle):
 
     assert seller_info["is_verified"] is False
     assert seller_info["seller_type"] == "INDIVIDUAL_SELLER"
-    assert seller_info["phone"] is None
-    assert seller_info["has_phone"] is False
-    assert seller_info["whatsapp_url"] is None
+    assert "phone" not in seller_info
+    assert "has_phone" not in seller_info
+    assert "whatsapp_url" not in seller_info
     assert seller_info["can_enquire"] is True
 
 
@@ -244,6 +247,57 @@ def test_anti_spam_duplicate_enquiry_rate_limiting(api_client, buyer_user, appro
     # Immediate second enquiry on same vehicle triggers rate limit
     second_resp = api_client.post(url, payload, format="json")
     assert second_resp.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+
+
+@pytest.mark.django_db
+def test_anti_spam_global_hourly_rate_limiting(api_client, buyer_user, other_seller, make_bmw, model_m3):
+    """Enforces global rate limiting: max 10 enquiries per hour across all vehicles per user."""
+    # Pre-populate 10 enquiries within the last hour across distinct dummy listings
+    for i in range(10):
+        listing = VehicleListing.objects.create(
+            seller=other_seller,
+            title=f"Rate Limit Test Vehicle {i}",
+            make=make_bmw,
+            model=model_m3,
+            year=2020 + (i % 4),
+            price=30000.00 + i * 1000,
+            mileage=20000 + i * 500,
+            fuel_type=FuelTypeChoices.PETROL,
+            transmission=TransmissionChoices.AUTOMATIC,
+            status=ListingStatusChoices.APPROVED,
+            is_active=True,
+            location_city="Leeds",
+        )
+        VehicleEnquiry.objects.create(
+            listing=listing,
+            buyer=buyer_user,
+            seller=other_seller,
+            message=f"Enquiry message number {i}",
+            created_at=timezone.now() - timezone.timedelta(minutes=10 + i),
+        )
+
+    # Now attempt the 11th enquiry on another approved vehicle
+    target_listing = VehicleListing.objects.create(
+        seller=other_seller,
+        title="Target Vehicle for 11th Enquiry",
+        make=make_bmw,
+        model=model_m3,
+        year=2023,
+        price=50000.00,
+        mileage=10000,
+        fuel_type=FuelTypeChoices.PETROL,
+        transmission=TransmissionChoices.AUTOMATIC,
+        status=ListingStatusChoices.APPROVED,
+        is_active=True,
+        location_city="Leeds",
+    )
+
+    api_client.force_authenticate(user=buyer_user)
+    url = f"/api/v1/marketplace/vehicles/{target_listing.id}/enquire/"
+    response = api_client.post(url, {"message": "This is an enquiry attempt that should be blocked by hourly rate limit."}, format="json")
+
+    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    assert "hourly limit" in response.json()["detail"].lower()
 
 
 @pytest.mark.django_db

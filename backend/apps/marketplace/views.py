@@ -22,7 +22,10 @@ from django.db.models import (
 )
 from django.db.models.functions import Cast
 from django.utils import timezone
-from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.exceptions import (
+    ValidationError as DjangoValidationError,
+    PermissionDenied as DjangoPermissionDenied,
+)
 from rest_framework.pagination import PageNumberPagination
 from common.permissions import IsPlatformStaff, HasPermission, HasAnyPermission
 from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
@@ -56,6 +59,19 @@ from apps.marketplace.models import (
     TrackingEvent,
     CarrierChoices,
     ShipmentStatusChoices,
+    VehiclePurchaseOffer,
+    VehicleOfferProposal,
+    VehicleOfferAction,
+    VehicleOrder,
+    VehicleOfferStatusChoices,
+    VehicleOrderStatusChoices,
+    VehicleListingAvailabilityChoices,
+    VehicleHandoverTypeChoices,
+    VehiclePaymentReport,
+    VehiclePaymentVerificationEvent,
+    VehiclePaymentReportStatusChoices,
+    VehiclePaymentEscalationLevelChoices,
+    VehiclePaymentVerificationEventTypeChoices,
 )
 from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
 from apps.marketplace.serializers import (
@@ -85,10 +101,32 @@ from apps.marketplace.serializers import (
     ShipmentStatusUpdatePayloadSerializer,
     TrackingEventCreatePayloadSerializer,
     TrackingEventSerializer,
+    VehiclePurchaseOfferSerializer,
+    VehicleOfferProposalSerializer,
+    VehicleOfferActionSerializer,
+    VehicleOfferSubmitSerializer,
+    VehicleOfferCounterSerializer,
+    VehicleOrderSerializer,
+    VehiclePaymentReportSerializer,
+    VehiclePaymentReportSubmitSerializer,
+    VehiclePaymentVerificationActionSerializer,
+    VehiclePaymentVerificationEventSerializer,
 )
 from apps.marketplace.services import adjust_stock, change_price
 from apps.marketplace.payments import PaymentService
 from apps.marketplace.logistics import ShipmentService, get_available_carriers_for_country
+from apps.marketplace.vehicle_offers_service import (
+    submit_vehicle_offer,
+    counter_vehicle_offer,
+    reject_vehicle_offer,
+    withdraw_vehicle_offer,
+    accept_vehicle_offer_and_reserve,
+    report_vehicle_order_payment,
+    confirm_vehicle_order_payment,
+    reject_vehicle_order_payment,
+    flag_vehicle_order_payment,
+    VehicleAlreadyReservedError,
+)
 
 
 
@@ -2732,6 +2770,17 @@ class VehicleEnquiryCreateView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Anti-spam global rate limit: max 10 enquiries per hour per user
+        hourly_count = VehicleEnquiry.objects.filter(
+            buyer=request.user,
+            created_at__gte=timezone.now() - timezone.timedelta(hours=1),
+        ).count()
+        if hourly_count >= 10:
+            return Response(
+                {"detail": "You have reached the maximum hourly limit for vehicle enquiries. Please try again later."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         # Anti-spam & duplicate protection: 60s cooldown for same vehicle
         recent = VehicleEnquiry.objects.filter(
             buyer=request.user,
@@ -5275,4 +5324,581 @@ class AdminReviewReportResolveView(views.APIView):
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
             return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 
+# =============================================================================
+# 15. Vehicle Purchase Offers & Order Placement APIs
+# =============================================================================
 
+class BuyerVehicleOfferListCreateView(views.APIView):
+    """
+    Submits a new vehicle purchase offer, or lists offers submitted by the current buyer.
+    POST /api/v1/marketplace/vehicles/<uuid:id>/offers/ (submit offer)
+    GET /api/v1/marketplace/buyer/vehicle-offers/ (list buyer offers)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id=None):
+        if not id:
+            return Response({"detail": "Vehicle listing ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            listing = VehicleListing.objects.select_related('seller', 'organisation').get(pk=id)
+        except VehicleListing.DoesNotExist:
+            return Response({"detail": "Vehicle listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = VehicleOfferSubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            offer = submit_vehicle_offer(
+                buyer=request.user,
+                listing=listing,
+                offered_price=data['offered_price'],
+                handover_preference=data.get('handover_preference', VehicleHandoverTypeChoices.COLLECTION),
+                notes=data.get('notes', ''),
+            )
+            return Response(VehiclePurchaseOfferSerializer(offer).data, status=status.HTTP_201_CREATED)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def get(self, request):
+        offers = VehiclePurchaseOffer.objects.filter(
+            buyer=request.user
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation'
+        ).prefetch_related('proposals', 'actions').order_by('-created_at')
+
+        status_param = request.query_params.get('status')
+        if status_param and status_param.upper() != 'ALL':
+            offers = offers.filter(status=status_param.upper())
+
+        listing_id = request.query_params.get('listing_id')
+        if listing_id:
+            offers = offers.filter(listing_id=listing_id)
+
+        return Response(VehiclePurchaseOfferSerializer(offers, many=True).data)
+
+
+class BuyerVehicleOfferDetailView(views.APIView):
+    """
+    Retrieves full detail and negotiation history of an offer submitted by the current buyer.
+    GET /api/v1/marketplace/buyer/vehicle-offers/<uuid:id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        offer = VehiclePurchaseOffer.objects.filter(
+            id=id, buyer=request.user
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation'
+        ).prefetch_related('proposals', 'actions').first()
+
+        if not offer:
+            return Response({"detail": "Vehicle purchase offer not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(VehiclePurchaseOfferSerializer(offer).data)
+
+
+class BuyerVehicleOfferAcceptView(views.APIView):
+    """
+    Buyer accepts a dealer's counteroffer, creating a dedicated VehicleOrder and reserving the vehicle.
+    POST /api/v1/marketplace/buyer/vehicle-offers/<uuid:id>/accept/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        handover_address = request.data.get('handover_address', {})
+        try:
+            order = accept_vehicle_offer_and_reserve(
+                actor=request.user,
+                offer_id=id,
+                handover_address=handover_address,
+            )
+            return Response(VehicleOrderSerializer(order).data, status=status.HTTP_201_CREATED)
+        except VehicleAlreadyReservedError as e:
+            return Response({"detail": str(e), "code": "VEHICLE_ALREADY_RESERVED"}, status=status.HTTP_409_CONFLICT)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class BuyerVehicleOfferRejectView(views.APIView):
+    """
+    Buyer rejects a dealer's counteroffer.
+    POST /api/v1/marketplace/buyer/vehicle-offers/<uuid:id>/reject/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        offer = VehiclePurchaseOffer.objects.filter(id=id, buyer=request.user).first()
+        if not offer:
+            return Response({"detail": "Vehicle purchase offer not found."}, status=status.HTTP_404_NOT_FOUND)
+        reason = request.data.get('reason', '')
+        try:
+            rejected = reject_vehicle_offer(actor=request.user, offer=offer, reason=reason)
+            return Response(VehiclePurchaseOfferSerializer(rejected).data)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class BuyerVehicleOfferCounterView(views.APIView):
+    """
+    Buyer counters a dealer's counteroffer.
+    POST /api/v1/marketplace/buyer/vehicle-offers/<uuid:id>/counter/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        offer = VehiclePurchaseOffer.objects.filter(id=id, buyer=request.user).first()
+        if not offer:
+            return Response({"detail": "Vehicle purchase offer not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = VehicleOfferCounterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            countered = counter_vehicle_offer(
+                actor=request.user,
+                offer=offer,
+                counter_price=data['counter_price'],
+                handover_preference=data.get('handover_preference'),
+                notes=data.get('notes', ''),
+            )
+            return Response(VehiclePurchaseOfferSerializer(countered).data)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class BuyerVehicleOfferWithdrawView(views.APIView):
+    """
+    Buyer withdraws their pending purchase offer.
+    POST /api/v1/marketplace/buyer/vehicle-offers/<uuid:id>/withdraw/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        offer = VehiclePurchaseOffer.objects.filter(id=id, buyer=request.user).first()
+        if not offer:
+            return Response({"detail": "Vehicle purchase offer not found."}, status=status.HTTP_404_NOT_FOUND)
+        reason = request.data.get('reason', '')
+        try:
+            withdrawn = withdraw_vehicle_offer(actor=request.user, offer=offer, reason=reason)
+            return Response(VehiclePurchaseOfferSerializer(withdrawn).data)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class BuyerVehicleOrderListView(views.APIView):
+    """
+    Lists dedicated VehicleOrder records for the current buyer.
+    GET /api/v1/marketplace/buyer/vehicle-orders/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        orders = VehicleOrder.objects.filter(
+            buyer=request.user
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation', 'accepted_offer'
+        ).order_by('-created_at')
+
+        status_param = request.query_params.get('status')
+        if status_param and status_param.upper() != 'ALL':
+            orders = orders.filter(status=status_param.upper())
+
+        return Response(VehicleOrderSerializer(orders, many=True).data)
+
+
+class BuyerVehicleOrderDetailView(views.APIView):
+    """
+    Retrieves full details of a vehicle order for the buyer.
+    GET /api/v1/marketplace/buyer/vehicle-orders/<uuid:id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        order = VehicleOrder.objects.filter(
+            id=id, buyer=request.user
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation', 'accepted_offer'
+        ).first()
+
+        if not order:
+            return Response({"detail": "Vehicle order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(VehicleOrderSerializer(order).data)
+
+
+# -----------------------------------------------------------------------------
+# Dealer / Seller Vehicle Offer and Order APIs
+# -----------------------------------------------------------------------------
+
+def _get_seller_org_ids(user):
+    return OrganisationMembership.objects.filter(
+        user=user,
+        is_active=True,
+        role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+    ).values_list('organisation_id', flat=True)
+
+
+class SellerVehicleOfferListView(views.APIView):
+    """
+    Lists incoming vehicle purchase offers for the seller's or dealership's listings.
+    GET /api/v1/marketplace/seller/vehicle-offers/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        org_ids = _get_seller_org_ids(user)
+
+        offers = VehiclePurchaseOffer.objects.filter(
+            Q(seller=user) | Q(organisation_id__in=org_ids)
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation'
+        ).prefetch_related('proposals', 'actions').distinct().order_by('-created_at')
+
+        status_param = request.query_params.get('status')
+        if status_param and status_param.upper() != 'ALL':
+            offers = offers.filter(status=status_param.upper())
+
+        listing_id = request.query_params.get('listing_id')
+        if listing_id:
+            offers = offers.filter(listing_id=listing_id)
+
+        return Response(VehiclePurchaseOfferSerializer(offers, many=True).data)
+
+
+class SellerVehicleOfferDetailView(views.APIView):
+    """
+    Retrieves detail of an incoming vehicle offer for the seller.
+    GET /api/v1/marketplace/seller/vehicle-offers/<uuid:id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        user = request.user
+        org_ids = _get_seller_org_ids(user)
+
+        offer = VehiclePurchaseOffer.objects.filter(
+            Q(id=id) & (Q(seller=user) | Q(organisation_id__in=org_ids))
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation'
+        ).prefetch_related('proposals', 'actions').first()
+
+        if not offer:
+            return Response({"detail": "Vehicle purchase offer not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(VehiclePurchaseOfferSerializer(offer).data)
+
+
+class SellerVehicleOfferAcceptView(views.APIView):
+    """
+    Seller accepts a buyer's offer, reserving the vehicle and generating a VehicleOrder.
+    POST /api/v1/marketplace/seller/vehicle-offers/<uuid:id>/accept/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        try:
+            order = accept_vehicle_offer_and_reserve(actor=request.user, offer_id=id)
+            return Response(VehicleOrderSerializer(order).data, status=status.HTTP_201_CREATED)
+        except VehicleAlreadyReservedError as e:
+            return Response({"detail": str(e), "code": "VEHICLE_ALREADY_RESERVED"}, status=status.HTTP_409_CONFLICT)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class SellerVehicleOfferRejectView(views.APIView):
+    """
+    Seller rejects a buyer's vehicle purchase offer.
+    POST /api/v1/marketplace/seller/vehicle-offers/<uuid:id>/reject/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        user = request.user
+        org_ids = _get_seller_org_ids(user)
+
+        offer = VehiclePurchaseOffer.objects.filter(
+            Q(id=id) & (Q(seller=user) | Q(organisation_id__in=org_ids))
+        ).first()
+
+        if not offer:
+            return Response({"detail": "Vehicle purchase offer not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reason = request.data.get('reason', '')
+        try:
+            rejected = reject_vehicle_offer(actor=request.user, offer=offer, reason=reason)
+            return Response(VehiclePurchaseOfferSerializer(rejected).data)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class SellerVehicleOfferCounterView(views.APIView):
+    """
+    Seller counters a buyer's offer with a new proposed price.
+    POST /api/v1/marketplace/seller/vehicle-offers/<uuid:id>/counter/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        user = request.user
+        org_ids = _get_seller_org_ids(user)
+
+        offer = VehiclePurchaseOffer.objects.filter(
+            Q(id=id) & (Q(seller=user) | Q(organisation_id__in=org_ids))
+        ).first()
+
+        if not offer:
+            return Response({"detail": "Vehicle purchase offer not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = VehicleOfferCounterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            countered = counter_vehicle_offer(
+                actor=request.user,
+                offer=offer,
+                counter_price=data['counter_price'],
+                handover_preference=data.get('handover_preference'),
+                notes=data.get('notes', ''),
+            )
+            return Response(VehiclePurchaseOfferSerializer(countered).data)
+        except DjangoValidationError as e:
+            return Response({"detail": e.message if hasattr(e, 'message') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+class SellerVehicleOrderListView(views.APIView):
+    """
+    Lists dedicated VehicleOrder records for listings owned by the seller or dealership.
+    GET /api/v1/marketplace/seller/vehicle-orders/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        org_ids = _get_seller_org_ids(user)
+
+        orders = VehicleOrder.objects.filter(
+            Q(seller=user) | Q(organisation_id__in=org_ids)
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation', 'accepted_offer'
+        ).distinct().order_by('-created_at')
+
+        status_param = request.query_params.get('status')
+        if status_param and status_param.upper() != 'ALL':
+            orders = orders.filter(status=status_param.upper())
+
+        return Response(VehicleOrderSerializer(orders, many=True).data)
+
+
+class SellerVehicleOrderDetailView(views.APIView):
+    """
+    Retrieves full details of a vehicle order for the seller.
+    GET /api/v1/marketplace/seller/vehicle-orders/<uuid:id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        user = request.user
+        org_ids = _get_seller_org_ids(user)
+
+        order = VehicleOrder.objects.filter(
+            Q(id=id) & (Q(seller=user) | Q(organisation_id__in=org_ids))
+        ).select_related(
+            'listing', 'listing__make', 'listing__model', 'buyer', 'seller', 'organisation', 'accepted_offer'
+        ).first()
+
+        if not order:
+            return Response({"detail": "Vehicle order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(VehicleOrderSerializer(order).data)
+# =============================================================================
+# 16. Vehicle Offline Payment Reporting & Dealer Verification APIs (Phase 2)
+# =============================================================================
+
+class BuyerVehicleOrderReportPaymentView(views.APIView):
+    """
+    Buyer reports offline direct payment transfer for their vehicle order.
+    POST /api/v1/marketplace/buyer/vehicle-orders/<uuid:id>/report-payment/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        serializer = VehiclePaymentReportSubmitSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        try:
+            report = report_vehicle_order_payment(
+                actor=request.user,
+                order_id=str(id),
+                amount_paid=data['amount_paid'],
+                currency=data['currency'],
+                payment_reference=data['payment_reference'],
+                paid_at=data['paid_at'],
+                payment_notes=data.get('payment_notes', ''),
+            )
+            return Response(VehiclePaymentReportSerializer(report).data, status=status.HTTP_201_CREATED)
+        except (DRFValidationError, DjangoValidationError) as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except (PermissionDenied, DjangoPermissionDenied) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BuyerVehicleOrderPaymentReportsView(views.APIView):
+    """
+    Lists payment reports and verification audit events for a buyer's vehicle order.
+    GET /api/v1/marketplace/buyer/vehicle-orders/<uuid:id>/payment-reports/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        order = VehicleOrder.objects.filter(id=id, buyer=request.user).first()
+        if not order:
+            return Response({"detail": "Vehicle order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reports = VehiclePaymentReport.objects.filter(order=order).select_related(
+            'submitted_by', 'verified_by', 'order'
+        ).prefetch_related('verification_events__actor').order_by('-created_at')
+
+        return Response(VehiclePaymentReportSerializer(reports, many=True).data)
+
+
+class SellerVehicleOrderPaymentReportsView(views.APIView):
+    """
+    Lists payment reports and verification audit events for a seller's vehicle order.
+    GET /api/v1/marketplace/seller/vehicle-orders/<uuid:id>/payment-reports/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        org_ids = _get_seller_org_ids(request.user)
+        order = VehicleOrder.objects.filter(
+            Q(id=id) & (Q(seller=request.user) | Q(organisation_id__in=org_ids))
+        ).first()
+        if not order:
+            return Response({"detail": "Vehicle order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        reports = VehiclePaymentReport.objects.filter(order=order).select_related(
+            'submitted_by', 'verified_by', 'order'
+        ).prefetch_related('verification_events__actor').order_by('-created_at')
+
+        return Response(VehiclePaymentReportSerializer(reports, many=True).data)
+
+
+class SellerVehicleOrderConfirmPaymentView(views.APIView):
+    """
+    Dealer confirms offline payment has arrived in their bank account.
+    POST /api/v1/marketplace/seller/vehicle-orders/<uuid:id>/confirm-payment/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        serializer = VehiclePaymentVerificationActionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        notes = serializer.validated_data.get('notes', '')
+        try:
+            report = confirm_vehicle_order_payment(
+                actor=request.user,
+                order_id=str(id),
+                notes=notes,
+            )
+            return Response(VehiclePaymentReportSerializer(report).data, status=status.HTTP_200_OK)
+        except (DRFValidationError, DjangoValidationError) as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except (PermissionDenied, DjangoPermissionDenied) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SellerVehicleOrderRejectPaymentView(views.APIView):
+    """
+    Dealer rejects payment report because offline funds were not received.
+    POST /api/v1/marketplace/seller/vehicle-orders/<uuid:id>/reject-payment/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        serializer = VehiclePaymentVerificationActionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        reason = serializer.validated_data.get('reason', '') or serializer.validated_data.get('notes', '')
+        if not reason or len(reason.strip()) < 5:
+            return Response(
+                {"detail": "A clear explanation (minimum 5 characters) is required when rejecting a payment report."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            report = reject_vehicle_order_payment(
+                actor=request.user,
+                order_id=str(id),
+                reason=reason.strip(),
+            )
+            return Response(VehiclePaymentReportSerializer(report).data, status=status.HTTP_200_OK)
+        except (DRFValidationError, DjangoValidationError) as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except (PermissionDenied, DjangoPermissionDenied) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SellerVehicleOrderFlagPaymentView(views.APIView):
+    """
+    Dealer flags a payment report with a discrepancy (e.g. transfer reference unclear).
+    POST /api/v1/marketplace/seller/vehicle-orders/<uuid:id>/flag-payment/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        serializer = VehiclePaymentVerificationActionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        reason = serializer.validated_data.get('reason', '') or serializer.validated_data.get('notes', '')
+        if not reason or len(reason.strip()) < 5:
+            return Response(
+                {"detail": "A clear explanation (minimum 5 characters) is required when flagging a payment discrepancy."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            report = flag_vehicle_order_payment(
+                actor=request.user,
+                order_id=str(id),
+                reason=reason.strip(),
+            )
+            return Response(VehiclePaymentReportSerializer(report).data, status=status.HTTP_200_OK)
+        except (DRFValidationError, DjangoValidationError) as e:
+            msg = e.message if hasattr(e, 'message') else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+        except (PermissionDenied, DjangoPermissionDenied) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)

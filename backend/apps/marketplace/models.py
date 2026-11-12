@@ -25,6 +25,12 @@ class ListingStatusChoices(models.TextChoices):
     CHANGES_REQUESTED = 'CHANGES_REQUESTED', 'Changes Requested'
 
 
+class VehicleListingAvailabilityChoices(models.TextChoices):
+    AVAILABLE = 'AVAILABLE', 'Available'
+    RESERVED = 'RESERVED', 'Reserved'
+    SOLD = 'SOLD', 'Sold'
+
+
 class VehicleConditionChoices(models.TextChoices):
     NEW = 'NEW', 'Brand New'
     EXCELLENT = 'EXCELLENT', 'Excellent'
@@ -132,6 +138,12 @@ class VehicleListing(BaseUUIDModel):
     rejection_reason = models.TextField(blank=True)
     admin_notes = models.TextField(blank=True)
     is_active = models.BooleanField(default=True, db_index=True)
+    availability_status = models.CharField(
+        max_length=20,
+        choices=VehicleListingAvailabilityChoices.choices,
+        default=VehicleListingAvailabilityChoices.AVAILABLE,
+        db_index=True,
+    )
 
     class Meta:
         verbose_name = 'Vehicle Listing'
@@ -139,6 +151,7 @@ class VehicleListing(BaseUUIDModel):
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['status', 'is_active']),
+            models.Index(fields=['availability_status', 'is_active']),
             models.Index(fields=['seller', 'status']),
             models.Index(fields=['make', 'model', 'year']),
         ]
@@ -1880,6 +1893,448 @@ class ProductReviewHelpfulVote(BaseUUIDModel):
                 name='unique_review_helpful_vote',
             )
         ]
+
+
+# =============================================================================
+# Motor Vehicle Purchase Lifecycle: Offers, Proposals, Actions, and VehicleOrder
+# =============================================================================
+
+class VehicleOfferStatusChoices(models.TextChoices):
+    PENDING_DEALER = 'PENDING_DEALER', 'Pending Dealer Review'
+    PENDING_BUYER = 'PENDING_BUYER', 'Pending Buyer Review (Counteroffer)'
+    ACCEPTED = 'ACCEPTED', 'Offer Accepted'
+    REJECTED = 'REJECTED', 'Offer Rejected'
+    WITHDRAWN = 'WITHDRAWN', 'Offer Withdrawn'
+    EXPIRED = 'EXPIRED', 'Offer Expired'
+    SUPERSEDED = 'SUPERSEDED', 'Superseded by Another Accepted Offer'
+
+
+class VehicleHandoverTypeChoices(models.TextChoices):
+    COLLECTION = 'COLLECTION', 'Dealership Collection'
+    DELIVERY = 'DELIVERY', 'Dealer Delivery'
+
+
+class VehicleOfferActionTypeChoices(models.TextChoices):
+    SUBMITTED = 'SUBMITTED', 'Initial Offer Submitted'
+    COUNTERED = 'COUNTERED', 'Counteroffer Submitted'
+    ACCEPTED = 'ACCEPTED', 'Offer Accepted'
+    REJECTED = 'REJECTED', 'Offer Rejected'
+    WITHDRAWN = 'WITHDRAWN', 'Offer Withdrawn'
+    EXPIRED = 'EXPIRED', 'Offer Expired'
+    SUPERSEDED = 'SUPERSEDED', 'Offer Superseded'
+
+
+class VehicleOrderStatusChoices(models.TextChoices):
+    PAYMENT_PENDING = 'PAYMENT_PENDING', 'Payment Pending'
+    PAYMENT_SUBMITTED = 'PAYMENT_SUBMITTED', 'Payment Submitted by Buyer'
+    PAYMENT_CONFIRMED = 'PAYMENT_CONFIRMED', 'Payment Confirmed by Dealer'
+    DOCUMENTS_PENDING = 'DOCUMENTS_PENDING', 'Documents Pending Verification'
+    READY_FOR_HANDOVER = 'READY_FOR_HANDOVER', 'Ready for Handover'
+    COMPLETED = 'COMPLETED', 'Completed'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+    DISPUTED = 'DISPUTED', 'Disputed'
+
+
+class VehiclePurchaseOffer(BaseUUIDModel):
+    """
+    Persistent negotiation container for a buyer's vehicle purchase offer on a VehicleListing.
+    Tracks negotiation status, current revision round, and expiration.
+    Actual terms and counteroffers are append-only in VehicleOfferProposal.
+    Actions are append-only in VehicleOfferAction.
+    """
+    listing = models.ForeignKey(
+        VehicleListing,
+        on_delete=models.PROTECT,
+        related_name='purchase_offers',
+    )
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='buyer_vehicle_offers',
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='seller_vehicle_offers',
+    )
+    organisation = models.ForeignKey(
+        Organisation,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='organisation_vehicle_offers',
+    )
+    status = models.CharField(
+        max_length=30,
+        choices=VehicleOfferStatusChoices.choices,
+        default=VehicleOfferStatusChoices.PENDING_DEALER,
+        db_index=True,
+    )
+    current_round = models.PositiveIntegerField(default=1)
+    agreed_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    currency = models.CharField(max_length=10, default='GBP')
+    expires_at = models.DateTimeField(db_index=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Purchase Offer'
+        verbose_name_plural = 'Vehicle Purchase Offers'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['listing', 'status']),
+            models.Index(fields=['buyer', 'status']),
+            models.Index(fields=['seller', 'status']),
+            models.Index(fields=['expires_at', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Offer {self.id} on {self.listing.title} ({self.status}) - Round {self.current_round}"
+
+    @property
+    def latest_proposal(self):
+        return self.proposals.order_by('-revision_number').first()
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in (
+            VehicleOfferStatusChoices.PENDING_DEALER,
+            VehicleOfferStatusChoices.PENDING_BUYER,
+        )
+
+
+class VehicleOfferProposal(BaseUUIDModel):
+    """
+    Immutable commercial proposal terms within a VehiclePurchaseOffer round.
+    Captures offered price, handover preference, notes, and the proposing author.
+    Once written, proposals cannot be edited or deleted.
+    """
+    offer = models.ForeignKey(
+        VehiclePurchaseOffer,
+        on_delete=models.CASCADE,
+        related_name='proposals',
+    )
+    revision_number = models.PositiveIntegerField()
+    proposed_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='proposed_vehicle_offer_terms',
+    )
+    proposed_by_role = models.CharField(
+        max_length=20,
+        choices=[('BUYER', 'Buyer'), ('DEALER', 'Dealer')],
+    )
+    offered_price = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default='GBP')
+    handover_preference = models.CharField(
+        max_length=20,
+        choices=VehicleHandoverTypeChoices.choices,
+        default=VehicleHandoverTypeChoices.COLLECTION,
+    )
+    notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        verbose_name = 'Vehicle Offer Proposal'
+        verbose_name_plural = 'Vehicle Offer Proposals'
+        ordering = ['revision_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['offer', 'revision_number'],
+                name='unique_offer_proposal_revision',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and self.pk:
+            raise ImmutableRecordError("VehicleOfferProposal records are immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecordError("VehicleOfferProposal records are immutable and cannot be deleted.")
+
+    def __str__(self):
+        return f"Proposal R{self.revision_number} for Offer {self.offer_id}: {self.currency} {self.offered_price}"
+
+
+class VehicleOfferAction(BaseUUIDModel):
+    """
+    Immutable audit history log of negotiation actions:
+    SUBMITTED, COUNTERED, ACCEPTED, REJECTED, WITHDRAWN, EXPIRED, SUPERSEDED.
+    """
+    offer = models.ForeignKey(
+        VehiclePurchaseOffer,
+        on_delete=models.CASCADE,
+        related_name='actions',
+    )
+    proposal = models.ForeignKey(
+        VehicleOfferProposal,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='actions',
+    )
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='vehicle_offer_actions',
+    )
+    action_type = models.CharField(
+        max_length=30,
+        choices=VehicleOfferActionTypeChoices.choices,
+    )
+    notes = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Offer Action'
+        verbose_name_plural = 'Vehicle Offer Actions'
+        ordering = ['created_at']
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and self.pk:
+            raise ImmutableRecordError("VehicleOfferAction records are immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecordError("VehicleOfferAction records are immutable and cannot be deleted.")
+
+    def __str__(self):
+        return f"Action {self.action_type} by {self.actor.email} on Offer {self.offer_id}"
+
+
+class VehicleOrder(BaseUUIDModel):
+    """
+    Dedicated Motor Vehicle Purchase Order.
+    Created when an offer is formally accepted.
+    Enforces atomic vehicle reservation and strict separation from spare-part orders.
+    Initial status: PAYMENT_PENDING.
+    """
+    order_number = models.CharField(
+        max_length=50,
+        unique=True,
+        db_index=True,
+    )
+    listing = models.ForeignKey(
+        VehicleListing,
+        on_delete=models.PROTECT,
+        related_name='vehicle_orders',
+    )
+    accepted_offer = models.OneToOneField(
+        VehiclePurchaseOffer,
+        on_delete=models.PROTECT,
+        related_name='vehicle_order',
+    )
+    buyer = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='purchased_vehicle_orders',
+    )
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='sold_vehicle_orders',
+    )
+    organisation = models.ForeignKey(
+        Organisation,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='organisation_vehicle_orders',
+    )
+    status = models.CharField(
+        max_length=30,
+        choices=VehicleOrderStatusChoices.choices,
+        default=VehicleOrderStatusChoices.PAYMENT_PENDING,
+        db_index=True,
+    )
+    agreed_price = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10, default='GBP')
+    handover_type = models.CharField(
+        max_length=20,
+        choices=VehicleHandoverTypeChoices.choices,
+        default=VehicleHandoverTypeChoices.COLLECTION,
+    )
+    handover_address = models.JSONField(default=dict, blank=True)
+    payment_deadline = models.DateTimeField(db_index=True)
+    market_timezone = models.CharField(max_length=50, default='Europe/London')
+    payment_submitted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    payment_confirmed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='confirmed_vehicle_orders',
+    )
+    listing_snapshot = models.JSONField(default=dict, blank=True)
+    cancellation_reason = models.TextField(blank=True, default='')
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Order'
+        verbose_name_plural = 'Vehicle Orders'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['listing', 'status']),
+            models.Index(fields=['buyer', 'status']),
+            models.Index(fields=['seller', 'status']),
+            models.Index(fields=['payment_deadline', 'status']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['listing'],
+                condition=models.Q(status__in=[
+                    VehicleOrderStatusChoices.PAYMENT_PENDING,
+                    VehicleOrderStatusChoices.PAYMENT_SUBMITTED,
+                    VehicleOrderStatusChoices.PAYMENT_CONFIRMED,
+                    VehicleOrderStatusChoices.DOCUMENTS_PENDING,
+                    VehicleOrderStatusChoices.READY_FOR_HANDOVER,
+                ]),
+                name='unique_active_vehicle_order_per_listing',
+            ),
+        ]
+
+    def __str__(self):
+        return f"VehicleOrder {self.order_number} ({self.status}) - {self.currency} {self.agreed_price}"
+
+
+class VehiclePaymentReportStatusChoices(models.TextChoices):
+    PENDING_VERIFICATION = 'PENDING_VERIFICATION', 'Pending Dealer Verification'
+    CONFIRMED = 'CONFIRMED', 'Confirmed by Dealer'
+    REJECTED = 'REJECTED', 'Rejected'
+    FLAGGED = 'FLAGGED', 'Flagged with Discrepancy'
+
+
+class VehiclePaymentEscalationLevelChoices(models.TextChoices):
+    NONE = 'NONE', 'None'
+    WARNING_48H = 'WARNING_48H', '48h Warning Sent'
+    OVERDUE_72H = 'OVERDUE_72H', '72h Overdue'
+    ESCALATED_120H = 'ESCALATED_120H', 'Operations Escalated'
+
+
+class VehiclePaymentReport(BaseUUIDModel):
+    """
+    Auditable offline payment report submitted by the buyer.
+    Captures bank transfer reference, date/time paid, amount, and currency.
+    Original submission details are append-only/immutable to preserve evidence.
+    """
+    order = models.ForeignKey(
+        VehicleOrder,
+        on_delete=models.PROTECT,
+        related_name='payment_reports',
+    )
+    submitted_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='submitted_vehicle_payment_reports',
+    )
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=10)
+    payment_reference = models.CharField(max_length=100, db_index=True)
+    paid_at = models.DateTimeField()
+    payment_notes = models.TextField(blank=True, default='')
+    status = models.CharField(
+        max_length=30,
+        choices=VehiclePaymentReportStatusChoices.choices,
+        default=VehiclePaymentReportStatusChoices.PENDING_VERIFICATION,
+        db_index=True,
+    )
+    verified_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='verified_vehicle_payment_reports',
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verification_notes = models.TextField(blank=True, default='')
+    escalation_level = models.CharField(
+        max_length=30,
+        choices=VehiclePaymentEscalationLevelChoices.choices,
+        default=VehiclePaymentEscalationLevelChoices.NONE,
+        db_index=True,
+    )
+    escalated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Payment Report'
+        verbose_name_plural = 'Vehicle Payment Reports'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['submitted_by', 'status']),
+            models.Index(fields=['status', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"PaymentReport {self.payment_reference} for {self.order.order_number} ({self.status})"
+
+
+class VehiclePaymentVerificationEventTypeChoices(models.TextChoices):
+    PAYMENT_REPORTED = 'PAYMENT_REPORTED', 'Buyer Reported Payment'
+    VERIFICATION_CONFIRMED = 'VERIFICATION_CONFIRMED', 'Dealer Confirmed Receipt'
+    VERIFICATION_REJECTED = 'VERIFICATION_REJECTED', 'Dealer Rejected Payment'
+    VERIFICATION_FLAGGED = 'VERIFICATION_FLAGGED', 'Dealer Flagged Discrepancy'
+    WARNING_48H_TRIGGERED = 'WARNING_48H_TRIGGERED', '48h Verification Warning'
+    OVERDUE_72H_TRIGGERED = 'OVERDUE_72H_TRIGGERED', '72h Verification Overdue'
+    OPERATIONS_ESCALATED = 'OPERATIONS_ESCALATED', 'Operations Escalation'
+
+
+class VehiclePaymentVerificationEvent(BaseUUIDModel):
+    """
+    Immutable event log of all dealer verification actions and escalation triggers
+    associated with a VehiclePaymentReport and VehicleOrder.
+    """
+    report = models.ForeignKey(
+        VehiclePaymentReport,
+        on_delete=models.CASCADE,
+        related_name='verification_events',
+    )
+    order = models.ForeignKey(
+        VehicleOrder,
+        on_delete=models.CASCADE,
+        related_name='verification_events',
+    )
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='vehicle_payment_verification_events',
+    )
+    event_type = models.CharField(
+        max_length=50,
+        choices=VehiclePaymentVerificationEventTypeChoices.choices,
+        db_index=True,
+    )
+    notes = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Payment Verification Event'
+        verbose_name_plural = 'Vehicle Payment Verification Events'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['order', 'event_type']),
+            models.Index(fields=['report', 'created_at']),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ImmutableRecordError("VehiclePaymentVerificationEvent records are strictly immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecordError("VehiclePaymentVerificationEvent records are strictly immutable and cannot be deleted.")
+
+    def __str__(self):
+        return f"{self.event_type} on Order {self.order.order_number} at {self.created_at}"
 
 
 

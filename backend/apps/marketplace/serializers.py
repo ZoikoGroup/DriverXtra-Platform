@@ -46,6 +46,19 @@ from apps.marketplace.models import (
     ReviewReportReasonChoices,
     ReviewReportStatusChoices,
     ReviewReportActionChoices,
+    VehiclePurchaseOffer,
+    VehicleOfferProposal,
+    VehicleOfferAction,
+    VehicleOrder,
+    VehicleOfferStatusChoices,
+    VehicleHandoverTypeChoices,
+    VehicleOrderStatusChoices,
+    VehiclePaymentReport,
+    VehiclePaymentReportStatusChoices,
+    VehiclePaymentEscalationLevelChoices,
+    VehiclePaymentVerificationEvent,
+    VehiclePaymentVerificationEventTypeChoices,
+    VehicleListingAvailabilityChoices,
 )
 from apps.catalogue.models import Part
 from apps.marketplace.services import change_price, _UNSET, get_seller_public_info
@@ -790,6 +803,7 @@ class VehicleListingPublicSerializer(serializers.ModelSerializer):
             'organisation_name',
             'seller_info',
             'status',
+            'availability_status',
             'created_at',
         ]
 
@@ -2294,5 +2308,259 @@ class ReviewReportResolvePayloadSerializer(serializers.Serializer):
 class ReviewModerationPayloadSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=['APPROVE', 'FLAG', 'HIDE', 'DELETE'])
     admin_notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+# =============================================================================
+# Vehicle Purchase Offers & Orders Serializers
+# =============================================================================
+
+class VehicleOfferProposalSerializer(serializers.ModelSerializer):
+    proposed_by_name = serializers.CharField(source='proposed_by.full_name', read_only=True)
+    proposed_by_email = serializers.CharField(source='proposed_by.email', read_only=True)
+
+    class Meta:
+        model = VehicleOfferProposal
+        fields = [
+            'id',
+            'revision_number',
+            'proposed_by',
+            'proposed_by_name',
+            'proposed_by_email',
+            'proposed_by_role',
+            'offered_price',
+            'currency',
+            'handover_preference',
+            'notes',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class VehicleOfferActionSerializer(serializers.ModelSerializer):
+    actor_name = serializers.CharField(source='actor.full_name', read_only=True)
+    actor_email = serializers.CharField(source='actor.email', read_only=True)
+
+    class Meta:
+        model = VehicleOfferAction
+        fields = [
+            'id',
+            'action_type',
+            'actor',
+            'actor_name',
+            'actor_email',
+            'proposal',
+            'notes',
+            'metadata',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class VehiclePurchaseOfferSerializer(serializers.ModelSerializer):
+    buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+    buyer_email = serializers.CharField(source='buyer.email', read_only=True)
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    seller_email = serializers.CharField(source='seller.email', read_only=True)
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+    listing_title = serializers.CharField(source='listing.title', read_only=True)
+    listing_price = serializers.DecimalField(source='listing.price', max_digits=12, decimal_places=2, read_only=True)
+    listing_image_url = serializers.CharField(source='listing.primary_image_url', read_only=True)
+    listing_availability = serializers.CharField(source='listing.availability_status', read_only=True)
+    proposals = VehicleOfferProposalSerializer(many=True, read_only=True)
+    actions = VehicleOfferActionSerializer(many=True, read_only=True)
+    order_id = serializers.SerializerMethodField()
+    order_number = serializers.SerializerMethodField()
+
+    class Meta:
+        model = VehiclePurchaseOffer
+        fields = [
+            'id',
+            'listing',
+            'listing_title',
+            'listing_price',
+            'listing_image_url',
+            'listing_availability',
+            'buyer',
+            'buyer_name',
+            'buyer_email',
+            'seller',
+            'seller_name',
+            'seller_email',
+            'organisation',
+            'organisation_name',
+            'status',
+            'current_round',
+            'agreed_price',
+            'currency',
+            'expires_at',
+            'accepted_at',
+            'rejected_at',
+            'withdrawn_at',
+            'created_at',
+            'updated_at',
+            'proposals',
+            'actions',
+            'order_id',
+            'order_number',
+        ]
+        read_only_fields = fields
+
+    def get_order_id(self, obj) -> str | None:
+        if hasattr(obj, 'order') and obj.order:
+            return str(obj.order.id)
+        return None
+
+    def get_order_number(self, obj) -> str | None:
+        if hasattr(obj, 'order') and obj.order:
+            return obj.order.order_number
+        return None
+
+
+class VehicleOfferSubmitSerializer(serializers.Serializer):
+    offered_price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    handover_preference = serializers.ChoiceField(
+        choices=VehicleHandoverTypeChoices.choices,
+        default=VehicleHandoverTypeChoices.COLLECTION,
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class VehicleOfferCounterSerializer(serializers.Serializer):
+    counter_price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    handover_preference = serializers.ChoiceField(
+        choices=VehicleHandoverTypeChoices.choices,
+        required=False,
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class VehiclePaymentVerificationEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.CharField(source='actor.full_name', read_only=True, allow_null=True)
+    actor_email = serializers.CharField(source='actor.email', read_only=True, allow_null=True)
+
+    class Meta:
+        model = VehiclePaymentVerificationEvent
+        fields = [
+            'id',
+            'report',
+            'order',
+            'actor',
+            'actor_name',
+            'actor_email',
+            'event_type',
+            'notes',
+            'metadata',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class VehiclePaymentReportSerializer(serializers.ModelSerializer):
+    submitted_by_name = serializers.CharField(source='submitted_by.full_name', read_only=True)
+    submitted_by_email = serializers.CharField(source='submitted_by.email', read_only=True)
+    verified_by_name = serializers.CharField(source='verified_by.full_name', read_only=True, allow_null=True)
+    order_number = serializers.CharField(source='order.order_number', read_only=True)
+    verification_events = VehiclePaymentVerificationEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = VehiclePaymentReport
+        fields = [
+            'id',
+            'order',
+            'order_number',
+            'submitted_by',
+            'submitted_by_name',
+            'submitted_by_email',
+            'amount_paid',
+            'currency',
+            'payment_reference',
+            'paid_at',
+            'payment_notes',
+            'status',
+            'verified_by',
+            'verified_by_name',
+            'verified_at',
+            'verification_notes',
+            'escalation_level',
+            'escalated_at',
+            'created_at',
+            'updated_at',
+            'verification_events',
+        ]
+        read_only_fields = fields
+
+
+class VehiclePaymentReportSubmitSerializer(serializers.Serializer):
+    amount_paid = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    currency = serializers.CharField(max_length=10)
+    payment_reference = serializers.CharField(max_length=100, min_length=3)
+    paid_at = serializers.DateTimeField()
+    payment_notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class VehiclePaymentVerificationActionSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, default='')
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class VehicleOrderSerializer(serializers.ModelSerializer):
+    buyer_name = serializers.CharField(source='buyer.full_name', read_only=True)
+    buyer_email = serializers.CharField(source='buyer.email', read_only=True)
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True)
+    seller_email = serializers.CharField(source='seller.email', read_only=True)
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+    confirmed_by_name = serializers.CharField(source='confirmed_by.full_name', read_only=True, allow_null=True)
+    listing_title = serializers.CharField(source='listing.title', read_only=True)
+    listing_image_url = serializers.CharField(source='listing.primary_image_url', read_only=True)
+    is_payment_overdue = serializers.SerializerMethodField()
+    latest_payment_report = serializers.SerializerMethodField()
+
+    class Meta:
+        model = VehicleOrder
+        fields = [
+            'id',
+            'order_number',
+            'listing',
+            'listing_title',
+            'listing_image_url',
+            'accepted_offer',
+            'buyer',
+            'buyer_name',
+            'buyer_email',
+            'seller',
+            'seller_name',
+            'seller_email',
+            'organisation',
+            'organisation_name',
+            'status',
+            'agreed_price',
+            'currency',
+            'handover_type',
+            'handover_address',
+            'payment_deadline',
+            'market_timezone',
+            'is_payment_overdue',
+            'payment_submitted_at',
+            'payment_confirmed_at',
+            'confirmed_by',
+            'confirmed_by_name',
+            'latest_payment_report',
+            'listing_snapshot',
+            'cancellation_reason',
+            'cancelled_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_is_payment_overdue(self, obj) -> bool:
+        return obj.status == VehicleOrderStatusChoices.PAYMENT_PENDING and obj.payment_deadline < timezone.now()
+
+    def get_latest_payment_report(self, obj):
+        latest = obj.payment_reports.first()
+        if latest:
+            return VehiclePaymentReportSerializer(latest).data
+        return None
+
 
 
