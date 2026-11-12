@@ -1514,6 +1514,239 @@ export const api = {
       return Array.isArray(res) ? res : res.results || [];
     },
 
+    // Vehicle Purchase Offers (Buyer)
+    async submitVehicleOffer(
+      listingId: string,
+      payload: { offered_price: number | string; handover_preference?: string; notes?: string }
+    ): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/vehicles/${listingId}/offers/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listBuyerVehicleOffers(params?: { status?: string; listing_id?: string }): Promise<VehiclePurchaseOffer[]> {
+      const sp = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") sp.set("status", params.status);
+      if (params?.listing_id) sp.set("listing_id", params.listing_id);
+      const qs = sp.toString() ? `?${sp.toString()}` : "";
+      const res = await apiRequest<VehiclePurchaseOffer[] | { results: VehiclePurchaseOffer[] }>(
+        `/marketplace/buyer/vehicle-offers/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getBuyerVehicleOfferDetail(offerId: string): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/buyer/vehicle-offers/${offerId}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async acceptBuyerVehicleOffer(
+      offerId: string,
+      payload?: { handover_address?: Record<string, unknown> }
+    ): Promise<VehicleOrder> {
+      return apiRequest<VehicleOrder>(`/marketplace/buyer/vehicle-offers/${offerId}/accept/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async rejectBuyerVehicleOffer(offerId: string, reason?: string): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/buyer/vehicle-offers/${offerId}/reject/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason: reason || "" }),
+      });
+    },
+
+    async counterBuyerVehicleOffer(
+      offerId: string,
+      payload: { counter_price: number | string; handover_preference?: string; notes?: string }
+    ): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/buyer/vehicle-offers/${offerId}/counter/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async withdrawBuyerVehicleOffer(offerId: string, reason?: string): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/buyer/vehicle-offers/${offerId}/withdraw/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason: reason || "" }),
+      });
+    },
+
+    async listBuyerVehicleOrders(params?: { status?: string }): Promise<VehicleOrder[]> {
+      const sp = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") sp.set("status", params.status);
+      const qs = sp.toString() ? `?${sp.toString()}` : "";
+      const res = await apiRequest<VehicleOrder[] | { results: VehicleOrder[] }>(
+        `/marketplace/buyer/vehicle-orders/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getBuyerVehicleOrderDetail(orderId: string): Promise<VehicleOrder> {
+      return apiRequest<VehicleOrder>(`/marketplace/buyer/vehicle-orders/${orderId}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async reportBuyerVehicleOrderPayment(
+      orderId: string,
+      payload: {
+        amount_paid: string | number;
+        currency: string;
+        payment_reference: string;
+        paid_at: string;
+        payment_notes?: string;
+      }
+    ): Promise<VehiclePaymentReport> {
+      return apiRequest<VehiclePaymentReport>(
+        `/marketplace/buyer/vehicle-orders/${orderId}/report-payment/`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          requiresAuth: true,
+        }
+      );
+    },
+
+    async getBuyerVehicleOrderPaymentReports(
+      orderId: string
+    ): Promise<VehiclePaymentReport[]> {
+      const res = await apiRequest<VehiclePaymentReport[] | { results: VehiclePaymentReport[] }>(
+        `/marketplace/buyer/vehicle-orders/${orderId}/payment-reports/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    // Vehicle Purchase Offers (Seller)
+    async listSellerVehicleOffers(params?: { status?: string; listing_id?: string }): Promise<VehiclePurchaseOffer[]> {
+      const sp = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") sp.set("status", params.status);
+      if (params?.listing_id) sp.set("listing_id", params.listing_id);
+      const qs = sp.toString() ? `?${sp.toString()}` : "";
+      const res = await apiRequest<VehiclePurchaseOffer[] | { results: VehiclePurchaseOffer[] }>(
+        `/marketplace/seller/vehicle-offers/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getSellerVehicleOfferDetail(offerId: string): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/seller/vehicle-offers/${offerId}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async acceptSellerVehicleOffer(offerId: string): Promise<VehicleOrder> {
+      return apiRequest<VehicleOrder>(`/marketplace/seller/vehicle-offers/${offerId}/accept/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async rejectSellerVehicleOffer(offerId: string, reason?: string): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/seller/vehicle-offers/${offerId}/reject/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason: reason || "" }),
+      });
+    },
+
+    async counterSellerVehicleOffer(
+      offerId: string,
+      payload: { counter_price: number | string; handover_preference?: string; notes?: string }
+    ): Promise<VehiclePurchaseOffer> {
+      return apiRequest<VehiclePurchaseOffer>(`/marketplace/seller/vehicle-offers/${offerId}/counter/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async listSellerVehicleOrders(params?: { status?: string }): Promise<VehicleOrder[]> {
+      const sp = new URLSearchParams();
+      if (params?.status && params.status !== "ALL") sp.set("status", params.status);
+      const qs = sp.toString() ? `?${sp.toString()}` : "";
+      const res = await apiRequest<VehicleOrder[] | { results: VehicleOrder[] }>(
+        `/marketplace/seller/vehicle-orders/${qs}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getSellerVehicleOrderDetail(orderId: string): Promise<VehicleOrder> {
+      return apiRequest<VehicleOrder>(`/marketplace/seller/vehicle-orders/${orderId}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getSellerVehicleOrderPaymentReports(
+      orderId: string
+    ): Promise<VehiclePaymentReport[]> {
+      const res = await apiRequest<VehiclePaymentReport[] | { results: VehiclePaymentReport[] }>(
+        `/marketplace/seller/vehicle-orders/${orderId}/payment-reports/`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async confirmSellerVehicleOrderPayment(
+      orderId: string,
+      payload?: { notes?: string }
+    ): Promise<VehiclePaymentReport> {
+      return apiRequest<VehiclePaymentReport>(
+        `/marketplace/seller/vehicle-orders/${orderId}/confirm-payment/`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload || {}),
+          requiresAuth: true,
+        }
+      );
+    },
+
+    async rejectSellerVehicleOrderPayment(
+      orderId: string,
+      payload: { reason: string }
+    ): Promise<VehiclePaymentReport> {
+      return apiRequest<VehiclePaymentReport>(
+        `/marketplace/seller/vehicle-orders/${orderId}/reject-payment/`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          requiresAuth: true,
+        }
+      );
+    },
+
+    async flagSellerVehicleOrderPayment(
+      orderId: string,
+      payload: { reason: string }
+    ): Promise<VehiclePaymentReport> {
+      return apiRequest<VehiclePaymentReport>(
+        `/marketplace/seller/vehicle-orders/${orderId}/flag-payment/`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          requiresAuth: true,
+        }
+      );
+    },
+
     async listMyParts(status?: string): Promise<MarketplacePartListing[]> {
       const qs = status ? `?status=${encodeURIComponent(status)}` : "";
       const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
@@ -4032,6 +4265,7 @@ export interface MarketplaceVehicleListing {
   location_city?: string;
   location_postcode?: string;
   status: "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+  availability_status?: "AVAILABLE" | "RESERVED" | "SOLD";
   seller_info?: SellerPublicInfo;
   submitted_at?: string;
   reviewed_at?: string | null;
@@ -4665,9 +4899,6 @@ export interface SellerPublicInfo {
   seller_type: "DEALERSHIP" | "INDIVIDUAL_SELLER";
   is_verified: boolean;
   location_city: string;
-  phone: string | null;
-  has_phone: boolean;
-  whatsapp_url: string | null;
   can_enquire: boolean;
 }
 
@@ -4716,6 +4947,169 @@ export interface UpdateVehicleEnquiryPayload {
   status?: VehicleEnquiryStatus;
   seller_notes?: string;
   seller_reply?: string;
+}
+
+// ==========================================
+// Vehicle Purchase Offers & Vehicle Orders Types
+// ==========================================
+
+export type VehicleOfferStatus =
+  | "PENDING_DEALER"
+  | "PENDING_BUYER"
+  | "ACCEPTED"
+  | "REJECTED"
+  | "WITHDRAWN"
+  | "EXPIRED"
+  | "SUPERSEDED";
+
+export type VehicleOrderStatus =
+  | "PAYMENT_PENDING"
+  | "PAYMENT_SUBMITTED"
+  | "PAYMENT_CONFIRMED"
+  | "DOCUMENTS_PENDING"
+  | "READY_FOR_HANDOVER"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "DISPUTED";
+
+export interface VehicleOfferProposal {
+  id: string;
+  revision_number: number;
+  proposed_by: string;
+  proposed_by_name: string;
+  proposed_by_email: string;
+  proposed_by_role: "BUYER" | "DEALER";
+  offered_price: string;
+  currency: string;
+  handover_preference: "COLLECTION" | "DELIVERY";
+  notes: string;
+  created_at: string;
+}
+
+export interface VehicleOfferAction {
+  id: string;
+  action_type: string;
+  actor: string;
+  actor_name: string;
+  actor_email: string;
+  proposal?: string | null;
+  notes: string;
+  created_at: string;
+}
+
+export interface VehiclePurchaseOffer {
+  id: string;
+  listing: string;
+  listing_title: string;
+  listing_price: string;
+  listing_image_url: string;
+  listing_availability: "AVAILABLE" | "RESERVED" | "SOLD";
+  buyer: string;
+  buyer_name: string;
+  buyer_email: string;
+  seller: string;
+  seller_name: string;
+  seller_email: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  status: VehicleOfferStatus;
+  current_round: number;
+  agreed_price?: string | null;
+  currency: string;
+  expires_at: string;
+  accepted_at?: string | null;
+  rejected_at?: string | null;
+  withdrawn_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  proposals: VehicleOfferProposal[];
+  actions: VehicleOfferAction[];
+  order_id?: string | null;
+  order_number?: string | null;
+}
+
+export interface VehicleOrder {
+  id: string;
+  order_number: string;
+  listing: string;
+  listing_title: string;
+  listing_image_url: string;
+  accepted_offer: string;
+  buyer: string;
+  buyer_name: string;
+  buyer_email: string;
+  seller: string;
+  seller_name: string;
+  seller_email: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  status: VehicleOrderStatus;
+  agreed_price: string;
+  currency: string;
+  handover_type: "COLLECTION" | "DELIVERY";
+  handover_address: Record<string, unknown>;
+  payment_deadline: string;
+  market_timezone: string;
+  is_payment_overdue: boolean;
+  payment_submitted_at?: string | null;
+  payment_confirmed_at?: string | null;
+  confirmed_by?: string | null;
+  confirmed_by_name?: string | null;
+  latest_payment_report?: VehiclePaymentReport | null;
+  listing_snapshot: Record<string, unknown>;
+  cancellation_reason: string;
+  cancelled_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type VehiclePaymentReportStatus =
+  | "PENDING_VERIFICATION"
+  | "CONFIRMED"
+  | "REJECTED"
+  | "FLAGGED";
+
+export type VehiclePaymentEscalationLevel =
+  | "NONE"
+  | "WARNING_48H"
+  | "OVERDUE_72H"
+  | "ESCALATED_120H";
+
+export interface VehiclePaymentVerificationEvent {
+  id: string;
+  report: string;
+  order: string;
+  actor?: string | null;
+  actor_name?: string | null;
+  actor_email?: string | null;
+  event_type: string;
+  notes: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface VehiclePaymentReport {
+  id: string;
+  order: string;
+  order_number: string;
+  submitted_by: string;
+  submitted_by_name: string;
+  submitted_by_email: string;
+  amount_paid: string;
+  currency: string;
+  payment_reference: string;
+  paid_at: string;
+  payment_notes: string;
+  status: VehiclePaymentReportStatus;
+  verified_by?: string | null;
+  verified_by_name?: string | null;
+  verified_at?: string | null;
+  verification_notes: string;
+  escalation_level: VehiclePaymentEscalationLevel;
+  escalated_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  verification_events?: VehiclePaymentVerificationEvent[];
 }
 
 // ==========================================

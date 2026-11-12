@@ -41,3 +41,6 @@ yarn-error.log*
 next-env.d.ts
 
 driverxtra_db_before_part_b.dump
+
+# Gemini / Antigravity generated files
+.gemini/

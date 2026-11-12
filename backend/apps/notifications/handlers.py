@@ -185,6 +185,400 @@ def _vehicle_enquiry_updated(entry):
     return [NotificationSpec(enquiry.buyer, "Seller replied to your enquiry", message, _tab_link('my_enquiries'))]
 
 
+def _vehicle_offer_submitted(entry):
+    from apps.marketplace.models import VehiclePurchaseOffer
+    offer = (
+        VehiclePurchaseOffer.objects.select_related('seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if offer is None:
+        return []
+    price = (entry.metadata or {}).get('offered_price') or (offer.latest_proposal.offered_price if offer.latest_proposal else '')
+    currency = offer.currency or '£'
+    listing_title = offer.listing.title if offer.listing else 'Vehicle'
+    title = "New vehicle offer received"
+    message = f"A buyer has submitted a purchase offer of {currency} {price} for '{listing_title}'."
+    return [NotificationSpec(offer.seller, title, message, _tab_link('seller_orders'))]
+
+
+def _vehicle_offer_countered(entry):
+    from apps.marketplace.models import VehiclePurchaseOffer
+    offer = (
+        VehiclePurchaseOffer.objects.select_related('seller', 'buyer', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if offer is None:
+        return []
+    latest_prop = offer.latest_proposal
+    proposer_role = latest_prop.proposed_by_role if latest_prop else (entry.metadata or {}).get('proposer_role')
+    price = latest_prop.offered_price if latest_prop else (entry.metadata or {}).get('counter_price', '')
+    currency = offer.currency or '£'
+    listing_title = offer.listing.title if offer.listing else 'Vehicle'
+
+    if proposer_role == 'DEALER':
+        recipient = offer.buyer
+        title = "Dealer countered your vehicle offer"
+        message = f"The dealer has countered with {currency} {price} on '{listing_title}'. Review and respond within 48 hours."
+        link = _tab_link('my_orders')
+    else:
+        recipient = offer.seller
+        title = "Buyer countered their vehicle offer"
+        message = f"The buyer has countered with {currency} {price} on '{listing_title}'. Review and respond within 72 hours."
+        link = _tab_link('seller_orders')
+
+    return [NotificationSpec(recipient, title, message, link)]
+
+
+def _vehicle_offer_accepted(entry):
+    from apps.marketplace.models import VehiclePurchaseOffer
+    offer = (
+        VehiclePurchaseOffer.objects.select_related('seller', 'buyer', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if offer is None:
+        return []
+    currency = offer.currency or '£'
+    price = offer.agreed_price or ''
+    listing_title = offer.listing.title if offer.listing else 'Vehicle'
+
+    buyer_spec = NotificationSpec(
+        offer.buyer,
+        "Vehicle offer accepted - Reserved",
+        f"Your offer of {currency} {price} on '{listing_title}' has been accepted! The vehicle is reserved. Please arrange payment within 5 business days.",
+        _tab_link('my_orders'),
+    )
+    seller_spec = NotificationSpec(
+        offer.seller,
+        "Vehicle offer accepted - Reserved",
+        f"Offer of {currency} {price} on '{listing_title}' was accepted and the vehicle is now reserved under your order.",
+        _tab_link('seller_orders'),
+    )
+    return [buyer_spec, seller_spec]
+
+
+def _vehicle_offer_rejected(entry):
+    from apps.marketplace.models import VehiclePurchaseOffer
+    offer = (
+        VehiclePurchaseOffer.objects.select_related('seller', 'buyer', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if offer is None:
+        return []
+    listing_title = offer.listing.title if offer.listing else 'Vehicle'
+    reason = (entry.metadata or {}).get('reason', '')
+
+    if entry.actor_id == offer.buyer_id:
+        recipient = offer.seller
+        title = "Vehicle counteroffer declined"
+        message = _with_reason(f"The buyer has declined the counteroffer on '{listing_title}'.", reason)
+        link = _tab_link('seller_orders')
+    else:
+        recipient = offer.buyer
+        title = "Vehicle offer declined"
+        message = _with_reason(f"The dealer has declined your offer on '{listing_title}'.", reason)
+        link = _tab_link('my_orders')
+
+    return [NotificationSpec(recipient, title, message, link)]
+
+
+def _vehicle_offer_superseded(entry):
+    from apps.marketplace.models import VehiclePurchaseOffer
+    offer = (
+        VehiclePurchaseOffer.objects.select_related('buyer', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if offer is None:
+        return []
+    listing_title = offer.listing.title if offer.listing else 'Vehicle'
+    title = "Vehicle offer superseded"
+    message = f"Your offer on '{listing_title}' has been superseded because another buyer's offer was accepted and the vehicle was reserved."
+    return [NotificationSpec(offer.buyer, title, message, _tab_link('my_orders'))]
+
+
+def _vehicle_offer_expired(entry):
+    from apps.marketplace.models import VehiclePurchaseOffer
+    offer = (
+        VehiclePurchaseOffer.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if offer is None:
+        return []
+    listing_title = offer.listing.title if offer.listing else 'Vehicle'
+    return [
+        NotificationSpec(
+            offer.buyer,
+            "Vehicle offer expired",
+            f"The vehicle purchase offer on '{listing_title}' has expired without a finalized agreement.",
+            _tab_link('my_orders'),
+        ),
+        NotificationSpec(
+            offer.seller,
+            "Vehicle offer expired",
+            f"A vehicle purchase offer on '{listing_title}' has expired without a finalized agreement.",
+            _tab_link('seller_orders'),
+        ),
+    ]
+
+
+def _vehicle_order_created(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    deadline_str = order.payment_deadline.strftime("%d %b %Y, %H:%M %Z") if order.payment_deadline else "5 business days"
+
+    buyer_spec = NotificationSpec(
+        order.buyer,
+        f"Vehicle Order #{order.order_number} Created",
+        f"Your vehicle order for '{listing_title}' is confirmed! The statutory 5-business-day offline payment window is open until {deadline_str}.",
+        _tab_link('my_orders'),
+    )
+    seller_spec = NotificationSpec(
+        order.seller,
+        f"Vehicle Order #{order.order_number} - Reserved",
+        f"Order #{order.order_number} created for '{listing_title}'. Listing is reserved pending buyer payment due by {deadline_str}.",
+        _tab_link('seller_orders'),
+    )
+    return [buyer_spec, seller_spec]
+
+
+def _vehicle_order_expired_cancelled(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+
+    buyer_spec = NotificationSpec(
+        order.buyer,
+        f"Vehicle Order #{order.order_number} Cancelled",
+        f"Order #{order.order_number} for '{listing_title}' was cancelled because the statutory payment deadline expired. Vehicle has been relisted.",
+        _tab_link('my_orders'),
+    )
+    seller_spec = NotificationSpec(
+        order.seller,
+        f"Vehicle Order #{order.order_number} Cancelled - Vehicle Relisted",
+        f"Order #{order.order_number} was cancelled due to payment timeout. Vehicle '{listing_title}' is available again.",
+        _tab_link('seller_orders'),
+    )
+    return [buyer_spec, seller_spec]
+
+
+def _vehicle_order_payment_reminder(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    deadline_str = order.payment_deadline.strftime("%d %b %Y, %H:%M %Z") if order.payment_deadline else "soon"
+    return [
+        NotificationSpec(
+            order.buyer,
+            f"Payment Reminder: Order #{order.order_number}",
+            f"Reminder: The payment deadline for '{listing_title}' expires on {deadline_str}. Please finalize payment with the dealer to maintain reservation.",
+            _tab_link('my_orders'),
+        )
+    ]
+
+
+def _vehicle_order_payment_reported(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    return [
+        NotificationSpec(
+            order.seller,
+            f"Payment Reported: Order #{order.order_number}",
+            f"Buyer reported offline payment of {order.currency} {order.agreed_price} for '{listing_title}'. Please verify receipt in your account.",
+            _tab_link('seller_orders'),
+        )
+    ]
+
+
+def _vehicle_order_payment_confirmed(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    return [
+        NotificationSpec(
+            order.buyer,
+            f"Payment Confirmed: Order #{order.order_number}",
+            f"Dealer confirmed receipt of your payment for '{listing_title}'. Order #{order.order_number} is now confirmed.",
+            _tab_link('my_orders'),
+        )
+    ]
+
+
+def _vehicle_order_payment_rejected(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    reason = (entry.metadata or {}).get('reason', 'Payment details could not be matched.')
+    return [
+        NotificationSpec(
+            order.buyer,
+            f"Payment Rejected: Order #{order.order_number}",
+            f"Dealer could not verify payment for '{listing_title}': {reason}. Your vehicle remains reserved. Please re-submit payment details.",
+            _tab_link('my_orders'),
+        )
+    ]
+
+
+def _vehicle_order_payment_flagged(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    reason = (entry.metadata or {}).get('reason', 'Payment discrepancy noted.')
+    return [
+        NotificationSpec(
+            order.buyer,
+            f"Payment Discrepancy Flagged: Order #{order.order_number}",
+            f"Dealer flagged a discrepancy for payment on '{listing_title}': {reason}. Please check your order details or contact support.",
+            _tab_link('my_orders'),
+        )
+    ]
+
+
+def _vehicle_order_verification_warning_48h(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    return [
+        NotificationSpec(
+            order.seller,
+            f"Verification Warning (48h): Order #{order.order_number}",
+            f"Payment verification for Order #{order.order_number} ('{listing_title}') has been pending for 48 hours. Please confirm or dispute the funds.",
+            _tab_link('seller_orders'),
+        )
+    ]
+
+
+def _vehicle_order_verification_overdue_72h(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+    return [
+        NotificationSpec(
+            order.seller,
+            f"URGENT: Payment Verification Overdue (72h) - Order #{order.order_number}",
+            f"Payment verification for Order #{order.order_number} ('{listing_title}') has passed the 72-hour window. Immediate dealer verification is required.",
+            _tab_link('seller_orders'),
+        ),
+        NotificationSpec(
+            order.buyer,
+            f"Payment Verification Delayed: Order #{order.order_number}",
+            f"Dealer payment verification for '{listing_title}' is taking longer than expected (72h+). Support is monitoring your transaction.",
+            _tab_link('my_orders'),
+        ),
+    ]
+
+
+def _vehicle_order_verification_escalated_120h(entry):
+    from apps.marketplace.models import VehicleOrder
+    from django.contrib.auth import get_user_model
+    from django.db import models
+    from apps.accounts.models import RoleChoices
+
+    User = get_user_model()
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    listing_title = order.listing.title if order.listing else 'Vehicle'
+
+    specs = [
+        NotificationSpec(
+            order.seller,
+            f"OPERATIONS ESCALATION: Order #{order.order_number}",
+            f"Payment verification for Order #{order.order_number} ('{listing_title}') unfulfilled after 120 hours. Order has been escalated to platform operations.",
+            _tab_link('seller_orders'),
+        ),
+        NotificationSpec(
+            order.buyer,
+            f"Operations Update: Order #{order.order_number}",
+            f"Dealer verification for '{listing_title}' has exceeded 120 hours. Platform operations team is actively reviewing your order.",
+            _tab_link('my_orders'),
+        ),
+    ]
+
+    staff_users = User.objects.filter(
+        models.Q(user_roles__role__in=[RoleChoices.ADMIN, 'SUPPORT_LEAD', 'STAFF'])
+        | models.Q(is_superuser=True)
+        | models.Q(is_staff=True),
+        is_active=True,
+    ).distinct()
+
+    for staff in staff_users[:5]:
+        specs.append(
+            NotificationSpec(
+                staff,
+                f"Operations Queue: Vehicle Order #{order.order_number} Escalated (120h)",
+                f"Dealer verification unfulfilled after 120 hours for Order #{order.order_number} ({order.currency} {order.agreed_price}, '{listing_title}'). Manual operational intervention required.",
+                _tab_link('platform_operations'),
+            )
+        )
+
+    return specs
+
+
 def _org_member_added(entry):
     from apps.organisations.models import OrganisationMembership
 
@@ -973,6 +1367,22 @@ EVENT_RESOLVERS = {
     'catalogue.photo_proposal.rejected': _photo_proposal_decision,
     'marketplace.vehicle_enquiry.created': _vehicle_enquiry_created,
     'marketplace.vehicle_enquiry.updated': _vehicle_enquiry_updated,
+    'marketplace.vehicle_offer.submitted': _vehicle_offer_submitted,
+    'marketplace.vehicle_offer.countered': _vehicle_offer_countered,
+    'marketplace.vehicle_offer.accepted': _vehicle_offer_accepted,
+    'marketplace.vehicle_offer.rejected': _vehicle_offer_rejected,
+    'marketplace.vehicle_offer.superseded': _vehicle_offer_superseded,
+    'marketplace.vehicle_offer.expired': _vehicle_offer_expired,
+    'marketplace.vehicle_order.created': _vehicle_order_created,
+    'marketplace.vehicle_order.expired_cancelled': _vehicle_order_expired_cancelled,
+    'marketplace.vehicle_order.payment_reminder': _vehicle_order_payment_reminder,
+    'marketplace.vehicle_order.payment_reported': _vehicle_order_payment_reported,
+    'marketplace.vehicle_order.payment_confirmed': _vehicle_order_payment_confirmed,
+    'marketplace.vehicle_order.payment_rejected': _vehicle_order_payment_rejected,
+    'marketplace.vehicle_order.payment_flagged': _vehicle_order_payment_flagged,
+    'marketplace.vehicle_order.verification_warning_48h': _vehicle_order_verification_warning_48h,
+    'marketplace.vehicle_order.verification_overdue_72h': _vehicle_order_verification_overdue_72h,
+    'marketplace.vehicle_order.verification_escalated_120h': _vehicle_order_verification_escalated_120h,
     'org.member.added': _org_member_added,
 
     # Orders & Payments

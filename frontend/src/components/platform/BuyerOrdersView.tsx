@@ -47,7 +47,9 @@ import {
   ThumbsUp,
   Edit3,
   Trash2,
+  Car,
 } from "lucide-react";
+import BuyerVehicleOrdersOffersSection from "./BuyerVehicleOrdersOffersSection";
 
 interface BuyerOrdersViewProps {
   onNavigateToBrowse?: () => void;
@@ -68,8 +70,8 @@ export default function BuyerOrdersView({
 }: BuyerOrdersViewProps) {
   const { user } = useAuth();
 
-  // Navigation: Orders / Returns / Disputes / Reviews
-  const [activeSection, setActiveSection] = useState<"orders" | "returns" | "disputes" | "reviews">("orders");
+  // Navigation: Orders / Vehicles / Returns / Disputes / Reviews
+  const [activeSection, setActiveSection] = useState<"orders" | "vehicles" | "returns" | "disputes" | "reviews">("orders");
 
   // Orders State
   const [orders, setOrders] = useState<PlatformOrder[]>([]);
@@ -762,6 +764,18 @@ export default function BuyerOrdersView({
         </button>
 
         <button
+          onClick={() => setActiveSection("vehicles")}
+          className={`flex-1 min-w-[150px] py-2.5 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
+            activeSection === "vehicles"
+              ? "bg-slate-900 text-white shadow-md"
+              : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+          }`}
+        >
+          <Car className="w-4 h-4 text-emerald-400" />
+          <span>Vehicle Purchases</span>
+        </button>
+
+        <button
           onClick={() => setActiveSection("returns")}
           className={`flex-1 min-w-[150px] py-2.5 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
             activeSection === "returns"
@@ -1042,6 +1056,13 @@ export default function BuyerOrdersView({
       )}
 
       {/* ========================================================= */}
+      {/* SECTION 1.5: VEHICLE PURCHASES & OFFERS                  */}
+      {/* ========================================================= */}
+      {activeSection === "vehicles" && (
+        <BuyerVehicleOrdersOffersSection onNavigateToBrowse={onNavigateToBrowse} />
+      )}
+
+      {/* ========================================================= */}
       {/* SECTION 2: BUYER RETURNS & CANCELLATIONS                  */}
       {/* ========================================================= */}
       {activeSection === "returns" && (
@@ -1150,7 +1171,7 @@ export default function BuyerOrdersView({
                             rel="noopener noreferrer"
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity"
                           >
-                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${i + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${i + 1}`} width={56} height={56} className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -1589,7 +1610,7 @@ export default function BuyerOrdersView({
                       <div className="flex flex-wrap gap-2 pt-1">
                         {returnEvidenceUrls.map((url, idx) => (
                           <div key={idx} className="relative w-14 h-14 rounded-xl border border-slate-300 overflow-hidden group">
-                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} width={56} height={56} className="w-full h-full object-cover" />
                             <button
                               type="button"
                               onClick={() => setReturnEvidenceUrls((prev) => prev.filter((_, i) => i !== idx))}
@@ -1737,7 +1758,7 @@ export default function BuyerOrdersView({
                   <div className="flex flex-wrap gap-2 pt-1">
                     {disputeEvidenceUrls.map((url, idx) => (
                       <div key={idx} className="relative w-14 h-14 rounded-xl border border-slate-300 overflow-hidden group">
-                        <Image src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                        <Image src={resolveMediaUrl(url)} alt={`Evidence ${idx}`} width={56} height={56} className="w-full h-full object-cover" />
                         <button
                           type="button"
                           onClick={() => setDisputeEvidenceUrls((prev) => prev.filter((_, i) => i !== idx))}

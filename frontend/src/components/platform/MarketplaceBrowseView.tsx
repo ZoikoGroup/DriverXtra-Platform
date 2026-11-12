@@ -33,6 +33,7 @@ import {
   MapPin,
   PackageCheck,
   Tag,
+  Clock,
   AlertTriangle,
   XCircle,
   Info,
@@ -45,8 +46,6 @@ import {
   ImageIcon,
   Building2,
   MessageSquare,
-  Phone,
-  MessageCircle,
   Send,
   ShoppingCart,
   Star,
@@ -93,6 +92,15 @@ export default function MarketplaceBrowseView({
   const [enquirySubmitting, setEnquirySubmitting] = useState<boolean>(false);
   const [enquirySuccess, setEnquirySuccess] = useState<string | null>(null);
   const [enquiryError, setEnquiryError] = useState<string | null>(null);
+
+  // Vehicle Purchase Offer Modal State
+  const [offerVehicle, setOfferVehicle] = useState<MarketplaceVehicleListing | null>(null);
+  const [offeredPrice, setOfferedPrice] = useState<string>("");
+  const [handoverPreference, setHandoverPreference] = useState<"COLLECTION" | "DELIVERY">("COLLECTION");
+  const [offerNotes, setOfferNotes] = useState<string>("");
+  const [offerSubmitting, setOfferSubmitting] = useState<boolean>(false);
+  const [offerSuccess, setOfferSuccess] = useState<string | null>(null);
+  const [offerError, setOfferError] = useState<string | null>(null);
 
   // Favourites state
   const [favouriteVehicleIds, setFavouriteVehicleIds] = useState<Set<string>>(new Set());
@@ -263,6 +271,56 @@ export default function MarketplaceBrowseView({
       );
     } finally {
       setEnquirySubmitting(false);
+    }
+  };
+
+  const handleOpenOfferModal = (vehicle: MarketplaceVehicleListing) => {
+    setOfferVehicle(vehicle);
+    setOfferedPrice(String(vehicle.price || ""));
+    setHandoverPreference("COLLECTION");
+    setOfferNotes("");
+    setOfferSuccess(null);
+    setOfferError(null);
+  };
+
+  const handleSendOffer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!offerVehicle) return;
+    if (!user) {
+      setOfferError("Please log in to your DriverXtra account to submit a purchase offer.");
+      return;
+    }
+    const num = parseFloat(offeredPrice);
+    if (isNaN(num) || num <= 0) {
+      setOfferError("Please enter a valid purchase offer price greater than zero.");
+      return;
+    }
+
+    setOfferSubmitting(true);
+    setOfferError(null);
+    try {
+      const res = await api.marketplace.submitVehicleOffer(offerVehicle.id, {
+        offered_price: num,
+        handover_preference: handoverPreference,
+        notes: offerNotes.trim(),
+      });
+      setOfferSuccess(
+        `Your purchase offer of ${res.currency} ${Number(res.proposals[0]?.offered_price || num).toLocaleString()} has been sent to ${
+          offerVehicle.seller_info?.name || offerVehicle.seller_name || "the dealer"
+        }. You can view the negotiation and counteroffers in My Orders.`
+      );
+    } catch (err: unknown) {
+      const error = err as {
+        details?: { detail?: unknown };
+        message?: string;
+      };
+      const msg =
+        error.details?.detail ??
+        error.message ??
+        "Failed to submit purchase offer. Please try again.";
+      setOfferError(typeof msg === "string" ? msg : JSON.stringify(msg));
+    } finally {
+      setOfferSubmitting(false);
     }
   };
 
@@ -955,7 +1013,6 @@ export default function MarketplaceBrowseView({
                           src={resolveMediaUrl(v.primary_image_url)}
                           alt={v.title}
                           fill
-                          unoptimized
                           sizes="(max-width: 768px) 100vw, 33vw"
                           className="object-cover"
                           onError={(e) => {
@@ -1594,7 +1651,6 @@ export default function MarketplaceBrowseView({
                                 src={resolveMediaUrl(p.primary_image_url)}
                                 alt={p.name}
                                 fill
-                                unoptimized
                                 sizes="(max-width: 768px) 100vw, 33vw"
                                 className="object-cover"
                                 onError={(e) => {
@@ -1937,12 +1993,17 @@ export default function MarketplaceBrowseView({
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden h-72 bg-slate-950 flex items-center justify-center">
                     <Image
+                      key={activeImage}
                       src={resolveMediaUrl(activeImage)}
                       alt={`${selectedVehicle.title} - photo ${activeIdx + 1}`}
                       fill
-                      unoptimized
                       sizes="(max-width: 768px) 100vw, 50vw"
                       className="object-cover"
+                      onLoad={(e) => {
+                        e.currentTarget.style.display = "block";
+                        const fb = e.currentTarget.parentElement?.querySelector(".gallery-vehicle-fallback");
+                        if (fb) (fb as HTMLElement).style.display = "none";
+                      }}
                       onError={(e) => {
                         e.currentTarget.style.display = "none";
                         const fb = e.currentTarget.parentElement?.querySelector(".gallery-vehicle-fallback");
@@ -1993,19 +2054,21 @@ export default function MarketplaceBrowseView({
                               : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
                           }`}
                         >
+                          <div className="absolute inset-0 bg-slate-100 flex items-center justify-center">
+                            <Car className="w-6 h-6 text-slate-400" />
+                          </div>
                           <Image
                             src={resolveMediaUrl(url)}
                             alt={`Thumbnail ${idx + 1}`}
                             fill
-                            unoptimized
                             sizes="64px"
                             className="object-cover"
                             onError={(e) => {
-                              e.currentTarget.style.display = "none";
+                              (e.target as HTMLElement).style.display = "none";
                             }}
                           />
                           {idx === 0 && (
-                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5">
+                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5 z-10">
                               Main
                             </span>
                           )}
@@ -2069,19 +2132,27 @@ export default function MarketplaceBrowseView({
                   <Building2 className="w-4 h-4 text-amber-400" />
                   <h5 className="font-bold text-sm text-white">Seller Information</h5>
                 </div>
-                {selectedVehicle.seller_info?.is_verified ? (
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                    Verified Seller
-                  </span>
-                ) : (
-                  <span className="text-[10px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
-                    Standard Seller
-                  </span>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {selectedVehicle.availability_status === "RESERVED" && (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                      <Clock className="w-3 h-3 text-amber-400" />
+                      Reserved
+                    </span>
+                  )}
+                  {selectedVehicle.seller_info?.is_verified ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      Verified Seller
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full border border-slate-700">
+                      Standard Seller
+                    </span>
+                  )}
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
                 <div>
                   <span className="text-[10px] text-slate-400 block">Seller / Dealership Name</span>
                   <span className="font-bold text-slate-100 text-sm">
@@ -2101,38 +2172,10 @@ export default function MarketplaceBrowseView({
                     {selectedVehicle.seller_info?.location_city || selectedVehicle.location_city || "Location available upon enquiry"}
                   </span>
                 </div>
-                <div>
-                  <span className="text-[10px] text-slate-400 block">Public Business Phone</span>
-                  <span className="font-mono text-slate-200">
-                    {selectedVehicle.seller_info?.phone || "Direct phone not listed (Use enquiry)"}
-                  </span>
-                </div>
               </div>
 
-              {/* Direct Communication Buttons */}
+              {/* Vehicle Communication & Offer Actions */}
               <div className="pt-2 border-t border-slate-800 flex flex-wrap gap-2">
-                {selectedVehicle.seller_info?.phone && (
-                  <a
-                    href={`tel:${selectedVehicle.seller_info.phone}`}
-                    className="flex-1 min-w-[130px] py-2 px-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors border border-slate-700"
-                  >
-                    <Phone className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Call Seller</span>
-                  </a>
-                )}
-
-                {selectedVehicle.seller_info?.whatsapp_url && (
-                  <a
-                    href={selectedVehicle.seller_info.whatsapp_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex-1 min-w-[130px] py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-sm"
-                  >
-                    <MessageCircle className="w-3.5 h-3.5" />
-                    <span>WhatsApp</span>
-                  </a>
-                )}
-
                 <button
                   type="button"
                   onClick={() => {
@@ -2140,27 +2183,35 @@ export default function MarketplaceBrowseView({
                     setSelectedVehicle(null);
                     handleOpenEnquiryModal(target);
                   }}
-                  className="flex-1 min-w-[150px] py-2 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                  className="flex-1 min-w-[130px] py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-colors border border-slate-700"
                 >
-                  <MessageSquare className="w-3.5 h-3.5 text-slate-950" />
+                  <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
                   <span>Contact Seller</span>
                 </button>
+
+                {selectedVehicle.availability_status === "RESERVED" ? (
+                  <div className="flex-1 min-w-[140px] py-2.5 px-3 bg-slate-800/80 text-amber-400 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border border-amber-500/30">
+                    <Clock className="w-3.5 h-3.5" />
+                    <span>Reserved</span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = selectedVehicle;
+                      setSelectedVehicle(null);
+                      handleOpenOfferModal(target);
+                    }}
+                    className="flex-1 min-w-[140px] py-2.5 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition-colors shadow-sm"
+                  >
+                    <Tag className="w-3.5 h-3.5 text-slate-950" />
+                    <span>Make an Offer</span>
+                  </button>
+                )}
               </div>
             </div>
 
-            <div className="pt-2 flex items-center justify-between border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => {
-                  const target = selectedVehicle;
-                  setSelectedVehicle(null);
-                  handleOpenEnquiryModal(target);
-                }}
-                className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all flex items-center gap-1.5 shadow-sm"
-              >
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span>Contact Seller Directly</span>
-              </button>
+            <div className="pt-2 flex items-center justify-end border-t border-slate-100">
               <button
                 onClick={() => setSelectedVehicle(null)}
                 className="px-5 py-2.5 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800"
@@ -2248,12 +2299,17 @@ export default function MarketplaceBrowseView({
                 <div className="space-y-3">
                   <div className="relative rounded-2xl overflow-hidden h-64 bg-slate-950 flex items-center justify-center">
                     <Image
+                      key={activeImage}
                       src={resolveMediaUrl(activeImage)}
                       alt={`${selectedPart.name} - photo ${activeIdx + 1}`}
                       fill
-                      unoptimized
                       sizes="(max-width: 768px) 100vw, 50vw"
                       className="object-cover"
+                      onLoad={(e) => {
+                        e.currentTarget.style.display = "block";
+                        const fb = e.currentTarget.parentElement?.querySelector(".gallery-part-fallback");
+                        if (fb) (fb as HTMLElement).style.display = "none";
+                      }}
                       onError={(e) => {
                         e.currentTarget.style.display = "none";
                         const fb = e.currentTarget.parentElement?.querySelector(".gallery-part-fallback");
@@ -2304,19 +2360,21 @@ export default function MarketplaceBrowseView({
                               : "border-slate-200 hover:border-slate-400 opacity-70 hover:opacity-100"
                           }`}
                         >
+                          <div className="absolute inset-0 bg-slate-100 flex items-center justify-center">
+                            <Wrench className="w-5 h-5 text-slate-400" />
+                          </div>
                           <Image
                             src={resolveMediaUrl(url)}
                             alt={`Thumbnail ${idx + 1}`}
                             fill
-                            unoptimized
                             sizes="64px"
                             className="object-cover"
                             onError={(e) => {
-                              e.currentTarget.style.display = "none";
+                              (e.target as HTMLElement).style.display = "none";
                             }}
                           />
                           {idx === 0 && (
-                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5">
+                            <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[8px] font-bold text-amber-400 text-center py-0.5 z-10">
                               Main
                             </span>
                           )}
@@ -2996,20 +3054,21 @@ export default function MarketplaceBrowseView({
 
             {/* Vehicle Summary Card */}
             <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-3">
-              {enquiryVehicle.primary_image_url ? (
-                <Image
-                  src={resolveMediaUrl(enquiryVehicle.primary_image_url)}
-                  alt={enquiryVehicle.title}
-                  width={56}
-                  height={56}
-                  unoptimized
-                  className="w-14 h-14 rounded-xl object-cover border border-slate-200 flex-shrink-0"
-                />
-              ) : (
-                <div className="w-14 h-14 rounded-xl bg-slate-200 flex items-center justify-center text-slate-400 flex-shrink-0">
-                  <Car className="w-6 h-6" />
-                </div>
-              )}
+              <div className="w-14 h-14 rounded-xl bg-slate-200 overflow-hidden relative flex-shrink-0 border border-slate-200 flex items-center justify-center">
+                <Car className="w-6 h-6 text-slate-400" />
+                {Boolean(enquiryVehicle.primary_image_url) && (
+                  <Image
+                    src={resolveMediaUrl(enquiryVehicle.primary_image_url)}
+                    alt={enquiryVehicle.title}
+                    fill
+                    sizes="56px"
+                    className="object-cover"
+                    onError={(e) => {
+                      (e.target as HTMLElement).style.display = "none";
+                    }}
+                  />
+                )}
+              </div>
               <div className="min-w-0 flex-1">
                 <h4 className="text-xs font-black text-slate-900 truncate">{enquiryVehicle.title}</h4>
                 <div className="text-[11px] text-slate-500">
@@ -3093,7 +3152,7 @@ export default function MarketplaceBrowseView({
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white"
                   />
                   <span className="text-[10px] text-slate-400 block mt-1">
-                    Sellers can use this to call or text you regarding this vehicle.
+                    Shared privately with the seller for this enquiry only. Never displayed publicly.
                   </span>
                 </div>
 
@@ -3126,6 +3185,199 @@ export default function MarketplaceBrowseView({
                       <>
                         <Send className="w-3.5 h-3.5" />
                         <span>Send Enquiry</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          MODAL: MAKE A PURCHASE OFFER (DIRECT VEHICLE NEGOTIATION)
+      ========================================================================= */}
+      {offerVehicle && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
+                  <Tag className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Make an Offer</h3>
+                  <p className="text-xs text-slate-500">Formal Vehicle Purchase Negotiation</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setOfferVehicle(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Vehicle Summary Card */}
+            <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200 flex items-center gap-3">
+              <div className="w-14 h-14 rounded-xl bg-slate-200 overflow-hidden relative flex-shrink-0 border border-slate-200 flex items-center justify-center">
+                <Car className="w-6 h-6 text-slate-400" />
+                {Boolean(offerVehicle.primary_image_url) && (
+                  <Image
+                    src={resolveMediaUrl(offerVehicle.primary_image_url)}
+                    alt={offerVehicle.title}
+                    fill
+                    sizes="56px"
+                    className="object-cover"
+                    onError={(e) => {
+                      (e.target as HTMLElement).style.display = "none";
+                    }}
+                  />
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <h4 className="text-xs font-black text-slate-900 truncate">{offerVehicle.title}</h4>
+                <div className="text-[11px] text-slate-500">
+                  <span>Listed: £{Number(offerVehicle.price).toLocaleString()}</span>
+                  <span className="mx-1.5">·</span>
+                  <span>{offerVehicle.year}</span>
+                  <span className="mx-1.5">·</span>
+                  <span>{offerVehicle.location_city || "UK"}</span>
+                </div>
+                <div className="text-[10px] text-slate-600 mt-0.5 flex items-center gap-1">
+                  <span>
+                    Seller: <strong>{offerVehicle.seller_info?.name || offerVehicle.seller_name || "Verified Dealer"}</strong>
+                  </span>
+                  {offerVehicle.seller_info?.is_verified && (
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500 inline" />
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {offerSuccess ? (
+              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-900 text-xs space-y-2">
+                <div className="flex items-center gap-2 font-bold text-emerald-800">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Offer Submitted Successfully</span>
+                </div>
+                <p className="text-emerald-700 leading-relaxed">{offerSuccess}</p>
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setOfferVehicle(null)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleSendOffer} className="space-y-4">
+                {offerError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                    <span>{offerError}</span>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Your Proposed Price ({offerVehicle.currency || "GBP"}) <span className="text-rose-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-2.5 text-xs font-bold text-slate-500">
+                      {offerVehicle.currency === "INR" ? "₹" : "£"}
+                    </span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="1"
+                      value={offeredPrice}
+                      onChange={(e) => setOfferedPrice(e.target.value)}
+                      placeholder={String(offerVehicle.price)}
+                      className="w-full pl-8 pr-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 font-bold focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white"
+                      required
+                    />
+                  </div>
+                  <span className="text-[10px] text-slate-400 block mt-1">
+                    Asking price: £{Number(offerVehicle.price).toLocaleString()}. Offers are subject to dealer acceptance.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Handover Preference
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setHandoverPreference("COLLECTION")}
+                      className={`p-2.5 rounded-xl border text-xs font-bold text-left transition-all ${
+                        handoverPreference === "COLLECTION"
+                          ? "bg-amber-500/10 border-amber-500 text-slate-900"
+                          : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      Dealership Collection
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHandoverPreference("DELIVERY")}
+                      className={`p-2.5 rounded-xl border text-xs font-bold text-left transition-all ${
+                        handoverPreference === "DELIVERY"
+                          ? "bg-amber-500/10 border-amber-500 text-slate-900"
+                          : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      Dealer Delivery
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Terms & Notes <span className="text-slate-400 font-normal">(Optional)</span>
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={offerNotes}
+                    onChange={(e) => setOfferNotes(e.target.value)}
+                    placeholder="E.g. Cash buyer ready to complete purchase; subject to mechanical inspection..."
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white resize-none"
+                  />
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                  <span>
+                    When your offer is accepted, the vehicle is atomically reserved and a 5-business-day offline payment window begins directly between you and the dealer. DriverXtra does not collect or hold vehicle purchase funds.
+                  </span>
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOfferVehicle(null)}
+                    className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:text-slate-900 rounded-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={offerSubmitting || !user}
+                    className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {offerSubmitting ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                        <span>Submitting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Tag className="w-3.5 h-3.5" />
+                        <span>Submit Purchase Offer</span>
                       </>
                     )}
                   </button>

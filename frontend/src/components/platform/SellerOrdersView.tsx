@@ -11,6 +11,7 @@ import {
   PlatformReturnRequest,
   PlatformDispute,
   PlatformDisputeEvent,
+  resolveMediaUrl,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
@@ -41,11 +42,13 @@ import {
   Send,
   Scale,
   MessageSquare,
+  Car,
 } from "lucide-react";
+import SellerVehicleOrdersOffersSection from "./SellerVehicleOrdersOffersSection";
 
 interface SellerOrdersViewProps {
   initialOrderId?: string;
-  initialMainTab?: "orders" | "returns" | "disputes";
+  initialMainTab?: "orders" | "vehicles" | "returns" | "disputes";
 }
 
 type OrderStatusFilter =
@@ -117,7 +120,7 @@ export default function SellerOrdersView({
   const [trackingEventError, setTrackingEventError] = useState<string | null>(null);
 
   // Main Tab Navigation
-  const [activeMainTab, setActiveMainTab] = useState<"orders" | "returns" | "disputes">(initialMainTab || "orders");
+  const [activeMainTab, setActiveMainTab] = useState<"orders" | "vehicles" | "returns" | "disputes">(initialMainTab || "orders");
 
   useEffect(() => {
     if (initialMainTab) {
@@ -911,6 +914,18 @@ export default function SellerOrdersView({
         </button>
 
         <button
+          onClick={() => setActiveMainTab("vehicles")}
+          className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${
+            activeMainTab === "vehicles"
+              ? "border-amber-500 text-slate-900"
+              : "border-transparent text-slate-400 hover:text-slate-600"
+          }`}
+        >
+          <Car className="w-4 h-4 text-emerald-500" />
+          <span>Vehicle Sales & Offers</span>
+        </button>
+
+        <button
           onClick={() => setActiveMainTab("returns")}
           className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${
             activeMainTab === "returns"
@@ -1262,6 +1277,13 @@ export default function SellerOrdersView({
       )}
 
       {/* ========================================================= */}
+      {/* VEHICLE SALES & OFFERS VIEW                               */}
+      {/* ========================================================= */}
+      {activeMainTab === "vehicles" && (
+        <SellerVehicleOrdersOffersSection />
+      )}
+
+      {/* ========================================================= */}
       {/* RETURNS & RMAS VIEW                                       */}
       {/* ========================================================= */}
       {activeMainTab === "returns" && (
@@ -1395,13 +1417,13 @@ export default function SellerOrdersView({
                         {ret.evidence_urls.map((url, eIdx) => (
                           <a
                             key={eIdx}
-                            href={url}
+                            href={resolveMediaUrl(url)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity block shrink-0"
                             title="Click to view full image"
                           >
-                            <Image src={url} alt={`Evidence ${eIdx + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${eIdx + 1}`} width={56} height={56} className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -1626,13 +1648,13 @@ export default function SellerOrdersView({
                         {disp.evidence_urls.map((url, eIdx) => (
                           <a
                             key={eIdx}
-                            href={url}
+                            href={resolveMediaUrl(url)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity block shrink-0"
                             title="Click to view full image"
                           >
-                            <Image src={url} alt={`Evidence ${eIdx + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${eIdx + 1}`} width={56} height={56} className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -3167,12 +3189,12 @@ export default function SellerOrdersView({
                     {activeDisputeDrawer.evidence_urls.map((url, idx) => (
                       <a
                         key={idx}
-                        href={url}
+                        href={resolveMediaUrl(url)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="w-14 h-14 rounded-lg border border-slate-200 overflow-hidden block bg-slate-100 shrink-0"
                       >
-                        <Image src={url} alt="Evidence" width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                        <Image src={resolveMediaUrl(url)} alt="Evidence" width={56} height={56} className="w-full h-full object-cover" />
                       </a>
                     ))}
                   </div>
