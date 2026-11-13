@@ -549,8 +549,13 @@ export const api = {
         requiresAuth: false,
         body: JSON.stringify({ email, password, code }),
       });
-      if (data?.mfa_required) {
-        return data;
+      // MFA challenge: accept the explicit flag or the legacy status value. No tokens are stored here;
+      // they are only stored after successful verification in verifyMfa().
+      if (data?.mfa_required === true || data?.status === "mfa_required") {
+        if (!data.pre_auth_token) {
+          throw new ApiError("Two-factor authentication is required, but the server did not return a pre-authentication token.", 500);
+        }
+        return { ...data, mfa_required: true };
       }
       if (!data?.tokens?.access || !data?.tokens?.refresh) {
         throw new ApiError("Authentication failed: both access and refresh tokens are required.", 500);
@@ -560,10 +565,12 @@ export const api = {
     },
 
     async switchRole(role: string): Promise<{ status: string; message: string; active_role: string; tokens: { access: string; refresh: string } }> {
+      // Send the current refresh token so the backend can blacklist it once the new pair is issued.
+      const currentRefresh = tokenStorage.getRefreshToken();
       const data = await apiRequest<{ status: string; message: string; active_role: string; tokens: { access: string; refresh: string } }>("/auth/switch-role/", {
         method: "POST",
         requiresAuth: true,
-        body: JSON.stringify({ role }),
+        body: JSON.stringify(currentRefresh ? { role, refresh: currentRefresh } : { role }),
       });
       if (data?.tokens?.access) {
         tokenStorage.setTokens(data.tokens.access, data.tokens.refresh);

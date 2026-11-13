@@ -597,3 +597,107 @@ def test_toggle_helpful_vote(other_buyer_client, completed_order, buyer_user, se
     assert r2.status_code == status.HTTP_200_OK
     assert r2.data["has_voted"] is False
     assert r2.data["helpful_votes"] == 0
+
+
+# =============================================================================
+# F5: review moderation requires 'review.moderate'
+# =============================================================================
+
+def _make_staff_user(email, staff_role_code=None):
+    from apps.identity.models import StaffRole, StaffProfile
+    user = User.objects.create_user(email=email, password='SecurePassword123!', is_staff=True, is_email_verified=True)
+    user.add_role(RoleChoices.STAFF)
+    if staff_role_code:
+        profile, _ = StaffProfile.objects.get_or_create(user=user)
+        profile.staff_role = StaffRole.objects.get(code=staff_role_code)
+        profile.save()
+    return user
+
+
+def _auth(user):
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+def _flagged_review(completed_order, buyer_user, seller_user):
+    order, item, listing = completed_order
+    return ProductReview.objects.create(
+        order=order, order_item=item, listing=listing, buyer=buyer_user, seller=seller_user,
+        rating=1, comment='Flagged content for moderation.', status=ReviewStatusChoices.FLAGGED,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('staff_role_code', ['SUPPORT_AGENT', 'DISPUTE_MANAGER', 'FINANCE_OFFICER'])
+def test_staff_without_review_moderate_cannot_moderate(completed_order, buyer_user, seller_user, other_buyer, staff_role_code):
+    review = _flagged_review(completed_order, buyer_user, seller_user)
+    report = ReviewReport.objects.create(product_review=review, reporter=other_buyer,
+                                         reason=ReviewReportReasonChoices.OFFENSIVE, status=ReviewReportStatusChoices.PENDING)
+    client = _auth(_make_staff_user(f'nomod_{staff_role_code}@driverxtra.com', staff_role_code))
+
+    assert client.get('/api/v1/marketplace/admin/reviews/').status_code == status.HTTP_403_FORBIDDEN
+    assert client.post(f'/api/v1/marketplace/admin/reviews/{review.id}/moderate/',
+                       {'action': 'DELETE'}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    assert client.get('/api/v1/marketplace/admin/review-reports/').status_code == status.HTTP_403_FORBIDDEN
+    assert client.post(f'/api/v1/marketplace/admin/review-reports/{report.id}/resolve/',
+                       {'action': 'DELETE_REVIEW'}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    # Cannot remove or edit someone else's review via the author endpoints either.
+    assert client.delete(f'/api/v1/marketplace/reviews/{review.id}/').status_code == status.HTTP_403_FORBIDDEN
+    assert client.patch(f'/api/v1/marketplace/reviews/{review.id}/', {'rating': 5}, format='json').status_code == status.HTTP_400_BAD_REQUEST
+    # Unpublished review stays hidden.
+    assert client.get(f'/api/v1/marketplace/reviews/{review.id}/').status_code == status.HTTP_404_NOT_FOUND
+
+    review.refresh_from_db()
+    assert review.status == ReviewStatusChoices.FLAGGED
+    assert review.rating == 1
+    report.refresh_from_db()
+    assert report.status == ReviewReportStatusChoices.PENDING
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('staff_role_code', ['VERIFICATION_OFFICER', None])
+def test_review_moderate_holders_can_moderate(completed_order, buyer_user, seller_user, other_buyer, staff_role_code):
+    """VERIFICATION_OFFICER holds 'review.moderate'; STAFF without a sub-role falls back to it."""
+    review = _flagged_review(completed_order, buyer_user, seller_user)
+    report = ReviewReport.objects.create(product_review=review, reporter=other_buyer,
+                                         reason=ReviewReportReasonChoices.OFFENSIVE, status=ReviewReportStatusChoices.PENDING)
+    client = _auth(_make_staff_user(f'mod_{staff_role_code or "none"}@driverxtra.com', staff_role_code))
+
+    assert client.get('/api/v1/marketplace/admin/reviews/').status_code == status.HTTP_200_OK
+    assert client.get('/api/v1/marketplace/admin/review-reports/').status_code == status.HTTP_200_OK
+    assert client.get(f'/api/v1/marketplace/reviews/{review.id}/').status_code == status.HTTP_200_OK
+    res = client.post(f'/api/v1/marketplace/admin/review-reports/{report.id}/resolve/',
+                      {'action': 'HIDE_REVIEW', 'admin_notes': 'Policy violation'}, format='json')
+    assert res.status_code == status.HTTP_200_OK
+    review.refresh_from_db()
+    assert review.status == ReviewStatusChoices.REJECTED
+    res = client.post(f'/api/v1/marketplace/admin/reviews/{review.id}/moderate/', {'action': 'APPROVE'}, format='json')
+    assert res.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_review_author_edit_and_delete_unaffected_by_moderation_permission(buyer_auth_client, completed_order, buyer_user, seller_user):
+    """Safeguard 6: author paths do not require 'review.moderate'."""
+    assert buyer_user.has_permission('review.moderate') is False
+    review = _flagged_review(completed_order, buyer_user, seller_user)
+    url = f'/api/v1/marketplace/reviews/{review.id}/'
+    assert buyer_auth_client.get(url).status_code == status.HTTP_200_OK  # author sees own unpublished review
+    assert buyer_auth_client.patch(url, {'rating': 2}, format='json').status_code == status.HTTP_200_OK
+    assert buyer_auth_client.delete(url).status_code == status.HTTP_200_OK
+    assert not ProductReview.objects.filter(id=review.id).exists()
+
+
+@pytest.mark.django_db
+def test_seller_rating_staff_edit_delete_requires_review_moderate(completed_order, buyer_user, seller_user):
+    order, _, _ = completed_order
+    rating = SellerReview.objects.create(order=order, buyer=buyer_user, seller=seller_user,
+                                         rating=2, status=ReviewStatusChoices.APPROVED)
+    url = f'/api/v1/marketplace/seller-ratings/{rating.id}/'
+    no_mod = _auth(_make_staff_user('sr_nomod@driverxtra.com', 'DISPUTE_MANAGER'))
+    assert no_mod.patch(url, {'rating': 5}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    assert no_mod.delete(url).status_code == status.HTTP_403_FORBIDDEN
+    # Author path unchanged.
+    assert _auth(buyer_user).patch(url, {'rating': 3}, format='json').status_code == status.HTTP_200_OK
+    moderator = _auth(_make_staff_user('sr_mod@driverxtra.com', 'VERIFICATION_OFFICER'))
+    assert moderator.delete(url).status_code == status.HTTP_200_OK

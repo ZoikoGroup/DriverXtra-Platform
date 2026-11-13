@@ -78,8 +78,6 @@ export default function LoginClient() {
     clearAuthError();
 
     const result = await login(email, password);
-    console.log("[Login] Result:", result);
-console.log("[Login] Auth error:", authError);
     setIsSubmitting(false);
 
     if (result.success) {
@@ -88,13 +86,12 @@ console.log("[Login] Auth error:", authError);
       }
       // If mfaRequired, mfaChallenge state is set in AuthContext and UI switches to MFA prompt
     } else {
-      setError(authError || "Invalid email or password.");
+      setError(result.error || "Invalid email or password.");
     }
   };
 
   const handleMfaSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("LOGIN BUTTON CLICKED");
     if (!mfaCode || mfaCode.trim().length !== 6) {
       setError("Please enter a valid 6-digit verification code.");
       return;
@@ -103,13 +100,13 @@ console.log("[Login] Auth error:", authError);
     setIsVerifyingMfa(true);
     setError(null);
 
-    const verified = await verifyMfaLogin(mfaCode.trim());
+    const result = await verifyMfaLogin(mfaCode.trim());
     setIsVerifyingMfa(false);
 
-    if (verified) {
+    if (result.success) {
       router.replace("/platform");
     } else {
-      setError(authError || "Invalid authentication code. Please try again.");
+      setError(result.error || "Invalid authentication code. Please try again.");
     }
   };
 

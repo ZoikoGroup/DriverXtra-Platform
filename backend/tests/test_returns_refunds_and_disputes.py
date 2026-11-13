@@ -958,3 +958,201 @@ def test_admin_cannot_access_seller_dispute_or_return_endpoints(
 
     admin_refund_sum = admin_auth_client.get(f"/api/v1/marketplace/orders/{order.id}/refund-summary/")
     assert admin_refund_sum.status_code == status.HTTP_200_OK
+
+
+# =============================================================================
+# F1 / F4 / F8: staff permission enforcement for refunds and disputes
+# =============================================================================
+
+def _make_staff(email, staff_role_code=None):
+    user = User.objects.create_user(
+        email=email, password='SecurePassword123!', is_staff=True, is_email_verified=True,
+    )
+    user.add_role(RoleChoices.STAFF)
+    if staff_role_code:
+        profile, _ = StaffProfile.objects.get_or_create(user=user)
+        profile.staff_role = StaffRole.objects.get(code=staff_role_code)
+        profile.save()
+    return user
+
+
+def _client_for(user):
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('staff_role_code', [None, 'SUPPORT_AGENT', 'VERIFICATION_OFFICER'])
+def test_staff_without_order_refund_cannot_mutate_refunds_service(sample_paid_order, admin_user, staff_role_code):
+    order, _ = sample_paid_order
+    staff = _make_staff(f'norefund_{staff_role_code or "none"}@driverxtra.com', staff_role_code)
+    refund = RefundService.create_refund(order=order, amount=Decimal('100.00'), reason='Pending refund', actor=admin_user)
+
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.create_refund(order=order, amount=Decimal('50.00'), reason='x', actor=staff)
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.create_refund(order=order, amount=Decimal('50.00'), reason='x', actor=staff, auto_process=True)
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.approve_refund(refund, staff)
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.process_refund(refund, staff)
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.reject_refund(refund, staff, reason='no')
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.dispatch_gateway_refund(refund, staff)
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.fail_refund(refund, staff, failure_reason='x')
+    refund.refresh_from_db()
+    assert refund.status == RefundStatusChoices.PENDING
+
+
+@pytest.mark.django_db
+def test_finance_payout_alone_does_not_authorise_refund_execution(sample_paid_order):
+    """U3/safeguard 5: 'finance.payout' is separate from refund execution."""
+    from apps.identity.models import Permission
+    order, _ = sample_paid_order
+    payout_only_role = StaffRole.objects.create(code='SUPPORT_AGENT_PAYOUT_TEST', name='Payout only (test)')
+    payout_only_role.role_permissions.create(permission=Permission.objects.get(code='finance.payout'))
+    staff = _make_staff('payoutonly@driverxtra.com')
+    profile, _ = StaffProfile.objects.get_or_create(user=staff)
+    profile.staff_role = payout_only_role
+    profile.save()
+
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        RefundService.create_refund(order=order, amount=Decimal('50.00'), reason='x', actor=staff)
+    # Read access to the refund list is kept for finance reconciliation.
+    assert _client_for(staff).get('/api/v1/marketplace/admin/refunds/').status_code == status.HTTP_200_OK
+    assert _client_for(staff).post(
+        f'/api/v1/marketplace/admin/orders/{order.id}/refund/', {'amount': '10.00', 'reason': 'x'}, format='json'
+    ).status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('staff_role_code', ['DISPUTE_MANAGER', 'FINANCE_OFFICER'])
+def test_order_refund_holders_can_create_and_reject_refunds(sample_paid_order, staff_role_code):
+    order, _ = sample_paid_order
+    staff = _make_staff(f'refunder_{staff_role_code}@driverxtra.com', staff_role_code)
+    refund = RefundService.create_refund(order=order, amount=Decimal('100.00'), reason='Goodwill', actor=staff)
+    assert refund.status == RefundStatusChoices.PENDING
+    rejected = RefundService.reject_refund(refund, staff, reason='Duplicate request')
+    assert rejected.status == RefundStatusChoices.CANCELLED
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('staff_role_code', [None, 'SUPPORT_AGENT', 'VERIFICATION_OFFICER'])
+def test_refund_api_returns_403_for_staff_without_order_refund(sample_paid_order, admin_user, staff_role_code):
+    order, _ = sample_paid_order
+    refund = RefundService.create_refund(order=order, amount=Decimal('100.00'), reason='Pending refund', actor=admin_user)
+    client = _client_for(_make_staff(f'refundapi_{staff_role_code or "none"}@driverxtra.com', staff_role_code))
+
+    assert client.post(f'/api/v1/marketplace/admin/orders/{order.id}/refund/',
+                       {'amount': '10.00', 'reason': 'x', 'auto_process': True}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    assert client.post(f'/api/v1/marketplace/admin/refunds/{refund.refund_number}/approve/', {}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    assert client.post(f'/api/v1/marketplace/admin/refunds/{refund.refund_number}/process/', {}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    assert client.post(f'/api/v1/marketplace/admin/refunds/{refund.refund_number}/reject/', {'reason': 'x'}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    assert client.get('/api/v1/marketplace/admin/refunds/').status_code == status.HTTP_403_FORBIDDEN
+    assert client.get(f'/api/v1/marketplace/orders/{order.id}/refund-summary/').status_code == status.HTTP_403_FORBIDDEN
+    refund.refresh_from_db()
+    assert refund.status == RefundStatusChoices.PENDING
+    assert Refund.objects.filter(order=order).count() == 1
+
+
+@pytest.mark.django_db
+def test_buyer_and_seller_refund_summary_access_unchanged(sample_paid_order, buyer_user, seller_user, unrelated_buyer):
+    order, _ = sample_paid_order
+    assert _client_for(buyer_user).get(f'/api/v1/marketplace/orders/{order.id}/refund-summary/').status_code == status.HTTP_200_OK
+    assert _client_for(seller_user).get(f'/api/v1/marketplace/orders/{order.id}/refund-summary/').status_code == status.HTTP_200_OK
+    assert _client_for(unrelated_buyer).get(f'/api/v1/marketplace/orders/{order.id}/refund-summary/').status_code == status.HTTP_403_FORBIDDEN
+    assert _client_for(buyer_user).get('/api/v1/marketplace/buyer/refunds/').status_code == status.HTTP_200_OK
+
+
+def _open_dispute(order, buyer_user):
+    return DisputeService.create_dispute(
+        order=order, buyer=buyer_user,
+        category=DisputeCategoryChoices.DAMAGED_OR_DEFECTIVE, description='Broken item',
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('staff_role_code', [None, 'VERIFICATION_OFFICER', 'FINANCE_OFFICER'])
+def test_staff_without_dispute_manage_cannot_manage_disputes(sample_delivered_order, buyer_user, staff_role_code):
+    order, _, _ = sample_delivered_order
+    dispute = _open_dispute(order, buyer_user)
+    staff = _make_staff(f'nodispute_{staff_role_code or "none"}@driverxtra.com', staff_role_code)
+
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        DisputeService.update_dispute_status(dispute, staff, DisputeStatusChoices.RESOLVED)
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        DisputeService.add_dispute_message(dispute, staff, 'Not a party')
+
+    client = _client_for(staff)
+    assert client.get('/api/v1/marketplace/admin/disputes/').status_code == status.HTTP_403_FORBIDDEN
+    assert client.post(f'/api/v1/marketplace/admin/disputes/{dispute.dispute_number}/status/',
+                       {'status': 'RESOLVED'}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    assert client.post(f'/api/v1/marketplace/disputes/{dispute.dispute_number}/messages/',
+                       {'message': 'x'}, format='json').status_code == status.HTTP_403_FORBIDDEN
+    dispute.refresh_from_db()
+    assert dispute.status == DisputeStatusChoices.OPEN
+
+
+@pytest.mark.django_db
+def test_dispute_detail_read_access_by_permission(sample_delivered_order, buyer_user):
+    """U4: 'order.refund' may read dispute detail; generic staff may not."""
+    order, _, _ = sample_delivered_order
+    dispute = _open_dispute(order, buyer_user)
+    url = f'/api/v1/marketplace/disputes/{dispute.dispute_number}/'
+
+    assert _client_for(_make_staff('det_none@driverxtra.com')).get(url).status_code == status.HTTP_403_FORBIDDEN
+    assert _client_for(_make_staff('det_verif@driverxtra.com', 'VERIFICATION_OFFICER')).get(url).status_code == status.HTTP_403_FORBIDDEN
+    assert _client_for(_make_staff('det_fin@driverxtra.com', 'FINANCE_OFFICER')).get(url).status_code == status.HTTP_200_OK
+    assert _client_for(_make_staff('det_sup@driverxtra.com', 'SUPPORT_AGENT')).get(url).status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_support_agent_with_dispute_manage_can_manage_disputes(sample_delivered_order, buyer_user):
+    """U1: SUPPORT_AGENT keeps 'dispute.manage' per the seeded matrix."""
+    order, _, _ = sample_delivered_order
+    dispute = _open_dispute(order, buyer_user)
+    client = _client_for(_make_staff('support_dm@driverxtra.com', 'SUPPORT_AGENT'))
+    assert client.get('/api/v1/marketplace/admin/disputes/').status_code == status.HTTP_200_OK
+    assert client.post(f'/api/v1/marketplace/disputes/{dispute.dispute_number}/messages/',
+                       {'message': 'Mediation note'}, format='json').status_code == status.HTTP_201_CREATED
+    res = client.post(f'/api/v1/marketplace/admin/disputes/{dispute.dispute_number}/status/',
+                      {'status': 'UNDER_REVIEW', 'resolution_notes': 'Reviewing'}, format='json')
+    assert res.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_staff_without_dispute_manage_cannot_raise_dispute_on_others_order(sample_delivered_order):
+    order, _, _ = sample_delivered_order
+    staff = _make_staff('raise_none@driverxtra.com')
+    res = _client_for(staff).post(f'/api/v1/marketplace/buyer/orders/{order.id}/disputes/', {
+        'category': DisputeCategoryChoices.DAMAGED_OR_DEFECTIVE, 'description': 'Staff attempt',
+    }, format='json')
+    assert res.status_code == status.HTTP_403_FORBIDDEN
+    with pytest.raises(DjangoValidationError, match='Permission denied'):
+        DisputeService.create_dispute(order=order, buyer=staff,
+                                      category=DisputeCategoryChoices.DAMAGED_OR_DEFECTIVE, description='x')
+
+
+@pytest.mark.django_db
+def test_buyer_and_seller_dispute_access_unchanged(sample_delivered_order, buyer_user, seller_user, unrelated_buyer):
+    order, _, _ = sample_delivered_order
+    res = _client_for(buyer_user).post(f'/api/v1/marketplace/buyer/orders/{order.id}/disputes/', {
+        'category': DisputeCategoryChoices.DAMAGED_OR_DEFECTIVE, 'description': 'Arrived broken',
+    }, format='json')
+    assert res.status_code == status.HTTP_201_CREATED
+    number = res.data['dispute']['dispute_number']
+    url = f'/api/v1/marketplace/disputes/{number}/'
+    assert _client_for(buyer_user).get(url).status_code == status.HTTP_200_OK
+    assert _client_for(seller_user).get(url).status_code == status.HTTP_200_OK
+    assert _client_for(unrelated_buyer).get(url).status_code == status.HTTP_403_FORBIDDEN
+    assert _client_for(buyer_user).post(f'{url}messages/', {'message': 'More photos'}, format='json').status_code == status.HTTP_201_CREATED
+    assert _client_for(seller_user).post(f'{url}messages/', {'message': 'Checking'}, format='json').status_code == status.HTTP_201_CREATED
+    assert _client_for(buyer_user).get('/api/v1/marketplace/buyer/disputes/').status_code == status.HTTP_200_OK
+    assert _client_for(seller_user).get('/api/v1/marketplace/seller/disputes/').status_code == status.HTTP_200_OK
+    # Buyer/seller cannot use admin dispute endpoints.
+    assert _client_for(buyer_user).get('/api/v1/marketplace/admin/disputes/').status_code == status.HTTP_403_FORBIDDEN
+    assert _client_for(seller_user).post(f'/api/v1/marketplace/admin/disputes/{number}/status/',
+                                         {'status': 'REJECTED'}, format='json').status_code == status.HTTP_403_FORBIDDEN

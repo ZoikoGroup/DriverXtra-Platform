@@ -47,8 +47,8 @@ export interface AuthContextType {
   mfaChallenge: { preAuthToken: string; email: string } | null;
   clearMfaChallenge: () => void;
   clearAuthError: () => void;
-  login: (email: string, password?: string, code?: string) => Promise<{ success: boolean; mfaRequired?: boolean }>;
-  verifyMfaLogin: (code: string) => Promise<boolean>;
+  login: (email: string, password?: string, code?: string) => Promise<{ success: boolean; mfaRequired?: boolean; error?: string }>;
+  verifyMfaLogin: (code: string) => Promise<{ success: boolean; error?: string }>;
   register: (payload: RegisterPayload) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   switchRole: (role: CanonicalRole | string) => Promise<boolean>;

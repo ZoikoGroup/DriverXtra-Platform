@@ -5,6 +5,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from django.utils import timezone
 from django.core import signing
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 from .models import (
     User,
@@ -26,6 +27,12 @@ from .security import (
     verify_totp_code,
 )
 from .throttling import AuthRateThrottle, PasswordResetRateThrottle
+from .authentication import (
+    is_account_usable,
+    account_unusable_message,
+    session_version_matches,
+    stamp_session_version,
+)
 from common.permissions import IsMarketplaceAdmin
 from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
 from rest_framework import serializers as drf_serializers
@@ -119,6 +126,7 @@ class LoginView(views.APIView):
                 {
                     "status": "mfa_required",
                     "code": "MFA_REQUIRED",
+                    "mfa_required": True,
                     "message": "Two-factor authentication code required.",
                     "pre_auth_token": validated_data['pre_auth_token'],
                     "email": user.email,
@@ -143,6 +151,7 @@ class LoginView(views.APIView):
             {
                 "status": "success",
                 "message": "Authentication successful.",
+                "mfa_required": False,
                 "active_role": validated_data.get('active_role'),
                 "tokens": tokens,
                 "user": profile_data,
@@ -401,7 +410,21 @@ class SwitchRoleView(views.APIView):
         new_role = serializer.validated_data['role']
         user = request.user
 
+        # The switch replaces the client's token pair. If the client supplies its current
+        # refresh token, blacklist only that token (consistent with rotate + blacklist).
+        # Optional for backward compatibility; an invalid, expired, already-blacklisted or
+        # foreign token is ignored and does not block the switch.
+        old_refresh_raw = request.data.get('refresh')
+        if isinstance(old_refresh_raw, str) and old_refresh_raw.strip():
+            try:
+                old_refresh = RefreshToken(old_refresh_raw.strip())
+                if str(old_refresh.payload.get('user_id')) == str(user.id):
+                    old_refresh.blacklist()
+            except TokenError:
+                pass
+
         refresh = RefreshToken.for_user(user)
+        stamp_session_version(refresh, user)
         refresh['email'] = user.email
         refresh['roles'] = user.roles
         refresh['full_name'] = user.full_name
@@ -644,6 +667,23 @@ class MFAVerifyView(views.APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            # Re-check account status: the account may have been suspended/deactivated
+            # after the password step issued the pre-auth token.
+            if not is_account_usable(user):
+                return Response(
+                    {"status": "error", "code": 400, "message": account_unusable_message(user)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # The challenge is bound to the session version at password time. A suspension in
+            # between (even if the account was reactivated since) invalidates it.
+            # Payloads without 'sv' (issued before migration 0008) count as version 0.
+            if not session_version_matches(user, data):
+                return Response(
+                    {"status": "error", "code": 400, "message": "Invalid or expired MFA session. Please log in again."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             profile = getattr(user, 'staff_profile', None)
             if not profile or not profile.verify_totp(code):
                 return Response(
@@ -653,6 +693,7 @@ class MFAVerifyView(views.APIView):
 
             active_role = user.get_default_role()
             refresh = RefreshToken.for_user(user)
+            stamp_session_version(refresh, user)
             refresh['email'] = user.email
             refresh['roles'] = user.roles
             refresh['full_name'] = user.full_name

@@ -61,9 +61,14 @@ def _has_permission(user, perm_code: str) -> bool:
     return False
 
 
-def _is_seller_authorized_for_order(user, order: Order) -> bool:
-    """Checks if user is the direct seller or organisation admin for any item in the order."""
-    if _is_staff_or_admin(user):
+def _is_seller_authorized_for_order(user, order: Order, allow_staff: bool = True) -> bool:
+    """Checks if user is the direct seller or organisation admin for any item in the order.
+
+    allow_staff=True (default) keeps the historic staff/admin shortcut for existing callers.
+    Dispute and refund-summary paths pass allow_staff=False so that staff access there is
+    governed only by explicit permissions ('dispute.manage' / 'order.refund').
+    """
+    if allow_staff and _is_staff_or_admin(user):
         return True
     if not user or not user.is_authenticated:
         return False
@@ -585,11 +590,9 @@ class RefundService:
         Never pretends a refund was paid if automated gateway has not processed it.
         """
         # Permission check: staff with 'order.refund' or admin
-        has_perm = (
-            _is_staff_or_admin(actor)
-            or _has_permission(actor, 'order.refund')
-            or _has_permission(actor, 'finance.payout')
-        )
+        # Refund execution requires 'order.refund' (ADMIN/superuser hold every permission).
+        # Generic staff status and 'finance.payout' do not authorise refund mutations.
+        has_perm = _has_permission(actor, 'order.refund')
         if not has_perm:
             record_denied_audit_entry(
                 action="marketplace:order.refund",
@@ -690,11 +693,9 @@ class RefundService:
         Marks an approved refund as successfully processed/settled.
         Updates order payment_status if fully refunded and creates a PaymentTransaction ledger entry.
         """
-        has_perm = (
-            _is_staff_or_admin(actor)
-            or _has_permission(actor, 'order.refund')
-            or _has_permission(actor, 'finance.payout')
-        )
+        # Refund execution requires 'order.refund' (ADMIN/superuser hold every permission).
+        # Generic staff status and 'finance.payout' do not authorise refund mutations.
+        has_perm = _has_permission(actor, 'order.refund')
         if not has_perm:
             raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
 
@@ -758,7 +759,7 @@ class RefundService:
         failure_reason: str,
     ) -> Refund:
         """Records gateway or manual payout failure for a refund."""
-        if not _is_staff_or_admin(actor) and not _has_permission(actor, 'order.refund'):
+        if not _has_permission(actor, 'order.refund'):
             raise DjangoValidationError("Permission denied.")
 
         with transaction.atomic():
@@ -800,11 +801,9 @@ class RefundService:
         Dispatches an authoritative refund request to the external payment gateway (Razorpay/Stripe).
         Guards idempotency and creates immutable ledger records.
         """
-        has_perm = (
-            _is_staff_or_admin(actor)
-            or _has_permission(actor, 'order.refund')
-            or _has_permission(actor, 'finance.payout')
-        )
+        # Refund execution requires 'order.refund' (ADMIN/superuser hold every permission).
+        # Generic staff status and 'finance.payout' do not authorise refund mutations.
+        has_perm = _has_permission(actor, 'order.refund')
         if not has_perm:
             raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
 
@@ -982,11 +981,9 @@ class RefundService:
         """
         Approves a pending refund and dispatches gateway refund or marks manual payout as settled.
         """
-        has_perm = (
-            _is_staff_or_admin(actor)
-            or _has_permission(actor, 'order.refund')
-            or _has_permission(actor, 'finance.payout')
-        )
+        # Refund execution requires 'order.refund' (ADMIN/superuser hold every permission).
+        # Generic staff status and 'finance.payout' do not authorise refund mutations.
+        has_perm = _has_permission(actor, 'order.refund')
         if not has_perm:
             raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
 
@@ -1031,11 +1028,9 @@ class RefundService:
         """
         Rejects a refund request, recording cancellation and failure reason.
         """
-        has_perm = (
-            _is_staff_or_admin(actor)
-            or _has_permission(actor, 'order.refund')
-            or _has_permission(actor, 'finance.payout')
-        )
+        # Refund execution requires 'order.refund' (ADMIN/superuser hold every permission).
+        # Generic staff status and 'finance.payout' do not authorise refund mutations.
+        has_perm = _has_permission(actor, 'order.refund')
         if not has_perm:
             raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
 
@@ -1095,7 +1090,7 @@ class DisputeService:
         """
         Allows buyer to raise a commercial dispute for an order.
         """
-        if order.buyer_id != buyer.id and not _is_staff_or_admin(buyer):
+        if order.buyer_id != buyer.id and not _has_permission(buyer, 'dispute.manage'):
             raise DjangoValidationError("Permission denied: You can only raise disputes on your own orders.")
 
         cat = category.strip().upper()
@@ -1173,10 +1168,7 @@ class DisputeService:
         Operations staff (with 'dispute.manage' permission) or platform admins
         update dispute status, escalate, or record official decisions.
         """
-        has_perm = (
-            _is_staff_or_admin(actor)
-            or _has_permission(actor, 'dispute.manage')
-        )
+        has_perm = _has_permission(actor, 'dispute.manage')
         if not has_perm:
             record_denied_audit_entry(
                 action="marketplace:dispute.status_update",
@@ -1249,8 +1241,9 @@ class DisputeService:
         Restricted to the buyer, seller, or authorized operations staff.
         """
         is_buyer = dispute.buyer_id == actor.id
-        is_seller = dispute.seller_id == actor.id or _is_seller_authorized_for_order(actor, dispute.order)
-        is_staff = _is_staff_or_admin(actor) or _has_permission(actor, 'dispute.manage')
+        is_seller = dispute.seller_id == actor.id or _is_seller_authorized_for_order(actor, dispute.order, allow_staff=False)
+        # Posting to a dispute thread is mediation: requires 'dispute.manage' for non-parties.
+        is_staff = _has_permission(actor, 'dispute.manage')
 
         if not (is_buyer or is_seller or is_staff):
             record_denied_audit_entry(

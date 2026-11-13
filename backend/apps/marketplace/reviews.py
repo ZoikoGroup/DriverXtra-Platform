@@ -39,6 +39,19 @@ def _is_staff_or_admin(user) -> bool:
     )
 
 
+def _can_moderate_reviews(user) -> bool:
+    """Review moderation requires the 'review.moderate' permission.
+
+    Platform ADMIN / superusers hold every permission. Review authors' own edit/delete
+    paths are checked separately and are not affected by this permission.
+    """
+    if not user or not user.is_authenticated:
+        return False
+    if user.is_superuser or (hasattr(user, 'has_role') and user.has_role('ADMIN')):
+        return True
+    return bool(hasattr(user, 'has_permission') and user.has_permission('review.moderate'))
+
+
 def _is_seller_authorized_for_review(user, review: ProductReview | SellerReview) -> bool:
     """Checks if user is direct seller or organisation admin for the review target."""
     if _is_staff_or_admin(user):
@@ -405,7 +418,7 @@ class ReviewWorkflowService:
         """
         Updates an existing review. Only author or staff/admin can update.
         """
-        if review.buyer_id != user.id and not _is_staff_or_admin(user):
+        if review.buyer_id != user.id and not _can_moderate_reviews(user):
             record_denied_audit_entry(
                 action="marketplace:review.update_denied",
                 resource_type="ProductReview",
@@ -459,7 +472,7 @@ class ReviewWorkflowService:
         """
         Deletes a product review. Allowed for review author or staff/admin.
         """
-        if review.buyer_id != user.id and not _is_staff_or_admin(user):
+        if review.buyer_id != user.id and not _can_moderate_reviews(user):
             record_denied_audit_entry(
                 action="marketplace:review.delete_denied",
                 resource_type="ProductReview",
@@ -594,7 +607,7 @@ class ReviewWorkflowService:
         """
         Staff/Admin action to moderate a review: APPROVE, FLAG, HIDE, or DELETE.
         """
-        if not _is_staff_or_admin(admin_user):
+        if not _can_moderate_reviews(admin_user):
             record_denied_audit_entry(
                 action="marketplace:review.moderation_denied",
                 resource_type=review.__class__.__name__,
@@ -658,7 +671,7 @@ class ReviewWorkflowService:
         """
         Resolves a review report: DISMISS, HIDE_REVIEW, or DELETE_REVIEW.
         """
-        if not _is_staff_or_admin(admin_user):
+        if not _can_moderate_reviews(admin_user):
             record_denied_audit_entry(
                 action="marketplace:review.report_resolve_denied",
                 resource_type="ReviewReport",

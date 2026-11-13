@@ -255,7 +255,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # JWTAuthentication + account status enforcement (SUSPENDED/DEACTIVATED rejected per request)
+        "apps.identity.authentication.StatusAwareJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
@@ -312,6 +313,10 @@ SIMPLE_JWT = {
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
     "TOKEN_TYPE_CLAIM": "token_type",
+    # Account status is enforced on token refresh, not only on login.
+    "USER_AUTHENTICATION_RULE": "apps.identity.authentication.user_authentication_rule",
+    # Refresh keeps the documented 15-minute access lifetime for staff/admin.
+    "TOKEN_REFRESH_SERIALIZER": "apps.identity.authentication.StaffAwareTokenRefreshSerializer",
 }
 
 

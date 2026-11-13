@@ -814,3 +814,53 @@ class TestWorkshopReviewAPIEndpoints:
         assert matching is not None
         assert matching["average_rating"] == 5.0
         assert matching["review_count"] == 1
+
+
+# =============================================================================
+# F5: workshop review moderation requires 'review.moderate'
+# =============================================================================
+
+def _ws_staff(email, staff_role_code=None):
+    from apps.identity.models import StaffRole, StaffProfile
+    user = User.objects.create_user(email=email, password='SecurePassword123!', is_staff=True, is_email_verified=True)
+    user.add_role(RoleChoices.STAFF)
+    if staff_role_code:
+        profile, _ = StaffProfile.objects.get_or_create(user=user)
+        profile.staff_role = StaffRole.objects.get(code=staff_role_code)
+        profile.save()
+    return user
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('staff_role_code,allowed', [
+    ('SUPPORT_AGENT', False),
+    ('DISPUTE_MANAGER', False),
+    ('FINANCE_OFFICER', False),
+    ('VERIFICATION_OFFICER', True),
+    (None, True),  # STAFF without a sub-role falls back to VERIFICATION_OFFICER
+])
+def test_workshop_review_moderation_requires_review_moderate(completed_service, buyer, workshop, staff_role_code, allowed):
+    from django.core.exceptions import PermissionDenied
+    booking, work_order = completed_service
+    review = WorkshopReview.objects.create(
+        workshop=workshop, booking=booking, work_order=work_order, buyer=buyer,
+        rating=5, comment='Review used for moderation permission checks.', status=ReviewStatusChoices.APPROVED,
+    )
+    staff = _ws_staff(f'wsmod_{staff_role_code or "none"}@driverxtra.com', staff_role_code)
+    client = APIClient()
+    client.force_authenticate(user=staff)
+
+    list_resp = client.get('/api/v1/workshops/admin/reviews/')
+    mod_resp = client.post(f'/api/v1/workshops/admin/reviews/{review.id}/moderate/',
+                           data={'status': 'FLAGGED', 'reason': 'Check'}, format='json')
+    review.refresh_from_db()
+    if allowed:
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert mod_resp.status_code == status.HTTP_200_OK
+        assert review.status == ReviewStatusChoices.FLAGGED
+    else:
+        assert list_resp.status_code == status.HTTP_403_FORBIDDEN
+        assert mod_resp.status_code == status.HTTP_403_FORBIDDEN
+        assert review.status == ReviewStatusChoices.APPROVED
+        with pytest.raises(PermissionDenied):
+            WorkshopReviewService.moderate_review(review, staff, ReviewStatusChoices.REJECTED)

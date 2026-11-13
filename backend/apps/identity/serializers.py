@@ -4,6 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from .models import User, UserRole, RoleChoices, AccountStatusChoices
+from .authentication import stamp_session_version
 
 
 RESTRICTED_PUBLIC_ROLES = {
@@ -140,7 +141,12 @@ class UserLoginSerializer(serializers.Serializer):
         if is_staff_or_admin and user.has_mfa_enabled:
             if not code:
                 from django.core import signing
-                pre_auth_token = signing.dumps({'user_id': str(user.id), 'action': 'mfa_login'}, salt='driverxtra.mfa')
+                # 'sv' binds the challenge to the current session version: a suspension before the
+                # code is verified invalidates it, even if the account is reactivated in between.
+                pre_auth_token = signing.dumps(
+                    {'user_id': str(user.id), 'action': 'mfa_login', 'sv': user.session_version},
+                    salt='driverxtra.mfa',
+                )
                 return {
                     'user': user,
                     'mfa_required': True,
@@ -152,6 +158,7 @@ class UserLoginSerializer(serializers.Serializer):
 
         # Generate SimpleJWT tokens with active_role claim
         refresh = RefreshToken.for_user(user)
+        stamp_session_version(refresh, user)
         refresh['email'] = user.email
         refresh['roles'] = user.roles
         refresh['full_name'] = user.full_name
@@ -261,9 +268,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
         ]
 
     def get_active_role(self, obj) -> str:
+        # request.auth is a SimpleJWT token object (not a dict); read the claim through .get().
+        # The claim is reported only while the user still holds that role.
         request = self.context.get('request')
-        if request and hasattr(request, 'auth') and isinstance(request.auth, dict):
-            return request.auth.get('active_role') or obj.get_default_role()
+        token = getattr(request, 'auth', None) if request else None
+        claimed = token.get('active_role') if token is not None and hasattr(token, 'get') else None
+        if claimed and (obj.is_superuser or obj.has_role(claimed)):
+            return RoleChoices.normalize_role(claimed)
         return obj.get_default_role()
 
     def get_staff_role(self, obj):
@@ -277,13 +288,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return None
 
     def get_permissions(self, obj) -> list[str]:
-        if obj.is_superuser or obj.has_role(RoleChoices.ADMIN):
-            from apps.identity.models import Permission
-            return list(Permission.objects.values_list('code', flat=True))
-        profile = getattr(obj, 'staff_profile', None)
-        if profile and profile.staff_role:
-            return list(profile.staff_role.role_permissions.values_list('permission__code', flat=True))
-        return []
+        # Same rules the backend enforces via User.has_permission().
+        return obj.get_effective_permissions()
 
     def get_organisations(self, obj):
         memberships = obj.organisation_memberships.filter(is_active=True).select_related('organisation')

@@ -4017,7 +4017,7 @@ class BuyerOrderDisputeCreateView(views.APIView):
         if not order:
             return Response({"error": f"Order '{identifier}' not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if order.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+        if order.buyer_id != request.user.id and not _has_permission(request.user, 'dispute.manage'):
             return Response({"error": "You can only raise disputes for your own orders."}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = DisputeCreatePayloadSerializer(data=request.data)
@@ -4093,8 +4093,9 @@ class DisputeDetailView(views.APIView):
             return Response({"error": "Dispute not found."}, status=status.HTTP_404_NOT_FOUND)
 
         is_buyer = dispute.buyer_id == request.user.id
-        is_seller = dispute.seller_id == request.user.id or _is_seller_authorized_for_order(request.user, dispute.order)
-        is_staff = _is_staff_or_admin(request.user) or _has_permission(request.user, 'dispute.manage')
+        is_seller = dispute.seller_id == request.user.id or _is_seller_authorized_for_order(request.user, dispute.order, allow_staff=False)
+        # Staff read access: 'dispute.manage', or 'order.refund' (read-only; refunds may reference disputes).
+        is_staff = _has_permission(request.user, 'dispute.manage') or _has_permission(request.user, 'order.refund')
 
         if not (is_buyer or is_seller or is_staff):
             return Response({"error": "You do not have permission to view this dispute."}, status=status.HTTP_403_FORBIDDEN)
@@ -4148,8 +4149,7 @@ class OrderRefundSummaryView(views.APIView):
 
         is_authorized = (
             order.buyer_id == request.user.id
-            or _is_seller_authorized_for_order(request.user, order)
-            or _is_staff_or_admin(request.user)
+            or _is_seller_authorized_for_order(request.user, order, allow_staff=False)
             or _has_permission(request.user, 'order.refund')
         )
         if not is_authorized:
@@ -4166,7 +4166,7 @@ class AdminOrderRefundCreateView(views.APIView):
     Staff or Admin issues a refund for an order.
     Requires 'order.refund' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasPermission('order.refund')]
 
     def post(self, request, identifier):
         order = _resolve_order_by_identifier(identifier)
@@ -4214,13 +4214,17 @@ class AdminRefundListView(generics.ListAPIView):
     """
     GET /api/v1/marketplace/admin/refunds/
     Lists all platform refunds for operations staff.
+    Read access: 'order.refund' or 'finance.payout' (finance reconciliation).
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [
+        permissions.IsAuthenticated,
+        HasPermission('order.refund') | HasPermission('finance.payout'),
+    ]
     serializer_class = RefundSerializer
 
     def get_queryset(self):
         user = self.request.user
-        if not (_is_staff_or_admin(user) or _has_permission(user, 'order.refund') or _has_permission(user, 'finance.payout')):
+        if not (_has_permission(user, 'order.refund') or _has_permission(user, 'finance.payout')):
             raise PermissionDenied("You do not have permission to view platform refunds.")
         qs = Refund.objects.all().select_related('order', 'return_request', 'dispute', 'created_by', 'approved_by')
         st = self.request.query_params.get('status')
@@ -4234,7 +4238,7 @@ class AdminRefundProcessView(views.APIView):
     POST /api/v1/marketplace/admin/refunds/<identifier>/process/
     Marks a pending or manual refund as processed/settled.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasPermission('order.refund')]
 
     def post(self, request, identifier):
         refund = _resolve_refund_by_identifier(identifier)
@@ -4266,7 +4270,7 @@ class AdminRefundApproveView(views.APIView):
     Staff or Admin approves a pending refund and triggers gateway refund dispatch or manual settlement.
     Requires 'order.refund' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasPermission('order.refund')]
 
     def post(self, request, identifier):
         refund = _resolve_refund_by_identifier(identifier)
@@ -4295,7 +4299,7 @@ class AdminRefundRejectView(views.APIView):
     Staff or Admin rejects a refund request, recording cancellation and failure reason.
     Requires 'order.refund' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasPermission('order.refund')]
 
     def post(self, request, identifier):
         refund = _resolve_refund_by_identifier(identifier)
@@ -4343,12 +4347,12 @@ class AdminDisputeListView(generics.ListAPIView):
     GET /api/v1/marketplace/admin/disputes/
     Lists all commercial disputes for adjudication by staff with 'dispute.manage'.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasPermission('dispute.manage')]
     serializer_class = DisputeSerializer
 
     def get_queryset(self):
         user = self.request.user
-        if not (_is_staff_or_admin(user) or _has_permission(user, 'dispute.manage')):
+        if not _has_permission(user, 'dispute.manage'):
             raise PermissionDenied("You do not have permission to review disputes.")
         qs = Dispute.objects.all().select_related('order', 'buyer', 'seller', 'resolved_by').prefetch_related('events__actor')
         st = self.request.query_params.get('status')
@@ -4366,7 +4370,7 @@ class AdminDisputeStatusUpdateView(views.APIView):
     Adjudicates a dispute, changes its status, and records official decisions.
     Requires 'dispute.manage' permission.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasPermission('dispute.manage')]
 
     def post(self, request, identifier):
         dispute = _resolve_dispute_by_identifier(identifier)
@@ -4412,6 +4416,7 @@ from apps.marketplace.reviews import (
     ReputationService,
     ReviewWorkflowService,
     _is_staff_or_admin,
+    _can_moderate_reviews,
     _is_seller_authorized_for_review,
 )
 from apps.marketplace.serializers import (
@@ -4502,8 +4507,8 @@ class ProductReviewListCreateView(views.APIView):
     def get(self, request):
         qs = ProductReview.objects.select_related('order', 'order_item', 'listing', 'buyer', 'seller', 'organisation').all()
 
-        # Public browsing only sees approved reviews
-        if not request.user.is_authenticated or not _is_staff_or_admin(request.user):
+        # Public browsing only sees approved reviews; moderators may filter by status
+        if not request.user.is_authenticated or not _can_moderate_reviews(request.user):
             qs = qs.filter(status=ReviewStatusChoices.APPROVED)
         else:
             status_param = request.query_params.get('status')
@@ -4585,7 +4590,7 @@ class ProductReviewDetailUpdateDeleteView(views.APIView):
 
         # Non-approved reviews visible only to author or staff/admin
         if review.status != ReviewStatusChoices.APPROVED:
-            if not request.user.is_authenticated or (request.user.id != review.buyer_id and not _is_staff_or_admin(request.user)):
+            if not request.user.is_authenticated or (request.user.id != review.buyer_id and not _can_moderate_reviews(request.user)):
                 return Response({"error": "Review not found or not published."}, status=status.HTTP_404_NOT_FOUND)
 
         return Response(ProductReviewSerializer(review).data, status=status.HTTP_200_OK)
@@ -4837,7 +4842,7 @@ class SellerRatingListCreateView(views.APIView):
             else:
                 qs = qs.filter(buyer_id=buyer_id)
 
-        if not request.user.is_authenticated or not _is_staff_or_admin(request.user):
+        if not request.user.is_authenticated or not _can_moderate_reviews(request.user):
             qs = qs.filter(status=ReviewStatusChoices.APPROVED)
 
         paginator = PageNumberPagination()
@@ -4920,7 +4925,7 @@ class SellerRatingDetailView(views.APIView):
         if not sr:
             return Response({"error": "Seller rating not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if sr.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+        if sr.buyer_id != request.user.id and not _can_moderate_reviews(request.user):
             return Response({"error": "You are not authorized to edit this rating."}, status=status.HTTP_403_FORBIDDEN)
 
         rating = request.data.get('rating')
@@ -4944,7 +4949,7 @@ class SellerRatingDetailView(views.APIView):
         if not sr:
             return Response({"error": "Seller rating not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if sr.buyer_id != request.user.id and not _is_staff_or_admin(request.user):
+        if sr.buyer_id != request.user.id and not _can_moderate_reviews(request.user):
             return Response({"error": "You are not authorized to delete this rating."}, status=status.HTTP_403_FORBIDDEN)
 
         sr.delete()
@@ -5010,7 +5015,7 @@ class AdminReviewListView(generics.ListAPIView):
     serializer_class = ProductReviewSerializer
 
     def get_queryset(self):
-        if not _is_staff_or_admin(self.request.user):
+        if not _can_moderate_reviews(self.request.user):
             raise PermissionDenied("Administrative moderation privileges required.")
 
         qs = ProductReview.objects.select_related(
@@ -5049,7 +5054,7 @@ class AdminReviewModerationView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, id):
-        if not _is_staff_or_admin(request.user):
+        if not _can_moderate_reviews(request.user):
             return Response({"error": "Staff or administrator role required for moderation."}, status=status.HTTP_403_FORBIDDEN)
 
         review = ProductReview.objects.filter(id=id).first()
@@ -5086,7 +5091,7 @@ class AdminReviewReportListView(generics.ListAPIView):
     serializer_class = ReviewReportSerializer
 
     def get_queryset(self):
-        if not _is_staff_or_admin(self.request.user):
+        if not _can_moderate_reviews(self.request.user):
             raise PermissionDenied("Administrative moderation privileges required.")
 
         qs = ReviewReport.objects.select_related(
@@ -5108,7 +5113,7 @@ class AdminReviewReportResolveView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, id):
-        if not _is_staff_or_admin(request.user):
+        if not _can_moderate_reviews(request.user):
             return Response({"error": "Staff or administrator role required to resolve reports."}, status=status.HTTP_403_FORBIDDEN)
 
         report = ReviewReport.objects.filter(id=id).first()
