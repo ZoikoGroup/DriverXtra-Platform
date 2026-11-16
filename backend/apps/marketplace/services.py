@@ -219,7 +219,8 @@ def get_seller_public_info(listing: VehicleListing) -> dict:
     """
     Resolves authorized public seller information for a vehicle listing.
     Protects sensitive credentials and private phone numbers.
-    Only exposes public commercial contact numbers vetted through approved SellerApplication.
+    Direct phone/WhatsApp buyer-to-dealer contact is removed: buyers communicate
+    exclusively through DriverXtra's internal Vehicle Enquiry system.
     """
     from apps.onboarding.models import (
         SellerApplication,
@@ -246,7 +247,6 @@ def get_seller_public_info(listing: VehicleListing) -> dict:
     is_verified = False
     seller_type = "INDIVIDUAL_SELLER"
     name = ""
-    phone = None
     city = listing.location_city or ""
 
     dealership_types = {
@@ -265,7 +265,6 @@ def get_seller_public_info(listing: VehicleListing) -> dict:
             seller_type = "DEALERSHIP"
         if app:
             is_verified = True
-            phone = app.contact_phone.strip() if app.contact_phone else None
             if not city and app.city:
                 city = app.city
         elif seller and seller.has_role('SELLER'):
@@ -275,28 +274,17 @@ def get_seller_public_info(listing: VehicleListing) -> dict:
         is_verified = True
         if app.business_type in dealership_types:
             seller_type = "DEALERSHIP"
-        phone = app.contact_phone.strip() if app.contact_phone else None
         if not city and app.city:
             city = app.city
     else:
         name = seller.full_name if seller else "Seller"
         seller_type = "INDIVIDUAL_SELLER"
         is_verified = False
-        phone = None
-
-    whatsapp_url = None
-    if phone:
-        digits = re.sub(r'\D', '', phone)
-        if len(digits) >= 7:
-            whatsapp_url = f"https://wa.me/{digits}"
 
     return {
         "name": name,
         "seller_type": seller_type,
         "is_verified": is_verified,
         "location_city": city,
-        "phone": phone,
-        "has_phone": bool(phone),
-        "whatsapp_url": whatsapp_url,
         "can_enquire": True,
     }

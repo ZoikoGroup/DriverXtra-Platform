@@ -132,12 +132,21 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
 
     @property
     def roles(self) -> list[str]:
-        """Returns a list of active role codes assigned to the user."""
-        return list(self.user_roles.values_list('role', flat=True))
+        """Returns a list of active role codes assigned to the user.
+        Superuser automatically has ADMIN privileges, but does NOT automatically inherit
+        operational roles (BUYER, SELLER, WORKSHOP) unless explicitly assigned.
+        """
+        roles_list = list(self.user_roles.values_list('role', flat=True))
+        if self.is_superuser and RoleChoices.ADMIN not in roles_list:
+            roles_list.append(RoleChoices.ADMIN)
+        return roles_list
 
     def has_role(self, role_name: str) -> bool:
+        """Checks if user has the specified platform role.
+        Superuser grants ADMIN governance, but operational membership requires explicit assignment.
+        """
         normalized = RoleChoices.normalize_role(role_name)
-        if self.is_superuser and normalized in (RoleChoices.ADMIN, RoleChoices.STAFF):
+        if self.is_superuser and normalized == RoleChoices.ADMIN:
             return True
         return self.user_roles.filter(role=normalized).exists()
 

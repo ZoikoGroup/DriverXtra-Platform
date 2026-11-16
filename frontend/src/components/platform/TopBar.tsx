@@ -15,6 +15,7 @@ import {
 
 import GlobalSearch from "./GlobalSearch";
 import CartDrawer from "./CartDrawer";
+import { getDefaultTabForRole } from "@/lib/navigation";
 
 interface TopBarProps {
   currentTabLabel: string;
@@ -37,7 +38,7 @@ export default function TopBar({
 
   if (!user) return null;
 
-  // Determine selectable roles based on user's granted roles
+  // Determine selectable roles strictly based on user's legitimately granted roles
   const heldRoles: string[] = [];
   if (user.rawRoles && user.rawRoles.length > 0) {
     user.rawRoles.forEach((r) => {
@@ -47,15 +48,11 @@ export default function TopBar({
     heldRoles.push(user.activeRole);
   }
 
-  // Superuser / Admin has access to ADMIN and STAFF
-  if (user.is_superuser || user.is_staff) {
-    if (!heldRoles.includes("ADMIN")) heldRoles.push("ADMIN");
-    if (!heldRoles.includes("STAFF")) heldRoles.push("STAFF");
-  }
-
-  // Ensure BUYER is always available
-  if (!heldRoles.includes("BUYER")) {
-    heldRoles.push("BUYER");
+  // Superuser privileges grant ADMIN governance, but not operational membership (SELLER/WORKSHOP/BUYER)
+  if (user.is_superuser && !heldRoles.includes("ADMIN")) {
+    heldRoles.push("ADMIN");
+  } else if (user.is_staff && !heldRoles.includes("STAFF") && !heldRoles.includes("ADMIN")) {
+    heldRoles.push("STAFF");
   }
 
   const activeRole = user.activeRole || (user.rawRoles && user.rawRoles[0]) || "BUYER";
@@ -82,9 +79,13 @@ export default function TopBar({
       return;
     }
     setSwitchingRole(targetRole);
-    await switchRole(targetRole);
+    const success = await switchRole(targetRole);
     setSwitchingRole(null);
     setRoleDropdownOpen(false);
+    if (success && onNavigate) {
+      const defaultTab = getDefaultTabForRole(targetRole, user);
+      onNavigate(defaultTab);
+    }
   };
 
   return (

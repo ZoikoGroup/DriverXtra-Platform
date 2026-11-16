@@ -597,3 +597,54 @@ def test_toggle_helpful_vote(other_buyer_client, completed_order, buyer_user, se
     assert r2.status_code == status.HTTP_200_OK
     assert r2.data["has_voted"] is False
     assert r2.data["helpful_votes"] == 0
+
+
+@pytest.mark.django_db
+def test_public_seller_reputation_endpoint_anonymous(api_client, seller_user):
+    """Verifies that an anonymous buyer can fetch seller reputation without 'User is not defined' error."""
+    url = f"/api/v1/marketplace/sellers/{seller_user.id}/reputation/"
+    response = api_client.get(url)
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data["seller_id"] == str(seller_user.id)
+    assert "average_rating" in response.data
+    assert "positive_percentage" in response.data
+
+
+@pytest.mark.django_db
+def test_public_seller_reputation_endpoint_authenticated(buyer_auth_client, seller_user):
+    """Verifies that an authenticated buyer can fetch seller reputation without errors."""
+    url = f"/api/v1/marketplace/sellers/{seller_user.id}/reputation/"
+    response = buyer_auth_client.get(url)
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data["seller_id"] == str(seller_user.id)
+
+
+@pytest.mark.django_db
+def test_public_seller_reputation_endpoint_not_found(api_client):
+    """Verifies that querying a non-existent seller returns 404 cleanly."""
+    import uuid
+    url = f"/api/v1/marketplace/sellers/{uuid.uuid4()}/reputation/"
+    response = api_client.get(url)
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.data["error"] == "Seller not found."
+
+
+@pytest.mark.django_db
+def test_seller_rating_creation_resolves_user_model(buyer_auth_client, completed_order, seller_user):
+    """Verifies that creating a seller rating resolves seller User model cleanly without NameError."""
+    order, item, listing = completed_order
+    url = "/api/v1/marketplace/seller-ratings/"
+    payload = {
+        "order_id": str(order.id),
+        "seller_id": str(seller_user.id),
+        "rating": 5,
+        "communication_rating": 5,
+        "delivery_rating": 5,
+        "item_description_rating": 5,
+        "comment": "Excellent seller, fast shipping!",
+    }
+    response = buyer_auth_client.post(url, payload, format="json")
+    assert response.status_code == status.HTTP_201_CREATED
+    assert response.data["rating"] == 5
+    assert response.data["seller_name"] == seller_user.full_name
+

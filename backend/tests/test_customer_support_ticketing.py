@@ -1123,11 +1123,15 @@ def test_sla_75_percent_warning_skips_weekends_and_holidays(buyer_user, settings
 
 
 @pytest.mark.django_db
-def test_resolution_sla_75_percent_warning_and_pause_isolation(buyer_user, support_agent):
+def test_resolution_sla_75_percent_warning_and_pause_isolation(buyer_user, support_agent, settings):
     """
     P2 SLA: Resolution SLA generates 75% warning when consumed business time reaches 75%.
     Paused tickets (WAITING_FOR_CUSTOMER) are never warned or breached.
     """
+    import zoneinfo
+    settings.SUPPORT_SLA_TIMEZONE = "UTC"
+    settings.SUPPORT_PUBLIC_HOLIDAYS = []
+
     # Create ticket with HIGH priority (24 business hours resolution SLA)
     ticket = TicketService.create_ticket(
         customer=buyer_user,
@@ -1141,13 +1145,21 @@ def test_resolution_sla_75_percent_warning_and_pause_isolation(buyer_user, suppo
     ticket.refresh_from_db()
     assert ticket.first_responded_at is not None
 
-    # Simulate 18 business hours consumed out of 24h (75%)
-    # Advance created_at backward to simulate 18 business hours elapsed
-    ticket.created_at = ticket.created_at - timedelta(hours=36)
-    # Set resolution due date so that 75% of window is consumed
-    now = timezone.now()
-    ticket.resolution_due_at = now + timedelta(hours=2)
+    # Deterministic start: Monday 08:00 UTC (start of business day, Mon-Fri 08:00-18:00, 10h/day)
+    start_time = datetime(2026, 10, 5, 8, 0, tzinfo=zoneinfo.ZoneInfo("UTC"))
+    # Deterministic 24-business-hour resolution window -> Wednesday 12:00 UTC
+    resolution_due_at = add_business_hours(start_time, 24.0)
+    # Simulate exactly 18 business hours elapsed (75%) -> Tuesday 16:00 UTC
+    now = add_business_hours(start_time, 18.0)
+
+    ticket.created_at = start_time
+    ticket.resolution_due_at = resolution_due_at
     ticket.save()
+
+    # Pre-condition check: escalation stage must be NONE before check
+    ticket.refresh_from_db()
+    assert ticket.is_escalated is False
+    assert ticket.escalation_stage == EscalationStageChoices.NONE
 
     metrics = TicketService.check_slas_and_escalate(now=now)
     assert metrics["warning_75_escalated"] >= 1

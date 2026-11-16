@@ -377,8 +377,12 @@ class ReturnService:
                     },
                 )
             else:
+                rejection_reason = (rejection_reason or '').strip()
+                if not rejection_reason:
+                    raise DjangoValidationError("A rejection reason is mandatory when rejecting a return request.")
+
                 return_request.status = ReturnRequestStatusChoices.REJECTED
-                return_request.rejection_reason = rejection_reason or "Request rejected by seller/operations."
+                return_request.rejection_reason = rejection_reason
 
                 record_audit_entry(
                     event_type="marketplace.return.rejected",
@@ -530,17 +534,31 @@ class RefundService:
     def get_order_refund_summary(cls, order: Order) -> Dict[str, Any]:
         """
         Authoritatively calculates paid amount, existing refunds, and maximum refundable balance.
+        Provides both canonical and legacy keys to support frontend financial validation and automated tests.
         """
-        # Determine actual paid amount
-        if order.payment_method == 'COD':
-            is_paid = (
-                order.cod_collection_status == CODCollectionStatusChoices.COLLECTED
-                and order.payment_status == PaymentStatusChoices.PAID
-            )
-            paid_amount = order.total_amount if is_paid else Decimal('0.00')
+        # Validate order total amount as finite number
+        order_total = getattr(order, 'total_amount', Decimal('0.00'))
+        if order_total is None or not isinstance(order_total, Decimal) or not order_total.is_finite() or order_total < Decimal('0.00'):
+            order_total = Decimal('0.00')
+
+        is_vehicle = hasattr(order, 'vehicle') or getattr(order, 'order_number', '').startswith('VO-')
+
+        is_cod = (order.payment_method == 'COD')
+        is_cod_collected = (
+            is_cod
+            and order.cod_collection_status == CODCollectionStatusChoices.COLLECTED
+            and order.payment_status == PaymentStatusChoices.PAID
+        )
+
+        if is_vehicle:
+            is_paid = False
+            paid_amount = Decimal('0.00')
+        elif is_cod:
+            is_paid = is_cod_collected
+            paid_amount = order_total if is_paid else Decimal('0.00')
         else:
             is_paid = order.payment_status in (PaymentStatusChoices.PAID, PaymentStatusChoices.REFUNDED)
-            paid_amount = order.total_amount if is_paid else Decimal('0.00')
+            paid_amount = order_total if is_paid else Decimal('0.00')
 
         # Existing active refunds (exclude FAILED and CANCELLED)
         active_refunds = order.refunds.filter(
@@ -557,10 +575,34 @@ class RefundService:
 
         available_refundable = max(Decimal('0.00'), (paid_amount - total_refunded).quantize(Decimal('0.01')))
 
+        # Authoritative eligibility determination
+        reason_ineligible = None
+        if is_vehicle:
+            reason_ineligible = "Vehicle orders use offline direct payment between buyer and dealer and are not eligible for platform payment gateway refunds."
+        elif not is_paid:
+            if is_cod:
+                reason_ineligible = "Cash on Delivery payment has not been marked as COLLECTED."
+            elif order.payment_status == PaymentStatusChoices.PENDING:
+                reason_ineligible = "Payment is still PENDING. No collected funds are available to refund."
+            else:
+                reason_ineligible = f"Order payment status is '{order.payment_status}'. Only PAID orders can be refunded."
+        elif available_refundable <= Decimal('0.00'):
+            reason_ineligible = "No remaining refundable balance. The order has already been fully refunded."
+
+        can_refund = bool(is_paid and available_refundable > Decimal('0.00') and not reason_ineligible)
+
         return {
             "order_number": order.order_number,
             "currency": order.currency,
-            "order_total": order.total_amount,
+            # Canonical frontend fields
+            "total_amount": order_total,
+            "active_refunded_amount": total_refunded,
+            "available_refundable_balance": available_refundable,
+            "is_cod": is_cod,
+            "is_cod_collected": is_cod_collected,
+            "reason_ineligible": reason_ineligible,
+            # Legacy fields for test compatibility
+            "order_total": order_total,
             "payment_method": order.payment_method,
             "payment_status": order.payment_status,
             "cod_collection_status": order.cod_collection_status,
@@ -568,7 +610,7 @@ class RefundService:
             "paid_amount": paid_amount,
             "total_refunded": total_refunded,
             "available_refundable": available_refundable,
-            "can_refund": bool(is_paid and available_refundable > Decimal('0.00')),
+            "can_refund": can_refund,
         }
 
     @classmethod
@@ -589,7 +631,10 @@ class RefundService:
         Strictly enforces that refund cannot exceed remaining paid balance.
         Never pretends a refund was paid if automated gateway has not processed it.
         """
-        # Permission check: staff with 'order.refund' or admin
+        if hasattr(order, 'vehicle') or getattr(order, 'order_number', '').startswith('VO-'):
+            raise DjangoValidationError("Vehicle orders use offline direct payment between buyer and dealer and are not eligible for platform payment gateway refunds.")
+
+        # Permission check: staff with 'order.refund' or finance.payout
         has_perm = (
             _has_permission(actor, 'order.refund')
             or _has_permission(actor, 'finance.payout')
@@ -604,9 +649,13 @@ class RefundService:
             )
             raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
 
-        amt = Decimal(str(amount)).quantize(Decimal('0.01'))
-        if amt <= Decimal('0.00'):
-            raise DjangoValidationError("Refund amount must be greater than zero.")
+        try:
+            amt = Decimal(str(amount)).quantize(Decimal('0.01'))
+        except Exception:
+            raise DjangoValidationError("Refund amount must be a valid numeric amount.")
+
+        if not amt.is_finite() or amt <= Decimal('0.00'):
+            raise DjangoValidationError("Refund amount must be a finite number greater than zero.")
 
         with transaction.atomic():
             locked_order = Order.objects.select_for_update().get(id=order.id)
@@ -686,6 +735,184 @@ class RefundService:
                 refund = cls.process_refund(refund, actor, notes="Auto-processed settlement.")
 
         return refund
+
+    @classmethod
+    def record_seller_direct_refund(
+        cls,
+        order: Order,
+        amount: Decimal,
+        actor: Any,
+        transaction_reference: str,
+        reason: str = '',
+        refund_method: str = RefundMethodChoices.BANK_TRANSFER,
+        evidence_url: str = '',
+        return_request: Optional[ReturnRequest] = None,
+        notes: str = '',
+    ) -> Refund:
+        """
+        Allows an authorized seller to record a direct seller-funded refund
+        (e.g., bank wire / UTR or cash voucher) for an order or approved return.
+        Direct refunds are marked SUCCEEDED since the seller already executed the payout.
+        """
+        if hasattr(order, 'vehicle') or getattr(order, 'order_number', '').startswith('VO-'):
+            raise DjangoValidationError("Vehicle orders use offline direct payment between buyer and dealer and are not eligible for marketplace refunds.")
+
+        if not _is_seller_authorized_for_order(actor, order):
+            record_denied_audit_entry(
+                action="marketplace:order.seller_direct_refund",
+                resource_type="Order",
+                resource_id=str(order.id),
+                actor_id=actor.id if actor else None,
+                reason_code="SELLER_UNAUTHORIZED_FOR_ORDER",
+            )
+            raise DjangoValidationError("Permission denied: You are not authorized to record refunds for this order.")
+
+        txn_ref = (transaction_reference or '').strip()
+        if not txn_ref:
+            raise DjangoValidationError("A transaction reference (e.g. UTR / payment receipt reference) is mandatory for direct refunds.")
+
+        try:
+            amt = Decimal(str(amount)).quantize(Decimal('0.01'))
+        except Exception:
+            raise DjangoValidationError("Refund amount must be a valid numeric amount.")
+
+        if not amt.is_finite() or amt <= Decimal('0.00'):
+            raise DjangoValidationError("Refund amount must be a finite number greater than zero.")
+
+        with transaction.atomic():
+            locked_order = Order.objects.select_for_update().get(id=order.id)
+            if locked_order.refunds.filter(status=RefundStatusChoices.PROCESSING_UNKNOWN).exists():
+                raise DjangoValidationError(
+                    f"Cannot issue a refund for order {locked_order.order_number}: an ambiguous refund is currently awaiting gateway reconciliation."
+                )
+
+            summary = cls.get_order_refund_summary(locked_order)
+            if not summary['is_paid']:
+                if locked_order.payment_method == 'COD':
+                    raise DjangoValidationError("Cannot record refund for Cash on Delivery order because payment has not been collected.")
+                raise DjangoValidationError(f"Cannot record refund for order with payment status '{locked_order.payment_status}'. Order must be PAID.")
+
+            if amt > summary['available_refundable']:
+                raise DjangoValidationError(
+                    f"Requested refund amount ({locked_order.currency} {amt}) exceeds maximum available refundable balance ({locked_order.currency} {summary['available_refundable']})."
+                )
+
+            refund_num = f"REF-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+
+            formatted_notes = notes or ''
+            if evidence_url:
+                formatted_notes = f"Evidence: {evidence_url}\n{formatted_notes}".strip()
+
+            refund = Refund.objects.create(
+                refund_number=refund_num,
+                order=locked_order,
+                return_request=return_request,
+                amount=amt,
+                currency=locked_order.currency,
+                status=RefundStatusChoices.PROCESSING,
+                refund_method=refund_method or RefundMethodChoices.BANK_TRANSFER,
+                gateway_provider='SELLER_DIRECT',
+                gateway_refund_id=txn_ref,
+                reason=reason or "Seller Direct Settlement",
+                notes=formatted_notes,
+                processed_at=None,
+                created_by=actor,
+                approved_by=actor,
+            )
+
+            # Note: Do not automatically claim the buyer received money or mark order as REFUNDED.
+            # Seller UTR evidence submission and buyer-confirmed receipt are distinct states.
+            # The return request remains in its current review state until the buyer confirms receipt.
+
+            # Log audit
+            record_audit_entry(
+                event_type="marketplace.refund.seller_evidence_submitted",
+                action="marketplace:refund.seller_direct_evidence",
+                resource_type="Refund",
+                resource_id=str(refund.id),
+                actor_id=actor.id,
+                metadata={
+                    "refund_number": refund.refund_number,
+                    "order_number": locked_order.order_number,
+                    "amount": str(amt),
+                    "currency": locked_order.currency,
+                    "transaction_reference": txn_ref,
+                    "method": refund.refund_method,
+                    "status": "PROCESSING",
+                },
+            )
+
+        return refund
+
+    @classmethod
+    def confirm_refund_receipt(
+        cls,
+        refund: Refund,
+        actor: Any,
+    ) -> Refund:
+        """
+        Allows the buyer to confirm receipt of directly settled refund funds (e.g. UTR / bank transfer).
+        Transitions refund from PROCESSING to SUCCEEDED, marks any linked return request as COMPLETED,
+        and transitions the order's payment status to REFUNDED if fully settled.
+        """
+        if not actor or not actor.is_authenticated:
+            raise DjangoValidationError("Authentication required to confirm refund receipt.")
+
+        order = refund.order
+        if order.buyer_id != actor.id:
+            record_denied_audit_entry(
+                action="marketplace:refund.confirm_receipt",
+                resource_type="Refund",
+                resource_id=str(refund.id),
+                actor_id=actor.id,
+                reason_code="BUYER_UNAUTHORIZED_FOR_REFUND",
+            )
+            raise DjangoValidationError("Permission denied: Only the ordering buyer can confirm receipt of this refund.")
+
+        if refund.status == RefundStatusChoices.SUCCEEDED:
+            return refund
+
+        if refund.status != RefundStatusChoices.PROCESSING:
+            raise DjangoValidationError(f"Cannot confirm receipt for refund with status '{refund.status}'. Expected 'PROCESSING'.")
+
+        with transaction.atomic():
+            locked_refund = Refund.objects.select_for_update().get(id=refund.id)
+            locked_order = Order.objects.select_for_update().get(id=order.id)
+
+            locked_refund.status = RefundStatusChoices.SUCCEEDED
+            locked_refund.processed_at = timezone.now()
+            locked_refund.save(update_fields=['status', 'processed_at', 'updated_at'])
+
+            # If return request is attached, mark it completed
+            if locked_refund.return_request:
+                ret = locked_refund.return_request
+                if ret.status != ReturnRequestStatusChoices.COMPLETED:
+                    ret.status = ReturnRequestStatusChoices.COMPLETED
+                    ret.completed_at = timezone.now()
+                    ret.save(update_fields=['status', 'completed_at', 'updated_at'])
+
+            # Check if order is now fully settled
+            summary = cls.get_order_refund_summary(locked_order)
+            if summary['available_refundable'] <= Decimal('0.00'):
+                locked_order.payment_status = PaymentStatusChoices.REFUNDED
+                locked_order.save(update_fields=['payment_status', 'updated_at'])
+
+            record_audit_entry(
+                event_type="marketplace.refund.buyer_confirmed",
+                action="marketplace:refund.buyer_confirm",
+                resource_type="Refund",
+                resource_id=str(locked_refund.id),
+                actor_id=actor.id,
+                metadata={
+                    "refund_number": locked_refund.refund_number,
+                    "order_number": locked_order.order_number,
+                    "amount": str(locked_refund.amount),
+                    "currency": locked_refund.currency,
+                    "transaction_reference": locked_refund.gateway_refund_id,
+                },
+            )
+
+        return locked_refund
 
     @classmethod
     def process_refund(
@@ -1767,7 +1994,13 @@ class RefundService:
                     locked.save(update_fields=['status', 'updated_at'])
                     return locked
             else:
-                return cls.process_refund(locked, actor, notes=notes)
+                if has_payout_perm:
+                    return cls.process_refund(locked, actor, notes=notes)
+                else:
+                    # Approved by staff with 'order.refund'; transitioned to PROCESSING awaiting Finance Officer settlement
+                    locked.status = RefundStatusChoices.PROCESSING
+                    locked.save(update_fields=['status', 'updated_at'])
+                    return locked
 
     @classmethod
     def reject_refund(
