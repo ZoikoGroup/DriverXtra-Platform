@@ -284,3 +284,97 @@ class TestRolesAndPermissions:
         assert req.status == ApprovalStatusChoices.APPROVED
         assert req.approver == seller_user
         assert req.reviewed_at is not None
+
+
+    def test_multi_role_and_superuser_role_switching_and_profile(self, api_client, db):
+        from apps.identity.models import User, RoleChoices
+        from rest_framework import status
+
+        # 1. Multi-role user holding BUYER, SELLER, WORKSHOP
+        multi_user = User.objects.create_user(
+            email='multirole@driverxtra.com',
+            password='SecurePassword123!',
+            first_name='Multi',
+            last_name='Role',
+            is_email_verified=True,
+        )
+        multi_user.add_role(RoleChoices.BUYER)
+        multi_user.add_role(RoleChoices.SELLER)
+        multi_user.add_role(RoleChoices.WORKSHOP)
+
+        # Login
+        login_res = api_client.post('/api/v1/auth/login/', {
+            'email': multi_user.email,
+            'password': 'SecurePassword123!',
+        }, format='json')
+        assert login_res.status_code == status.HTTP_200_OK
+        token = login_res.json()['tokens']['access']
+
+        # Switch to WORKSHOP
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        switch_res = api_client.post('/api/v1/auth/switch-role/', {'role': 'WORKSHOP'}, format='json')
+        assert switch_res.status_code == status.HTTP_200_OK
+        workshop_token = switch_res.json()['tokens']['access']
+
+        # Verify /api/v1/users/me/ reports active_role == WORKSHOP
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {workshop_token}')
+        me_res = api_client.get('/api/v1/users/me/')
+        assert me_res.status_code == status.HTTP_200_OK
+        assert me_res.json()['active_role'] == 'WORKSHOP'
+
+        # Switch to BUYER
+        switch_buyer = api_client.post('/api/v1/auth/switch-role/', {'role': 'BUYER'}, format='json')
+        assert switch_buyer.status_code == status.HTTP_200_OK
+        buyer_token = switch_buyer.json()['tokens']['access']
+
+        # Verify /api/v1/users/me/ reports active_role == BUYER
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {buyer_token}')
+        me_res2 = api_client.get('/api/v1/users/me/')
+        assert me_res2.status_code == status.HTTP_200_OK
+        assert me_res2.json()['active_role'] == 'BUYER'
+
+        # 2. Superuser switching to all roles
+        super_user = User.objects.create_superuser(
+            email='superadmin@driverxtra.com',
+            password='AdminPassword123!',
+            first_name='Super',
+            last_name='Admin',
+        )
+        api_client.credentials()  # Clear auth
+        s_login = api_client.post('/api/v1/auth/login/', {
+            'email': super_user.email,
+            'password': 'AdminPassword123!',
+        }, format='json')
+        assert s_login.status_code == status.HTTP_200_OK
+        s_token = s_login.json()['tokens']['access']
+
+        # 2. Pure Superuser without operational roles cannot switch to SELLER or WORKSHOP
+        for unassigned_role in ['SELLER', 'WORKSHOP']:
+            api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {s_token}')
+            s_switch = api_client.post('/api/v1/auth/switch-role/', {'role': unassigned_role}, format='json')
+            assert s_switch.status_code == status.HTTP_400_BAD_REQUEST, f"Superuser should not automatically switch to unassigned {unassigned_role}"
+
+        # 3. Superuser with explicitly assigned role CAN switch
+        super_user.add_role(RoleChoices.BUYER)
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {s_token}')
+        switch_assigned = api_client.post('/api/v1/auth/switch-role/', {'role': 'BUYER'}, format='json')
+        assert switch_assigned.status_code == status.HTTP_200_OK
+        new_token = switch_assigned.json()['tokens']['access']
+
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {new_token}')
+        s_me = api_client.get('/api/v1/users/me/')
+        assert s_me.status_code == status.HTTP_200_OK
+        assert s_me.json()['active_role'] == 'BUYER'
+
+        # 4. Regular buyer without SELLER cannot switch to SELLER
+        plain_buyer = User.objects.create_user(
+            email='plainbuyer@driverxtra.com',
+            password='SecurePassword123!',
+            is_email_verified=True,
+        )
+        plain_buyer.add_role(RoleChoices.BUYER)
+        api_client.force_authenticate(user=plain_buyer)
+        denied_res = api_client.post('/api/v1/auth/switch-role/', {'role': 'SELLER'}, format='json')
+        assert denied_res.status_code == status.HTTP_400_BAD_REQUEST
+        error_content = str(denied_res.json())
+        assert 'You do not possess the' in error_content or 'role' in error_content

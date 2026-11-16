@@ -44,3 +44,10 @@ driverxtra_db_before_part_b.dump
 
 # Gemini / Antigravity generated files
 .gemini/
+
+# Private vehicle documents
+backend/private_media/
+
+# Database backups
+*.sql
+*.dump

@@ -1,5 +1,10 @@
+import os
+import uuid
 from decimal import Decimal
+from pathlib import Path
+from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.files.storage import FileSystemStorage
 from django.db import models
 from django.utils import timezone
 from common.models import BaseUUIDModel
@@ -2335,6 +2340,208 @@ class VehiclePaymentVerificationEvent(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.event_type} on Order {self.order.order_number} at {self.created_at}"
+
+
+class PrivateVehicleDocumentStorage(FileSystemStorage):
+    """
+    Secure isolated storage for sensitive vehicle transaction documents.
+    Does not provide public URLs. Access is strictly controlled via authenticated streaming endpoints.
+    """
+    def __init__(self, *args, **kwargs):
+        root = getattr(settings, 'PRIVATE_STORAGE_ROOT', settings.BASE_DIR / 'private_media')
+        kwargs.setdefault('location', str(Path(root) / 'vehicle_documents'))
+        kwargs.setdefault('base_url', None)
+        super().__init__(*args, **kwargs)
+
+    def url(self, name):
+        raise ValueError("Private vehicle document storage does not provide public URLs. Use the verified streaming download endpoint.")
+
+    def deconstruct(self):
+        return ('apps.marketplace.models.PrivateVehicleDocumentStorage', (), {})
+
+
+private_vehicle_document_storage = PrivateVehicleDocumentStorage()
+
+
+def vehicle_document_upload_path(instance, filename: str) -> str:
+    """Unguessable storage path isolated per vehicle order and document category."""
+    ext = os.path.splitext(filename)[1].lower()
+    order_id = str(instance.order_id or 'unassigned')
+    cat = str(instance.category).lower()
+    return f"{order_id}/{cat}/{uuid.uuid4().hex}{ext}"
+
+
+class VehicleDocumentCategoryChoices(models.TextChoices):
+    # Dealer-provided documents
+    REGISTRATION_CERTIFICATE = 'REGISTRATION_CERTIFICATE', 'Vehicle Registration Certificate (RC / V5C)'
+    PROOF_OF_OWNERSHIP = 'PROOF_OF_OWNERSHIP', 'Ownership / Seller Authority Evidence'
+    INSURANCE_CERTIFICATE = 'INSURANCE_CERTIFICATE', 'Insurance Certificate'
+    ROADWORTHINESS_CERTIFICATE = 'ROADWORTHINESS_CERTIFICATE', 'Roadworthiness / MOT / Inspection Certificate'
+    PURCHASE_INVOICE = 'PURCHASE_INVOICE', 'Purchase Invoice / Bill of Sale'
+    OTHER_DEALER_DOCUMENT = 'OTHER_DEALER_DOCUMENT', 'Other Vehicle Document'
+
+    # Buyer-provided documents
+    BUYER_ID_PROOF = 'BUYER_ID_PROOF', 'Buyer Identity Verification Document'
+    BUYER_ADDRESS_PROOF = 'BUYER_ADDRESS_PROOF', 'Buyer Address Verification Document'
+    BUYER_FINANCE_AUTHORISATION = 'BUYER_FINANCE_AUTHORISATION', 'Finance / Commercial Authorisation Evidence'
+    OTHER_BUYER_DOCUMENT = 'OTHER_BUYER_DOCUMENT', 'Other Transaction Document'
+
+
+class VehicleDocumentOwnerRoleChoices(models.TextChoices):
+    DEALER = 'DEALER', 'Dealer / Seller'
+    BUYER = 'BUYER', 'Buyer'
+
+
+class VehicleDocumentStatusChoices(models.TextChoices):
+    REQUIRED = 'REQUIRED', 'Required'
+    PENDING_REVIEW = 'PENDING_REVIEW', 'Pending Review'
+    VERIFIED = 'VERIFIED', 'Verified'
+    REJECTED = 'REJECTED', 'Rejected'
+    EXPIRED = 'EXPIRED', 'Expired'
+    SUPERSEDED = 'SUPERSEDED', 'Superseded'
+
+
+class VehicleDocumentReviewEventTypeChoices(models.TextChoices):
+    SUBMITTED = 'SUBMITTED', 'Document Submitted'
+    REPLACED = 'REPLACED', 'Replacement Version Submitted'
+    VERIFIED = 'VERIFIED', 'Document Verified'
+    REJECTED = 'REJECTED', 'Document Rejected'
+    EXPIRED = 'EXPIRED', 'Document Expired'
+    SUPERSEDED = 'SUPERSEDED', 'Document Superseded'
+
+
+class VehiclePurchaseDocument(BaseUUIDModel):
+    """
+    Secure transaction document submitted for a VehicleOrder (buyer or dealer side).
+    Tracks version history, verification status, reviewer identity, and expiry dates.
+    Stored strictly in private storage with no public media URLs.
+    """
+    order = models.ForeignKey(
+        VehicleOrder,
+        on_delete=models.CASCADE,
+        related_name='documents',
+    )
+    category = models.CharField(
+        max_length=50,
+        choices=VehicleDocumentCategoryChoices.choices,
+        db_index=True,
+    )
+    document_owner_role = models.CharField(
+        max_length=20,
+        choices=VehicleDocumentOwnerRoleChoices.choices,
+    )
+    version_number = models.PositiveIntegerField(default=1)
+    submitted_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='submitted_vehicle_documents',
+    )
+    file = models.FileField(
+        storage=private_vehicle_document_storage,
+        upload_to=vehicle_document_upload_path,
+        max_length=500,
+    )
+    original_filename = models.CharField(max_length=255)
+    mime_type = models.CharField(max_length=100)
+    file_size = models.PositiveIntegerField()  # bytes
+    document_expiry_date = models.DateField(null=True, blank=True, db_index=True)
+    status = models.CharField(
+        max_length=30,
+        choices=VehicleDocumentStatusChoices.choices,
+        default=VehicleDocumentStatusChoices.PENDING_REVIEW,
+        db_index=True,
+    )
+    verified_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='verified_vehicle_documents',
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default='')
+    rejection_notes = models.TextField(blank=True, default='')
+    is_latest = models.BooleanField(default=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Purchase Document'
+        verbose_name_plural = 'Vehicle Purchase Documents'
+        ordering = ['category', '-version_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['order', 'category', 'version_number'],
+                name='unique_order_doc_category_version',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['order', 'category', 'is_latest']),
+            models.Index(fields=['order', 'status']),
+            models.Index(fields=['document_expiry_date', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.category} v{self.version_number} ({self.status}) for Order {self.order.order_number}"
+
+    @property
+    def is_expired(self) -> bool:
+        if self.document_expiry_date and self.document_expiry_date < timezone.now().date():
+            return True
+        return False
+
+
+class VehicleDocumentReviewEvent(BaseUUIDModel):
+    """
+    Append-only audit trail of document review actions:
+    SUBMITTED, REPLACED, VERIFIED, REJECTED, EXPIRED, SUPERSEDED.
+    Once written, records are strictly immutable.
+    """
+    document = models.ForeignKey(
+        VehiclePurchaseDocument,
+        on_delete=models.CASCADE,
+        related_name='review_events',
+    )
+    order = models.ForeignKey(
+        VehicleOrder,
+        on_delete=models.CASCADE,
+        related_name='document_review_events',
+    )
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='vehicle_doc_review_actions',
+    )
+    event_type = models.CharField(
+        max_length=50,
+        choices=VehicleDocumentReviewEventTypeChoices.choices,
+        db_index=True,
+    )
+    previous_status = models.CharField(max_length=30, blank=True, default='')
+    new_status = models.CharField(max_length=30)
+    notes = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Vehicle Document Review Event'
+        verbose_name_plural = 'Vehicle Document Review Events'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['order', 'event_type']),
+            models.Index(fields=['document', 'created_at']),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ImmutableRecordError("VehicleDocumentReviewEvent records are strictly immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecordError("VehicleDocumentReviewEvent records are strictly immutable and cannot be deleted.")
+
+    def __str__(self):
+        return f"DocReview {self.event_type} on Doc {self.document_id} by {self.actor_id if self.actor else 'system'}"
+
 
 
 

@@ -59,6 +59,12 @@ from apps.marketplace.models import (
     VehiclePaymentVerificationEvent,
     VehiclePaymentVerificationEventTypeChoices,
     VehicleListingAvailabilityChoices,
+    VehiclePurchaseDocument,
+    VehicleDocumentReviewEvent,
+    VehicleDocumentCategoryChoices,
+    VehicleDocumentOwnerRoleChoices,
+    VehicleDocumentStatusChoices,
+    VehicleDocumentReviewEventTypeChoices,
 )
 from apps.catalogue.models import Part
 from apps.marketplace.services import change_price, _UNSET, get_seller_public_info
@@ -1979,6 +1985,15 @@ class ReturnRequestReviewPayloadSerializer(serializers.Serializer):
     seller_notes = serializers.CharField(required=False, allow_blank=True, default='')
     rejection_reason = serializers.CharField(required=False, allow_blank=True, default='')
 
+    def validate(self, attrs):
+        action = attrs.get('action')
+        rejection_reason = (attrs.get('rejection_reason') or '').strip()
+        if action == 'REJECT' and not rejection_reason:
+            raise serializers.ValidationError({
+                "rejection_reason": "A documented rejection reason is mandatory when rejecting a return request."
+            })
+        return attrs
+
 
 class RefundSerializer(serializers.ModelSerializer):
     order_id = serializers.UUIDField(source='order.id', read_only=True)
@@ -1987,6 +2002,8 @@ class RefundSerializer(serializers.ModelSerializer):
     return_request_number = serializers.CharField(source='return_request.request_number', read_only=True, default='')
     dispute_id = serializers.UUIDField(source='dispute.id', read_only=True, allow_null=True)
     dispute_number = serializers.CharField(source='dispute.dispute_number', read_only=True, default='')
+    refund_method_display = serializers.CharField(source='get_refund_method_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
     created_by_email = serializers.CharField(source='created_by.email', read_only=True, allow_null=True)
     approved_by_email = serializers.CharField(source='approved_by.email', read_only=True, allow_null=True)
 
@@ -2004,7 +2021,9 @@ class RefundSerializer(serializers.ModelSerializer):
             'amount',
             'currency',
             'status',
+            'status_display',
             'refund_method',
+            'refund_method_display',
             'gateway_provider',
             'gateway_refund_id',
             'reason',
@@ -2031,6 +2050,27 @@ class RefundCreatePayloadSerializer(serializers.Serializer):
     dispute_id = serializers.UUIDField(required=False, allow_null=True, default=None)
     notes = serializers.CharField(required=False, allow_blank=True, default='')
     auto_process = serializers.BooleanField(required=False, default=False)
+
+
+class SellerRecordRefundPayloadSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    transaction_reference = serializers.CharField(required=True, min_length=3, max_length=255)
+    reason = serializers.CharField(required=False, allow_blank=True, default='')
+    refund_method = serializers.ChoiceField(
+        choices=RefundMethodChoices.choices,
+        required=False,
+        default=RefundMethodChoices.BANK_TRANSFER,
+    )
+    evidence_url = serializers.CharField(required=False, allow_blank=True, default='')
+    return_request_id = serializers.UUIDField(required=False, allow_null=True, default=None)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class SellerRequestPlatformRefundPayloadSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    reason = serializers.CharField(required=True, min_length=3)
+    return_request_id = serializers.UUIDField(required=False, allow_null=True, default=None)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
 
 
 class DisputeEventSerializer(serializers.ModelSerializer):
@@ -2514,6 +2554,7 @@ class VehicleOrderSerializer(serializers.ModelSerializer):
     listing_image_url = serializers.CharField(source='listing.primary_image_url', read_only=True)
     is_payment_overdue = serializers.SerializerMethodField()
     latest_payment_report = serializers.SerializerMethodField()
+    document_readiness = serializers.SerializerMethodField()
 
     class Meta:
         model = VehicleOrder
@@ -2545,6 +2586,7 @@ class VehicleOrderSerializer(serializers.ModelSerializer):
             'confirmed_by',
             'confirmed_by_name',
             'latest_payment_report',
+            'document_readiness',
             'listing_snapshot',
             'cancellation_reason',
             'cancelled_at',
@@ -2561,6 +2603,101 @@ class VehicleOrderSerializer(serializers.ModelSerializer):
         if latest:
             return VehiclePaymentReportSerializer(latest).data
         return None
+
+    def get_document_readiness(self, obj):
+        from apps.marketplace.vehicle_documents_service import get_vehicle_order_document_readiness
+        try:
+            return get_vehicle_order_document_readiness(obj)
+        except Exception:
+            return None
+
+
+class VehicleDocumentReviewEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.CharField(source='actor.full_name', read_only=True, allow_null=True)
+    actor_email = serializers.CharField(source='actor.email', read_only=True, allow_null=True)
+
+    class Meta:
+        model = VehicleDocumentReviewEvent
+        fields = [
+            'id',
+            'event_type',
+            'previous_status',
+            'new_status',
+            'actor',
+            'actor_name',
+            'actor_email',
+            'notes',
+            'metadata',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class VehiclePurchaseDocumentSerializer(serializers.ModelSerializer):
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    submitted_by_name = serializers.CharField(source='submitted_by.full_name', read_only=True)
+    submitted_by_email = serializers.CharField(source='submitted_by.email', read_only=True)
+    verified_by_name = serializers.CharField(source='verified_by.full_name', read_only=True, allow_null=True)
+    download_url = serializers.SerializerMethodField()
+    review_events = VehicleDocumentReviewEventSerializer(many=True, read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = VehiclePurchaseDocument
+        fields = [
+            'id',
+            'order',
+            'category',
+            'category_display',
+            'document_owner_role',
+            'version_number',
+            'submitted_by',
+            'submitted_by_name',
+            'submitted_by_email',
+            'original_filename',
+            'mime_type',
+            'file_size',
+            'document_expiry_date',
+            'status',
+            'verified_by',
+            'verified_by_name',
+            'verified_at',
+            'rejection_reason',
+            'rejection_notes',
+            'is_latest',
+            'is_expired',
+            'download_url',
+            'review_events',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_download_url(self, obj) -> str:
+        return f"/api/v1/marketplace/vehicle-orders/{obj.order_id}/documents/{obj.id}/download/"
+
+
+class VehiclePurchaseDocumentUploadSerializer(serializers.Serializer):
+    category = serializers.ChoiceField(choices=VehicleDocumentCategoryChoices.choices)
+    file = serializers.FileField(required=True)
+    document_expiry_date = serializers.DateField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class VehiclePurchaseDocumentVerificationSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['APPROVE', 'REJECT'])
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, default='')
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        if attrs.get('action') == 'REJECT':
+            reason = attrs.get('rejection_reason', '').strip()
+            if not reason:
+                raise serializers.ValidationError({
+                    "rejection_reason": "A documented rejection reason is required when rejecting a document."
+                })
+        return attrs
+
 
 
 

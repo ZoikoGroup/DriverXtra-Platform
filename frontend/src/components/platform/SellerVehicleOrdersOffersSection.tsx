@@ -27,6 +27,7 @@ import {
   Calendar,
   User,
 } from "lucide-react";
+import VehicleOrderDocumentsModal from "./VehicleOrderDocumentsModal";
 
 interface SellerVehicleOrdersOffersSectionProps {
   onNavigateToListings?: () => void;
@@ -56,6 +57,7 @@ export default function SellerVehicleOrdersOffersSection({
   // Detail Modals
   const [selectedOffer, setSelectedOffer] = useState<VehiclePurchaseOffer | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<VehicleOrder | null>(null);
+  const [documentsModalOrder, setDocumentsModalOrder] = useState<VehicleOrder | null>(null);
 
   // Payment Verification Modals (Phase 2)
   const [confirmModalOrder, setConfirmModalOrder] = useState<VehicleOrder | null>(null);
@@ -296,6 +298,55 @@ export default function SellerVehicleOrdersOffersSection({
     }
   };
 
+  const getPaymentStatusBadge = (order: VehicleOrder) => {
+    if (order.payment_confirmed_at || order.status === "PAYMENT_CONFIRMED" || order.status === "READY_FOR_HANDOVER" || order.status === "COMPLETED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Payment: Confirmed
+        </span>
+      );
+    }
+    if (order.status === "PAYMENT_SUBMITTED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+          <Clock className="w-3.5 h-3.5 text-blue-600" /> Payment: Reported
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200">
+        <Clock className="w-3.5 h-3.5 text-amber-600" /> Payment: Awaiting Transfer
+      </span>
+    );
+  };
+
+  const getDocumentStatusBadge = (order: VehicleOrder) => {
+    const readiness = order.document_readiness;
+    const allVerified = Boolean(readiness?.all_verified || readiness?.all_required_verified);
+    const verified = readiness?.verified_count ?? readiness?.verified_required_count ?? 0;
+    const required = readiness?.required_count ?? readiness?.total_required ?? 0;
+
+    if (allVerified) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Docs: All Verified
+        </span>
+      );
+    }
+    if (required > 0) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-purple-100 text-purple-800 border border-purple-200">
+          <FileText className="w-3.5 h-3.5 text-purple-600" /> Docs: {verified}/{required} Verified
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200">
+        <FileText className="w-3.5 h-3.5 text-slate-500" /> Docs: Pending
+      </span>
+    );
+  };
+
   const getOrderStatusBadge = (status: string) => {
     switch (status) {
       case "PAYMENT_PENDING":
@@ -314,6 +365,18 @@ export default function SellerVehicleOrdersOffersSection({
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
             <CheckCircle2 className="w-3.5 h-3.5" /> Payment Confirmed
+          </span>
+        );
+      case "DOCUMENTS_PENDING":
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-purple-100 text-purple-800 border border-purple-200">
+            <FileText className="w-3.5 h-3.5" /> Docs Pending
+          </span>
+        );
+      case "READY_FOR_HANDOVER":
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-cyan-100 text-cyan-800 border border-cyan-200">
+            <CheckCircle2 className="w-3.5 h-3.5" /> Ready for Handover
           </span>
         );
       case "COMPLETED":
@@ -692,6 +755,8 @@ export default function SellerVehicleOrdersOffersSection({
               { id: "PAYMENT_PENDING", label: "Awaiting Payment", count: orders.filter((o) => o.status === "PAYMENT_PENDING").length },
               { id: "PAYMENT_SUBMITTED", label: "Payment Submitted", count: orders.filter((o) => o.status === "PAYMENT_SUBMITTED").length },
               { id: "PAYMENT_CONFIRMED", label: "Confirmed" },
+              { id: "DOCUMENTS_PENDING", label: "Docs Pending", count: orders.filter((o) => o.status === "DOCUMENTS_PENDING").length },
+              { id: "READY_FOR_HANDOVER", label: "Ready for Handover", count: orders.filter((o) => o.status === "READY_FOR_HANDOVER").length },
               { id: "COMPLETED", label: "Completed" },
               { id: "CANCELLED", label: "Cancelled" },
             ].map((tab) => (
@@ -766,7 +831,13 @@ export default function SellerVehicleOrdersOffersSection({
                             <span className="text-xs font-mono font-bold text-slate-900">
                               {order.order_number}
                             </span>
-                            {getOrderStatusBadge(order.status)}
+                            {getPaymentStatusBadge(order)}
+                            {getDocumentStatusBadge(order)}
+                            {order.status === "READY_FOR_HANDOVER" && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-cyan-100 text-cyan-900 border border-cyan-300">
+                                <CheckCircle2 className="w-3.5 h-3.5" /> Ready for Handover
+                              </span>
+                            )}
                           </div>
 
                           <h3 className="text-base font-black text-slate-900 mt-1">
@@ -798,7 +869,14 @@ export default function SellerVehicleOrdersOffersSection({
                           </span>
                         </div>
 
-                        <div className="flex flex-col gap-2">
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <button
+                            onClick={() => setDocumentsModalOrder(order)}
+                            className="px-3.5 py-2 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-2xs"
+                          >
+                            <FileText className="w-3.5 h-3.5 text-slate-500" />
+                            Compliance & Docs
+                          </button>
                           <button
                             onClick={() => setSelectedOrder(order)}
                             className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 transition-colors"
@@ -973,6 +1051,27 @@ export default function SellerVehicleOrdersOffersSection({
                             Verified by: {order.confirmed_by_name}
                           </span>
                         )}
+                      </div>
+                    )}
+
+                    {/* Ready for Handover Banner (Phase 3) */}
+                    {order.status === "READY_FOR_HANDOVER" && (
+                      <div className="mt-4 p-4 rounded-xl border border-cyan-200 bg-cyan-50 text-cyan-950 flex flex-wrap items-center justify-between gap-3 text-xs">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="w-5 h-5 text-cyan-600 flex-shrink-0" />
+                          <div>
+                            <strong className="block text-cyan-900 font-bold">Vehicle Ready for Handover!</strong>
+                            <span className="text-[11px] text-cyan-800">
+                              Direct offline payment confirmed and all required compliance & buyer documents verified. You may proceed with vehicle release.
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => setDocumentsModalOrder(order)}
+                          className="px-3.5 py-1.5 rounded-xl bg-cyan-700 hover:bg-cyan-800 text-white font-black text-xs shadow-xs"
+                        >
+                          Inspect Documents
+                        </button>
                       </div>
                     )}
                   </div>
@@ -1498,6 +1597,19 @@ export default function SellerVehicleOrdersOffersSection({
             </form>
           </div>
         </div>
+      )}
+
+      {/* VEHICLE ORDER DOCUMENTS MODAL (PHASE 3) */}
+      {documentsModalOrder && (
+        <VehicleOrderDocumentsModal
+          order={documentsModalOrder}
+          userRole="SELLER"
+          isOpen={Boolean(documentsModalOrder)}
+          onClose={() => setDocumentsModalOrder(null)}
+          onOrderUpdated={() => {
+            void loadData();
+          }}
+        />
       )}
     </div>
   );

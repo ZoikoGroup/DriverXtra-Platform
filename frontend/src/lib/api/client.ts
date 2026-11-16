@@ -373,6 +373,354 @@ export async function apiRequestBlob(endpoint: string, options: RequestOptions =
   return response.blob();
 }
 
+export interface AdminPaginatedResponse<T> {
+  count: number;
+  total_pages: number;
+  current_page: number;
+  page_size: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
+export interface AdminOverviewMetrics {
+  total_buyers: number;
+  total_sellers: number;
+  total_workshops: number;
+  total_staff: number;
+  pending_seller_applications: number;
+  pending_workshop_applications: number;
+  approved_sellers: number;
+  approved_workshops: number;
+  suspended_accounts: number;
+  pending_vehicle_listings: number;
+  pending_part_listings: number;
+  total_orders: number;
+  total_part_orders: number;
+  total_vehicle_orders: number;
+  pending_disputes: number;
+}
+
+export interface AdminPendingTask {
+  id: string;
+  type: string;
+  label: string;
+  count: number;
+  target_tab: string;
+  severity: "high" | "medium" | "neutral";
+}
+
+export interface AdminRecentActivityItem {
+  id: string;
+  type: string;
+  description: string;
+  timestamp: string;
+}
+
+export interface AdminOverviewResponse {
+  metrics: AdminOverviewMetrics;
+  pending_tasks: AdminPendingTask[];
+  recent_activity: AdminRecentActivityItem[];
+}
+
+export interface AdminSellerItem {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  phone_number: string;
+  status: string;
+  is_active: boolean;
+  is_email_verified: boolean;
+  date_joined: string | null;
+  created_at: string | null;
+  business_name: string;
+  business_type: string;
+  company_registration_number: string;
+  tax_id: string;
+  verification_status: string;
+  application_id: string | null;
+  organisation: {
+    id: string;
+    name: string;
+    slug: string;
+    type: string;
+    country: string;
+  } | null;
+  metrics: {
+    vehicle_listings_count: number;
+    part_listings_count: number;
+    orders_count: number;
+  };
+}
+
+export interface AdminSellerDetailResponse {
+  seller: {
+    id: string;
+    email: string;
+    first_name: string;
+    last_name: string;
+    full_name: string;
+    phone_number: string;
+    status: string;
+    is_active: boolean;
+    is_email_verified: boolean;
+    date_joined: string | null;
+    created_at: string | null;
+    roles: string[];
+  };
+  application: {
+    id: string;
+    business_name: string;
+    business_type: string;
+    requested_roles: string[];
+    company_registration_number: string;
+    tax_id: string;
+    contact_email: string;
+    contact_phone: string;
+    address_line1: string;
+    address_line2: string;
+    city: string;
+    postal_code: string;
+    country: string;
+    jurisdiction: string;
+    website_url: string;
+    description: string;
+    status: string;
+    submitted_at: string | null;
+    reviewed_at: string | null;
+    rejection_reason?: string;
+  } | null;
+  organisation: {
+    id: string;
+    name: string;
+    slug: string;
+    type: string;
+    country: string;
+    jurisdiction: string;
+  } | null;
+  recent_vehicles: {
+    id: string;
+    title: string;
+    price: string;
+    status: string;
+    year: number;
+    created_at: string | null;
+  }[];
+  recent_parts: {
+    id: string;
+    title: string;
+    part_number: string;
+    price: string;
+    stock_quantity: number;
+    status: string;
+    created_at: string | null;
+  }[];
+  recent_orders: {
+    id: string;
+    order_number: string;
+    total_amount: string;
+    currency: string;
+    status: string;
+    created_at: string | null;
+  }[];
+  metrics: {
+    vehicle_listings_count: number;
+    part_listings_count: number;
+    orders_count: number;
+  };
+}
+
+export interface AdminWorkshopItem {
+  id: string;
+  organisation_id: string | null;
+  business_name: string;
+  slug: string;
+  description: string;
+  contact_email: string;
+  contact_phone: string;
+  city: string;
+  state_province: string;
+  postal_code: string;
+  country: string;
+  bay_capacity: number;
+  is_accepting_bookings: boolean;
+  is_verified: boolean;
+  is_tax_registered: boolean;
+  can_collect_tax: boolean;
+  default_tax_rate_percent: string;
+  created_at: string | null;
+  owner: {
+    id: string;
+    email: string;
+    full_name: string;
+    status: string;
+  } | null;
+  metrics: {
+    services_count: number;
+    bookings_count: number;
+    work_orders_count: number;
+  };
+}
+
+export interface AdminWorkshopDetailResponse {
+  workshop: {
+    id: string;
+    business_name: string;
+    slug: string;
+    description: string;
+    contact_email: string;
+    contact_phone: string;
+    address_line1: string;
+    address_line2: string;
+    city: string;
+    state_province: string;
+    postal_code: string;
+    country: string;
+    bay_capacity: number;
+    is_accepting_bookings: boolean;
+    is_verified: boolean;
+    is_tax_registered: boolean;
+    can_collect_tax: boolean;
+    default_tax_rate_percent: string;
+    created_at: string | null;
+  };
+  organisation: {
+    id: string;
+    name: string;
+    slug: string;
+    country: string;
+    jurisdiction: string;
+  } | null;
+  owner: {
+    id: string;
+    email: string;
+    full_name: string;
+    status: string;
+  } | null;
+  services: {
+    id: string;
+    name: string;
+    price: string;
+    estimated_duration_minutes: number;
+    is_active: boolean;
+  }[];
+  recent_bookings: {
+    id: string;
+    booking_number: string;
+    customer_name: string;
+    customer_email: string;
+    status: string;
+    scheduled_date: string | null;
+    created_at: string | null;
+  }[];
+  recent_work_orders: {
+    id: string;
+    work_order_number: string;
+    status: string;
+    total_amount: string;
+    created_at: string | null;
+  }[];
+  metrics: {
+    services_count: number;
+    bookings_count: number;
+    work_orders_count: number;
+  };
+}
+
+export interface AdminBuyerItem {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  phone_number: string;
+  status: string;
+  is_active: boolean;
+  is_email_verified: boolean;
+  date_joined: string | null;
+  created_at: string | null;
+  metrics: {
+    orders_count: number;
+    disputes_count: number;
+  };
+}
+
+export interface AdminBuyerDetailResponse {
+  buyer: {
+    id: string;
+    email: string;
+    first_name: string;
+    last_name: string;
+    full_name: string;
+    phone_number: string;
+    status: string;
+    is_active: boolean;
+    is_email_verified: boolean;
+    date_joined: string | null;
+    created_at: string | null;
+    roles: string[];
+  };
+  recent_orders: {
+    id: string;
+    order_number: string;
+    total_amount: string;
+    currency: string;
+    status: string;
+    created_at: string | null;
+  }[];
+  recent_disputes: {
+    id: string;
+    dispute_number: string;
+    category: string;
+    status: string;
+    created_at: string | null;
+  }[];
+  metrics: {
+    orders_count: number;
+    disputes_count: number;
+  };
+}
+
+export interface AdminOrderItem {
+  id: string;
+  order_number: string;
+  order_type: "SPARE_PART" | "VEHICLE" | string;
+  order_type_display: string;
+  buyer: {
+    id: string | null;
+    email: string;
+    full_name: string;
+    phone_number?: string;
+  };
+  seller?: {
+    id?: string | null;
+    email: string;
+    full_name: string;
+  };
+  total_amount: string;
+  currency: string;
+  status: string;
+  fulfilment_status?: string;
+  payment_status: string;
+  payment_method?: string;
+  item_count: number;
+  items_preview: {
+    id: string;
+    title: string;
+    brand?: string;
+    part_number: string;
+    model?: string;
+    seller_email: string;
+    seller_name?: string;
+    quantity: number;
+    unit_price: string;
+    total_price: string;
+  }[];
+  created_at: string | null;
+}
+
 export interface PaginatedResponse<T> {
   count?: number;
   next?: string | null;
@@ -846,6 +1194,177 @@ export const api = {
         method: "POST",
         requiresAuth: true,
       });
+    },
+
+    overview: {
+      async getMetrics(): Promise<AdminOverviewResponse> {
+        return apiRequest<AdminOverviewResponse>("/admin/overview/metrics/", {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+    },
+
+    sellers: {
+      async list(params?: {
+        page?: number;
+        page_size?: number;
+        q?: string;
+        verification_status?: string;
+        status?: string;
+        ordering?: string;
+      }): Promise<AdminPaginatedResponse<AdminSellerItem>> {
+        const query = new URLSearchParams();
+        if (params?.page) query.set("page", String(params.page));
+        if (params?.page_size) query.set("page_size", String(params.page_size));
+        if (params?.q) query.set("q", params.q);
+        if (params?.verification_status && params.verification_status !== "ALL") query.set("verification_status", params.verification_status);
+        if (params?.status && params.status !== "ALL") query.set("status", params.status);
+        if (params?.ordering) query.set("ordering", params.ordering);
+        const qs = query.toString() ? `?${query.toString()}` : "";
+        return apiRequest<AdminPaginatedResponse<AdminSellerItem>>(`/admin/sellers/${qs}`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+
+      async get(id: string): Promise<AdminSellerDetailResponse> {
+        return apiRequest<AdminSellerDetailResponse>(`/admin/sellers/${id}/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+
+      async updateStatus(id: string, payload: { action: "SUSPEND" | "REACTIVATE"; reason?: string }): Promise<{
+        status: string;
+        message: string;
+        account_status: string;
+        is_active: boolean;
+      }> {
+        return apiRequest(`/admin/sellers/${id}/status/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        });
+      },
+    },
+
+    workshops: {
+      async list(params?: {
+        page?: number;
+        page_size?: number;
+        q?: string;
+        is_verified?: string | boolean;
+        is_accepting_bookings?: string | boolean;
+        ordering?: string;
+      }): Promise<AdminPaginatedResponse<AdminWorkshopItem>> {
+        const query = new URLSearchParams();
+        if (params?.page) query.set("page", String(params.page));
+        if (params?.page_size) query.set("page_size", String(params.page_size));
+        if (params?.q) query.set("q", params.q);
+        if (params?.is_verified !== undefined && params.is_verified !== "" && params.is_verified !== "ALL") {
+          query.set("is_verified", String(params.is_verified));
+        }
+        if (params?.is_accepting_bookings !== undefined && params.is_accepting_bookings !== "" && params.is_accepting_bookings !== "ALL") {
+          query.set("is_accepting_bookings", String(params.is_accepting_bookings));
+        }
+        if (params?.ordering) query.set("ordering", params.ordering);
+        const qs = query.toString() ? `?${query.toString()}` : "";
+        return apiRequest<AdminPaginatedResponse<AdminWorkshopItem>>(`/admin/workshops/${qs}`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+
+      async get(id: string): Promise<AdminWorkshopDetailResponse> {
+        return apiRequest<AdminWorkshopDetailResponse>(`/admin/workshops/${id}/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+
+      async updateStatus(id: string, payload: { action: "VERIFY" | "UNVERIFY" | "SUSPEND" | "REACTIVATE"; reason?: string }): Promise<{
+        status: string;
+        message: string;
+        is_verified: boolean;
+        is_accepting_bookings: boolean;
+      }> {
+        return apiRequest(`/admin/workshops/${id}/status/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        });
+      },
+    },
+
+    buyers: {
+      async list(params?: {
+        page?: number;
+        page_size?: number;
+        q?: string;
+        status?: string;
+        is_email_verified?: string | boolean;
+        ordering?: string;
+      }): Promise<AdminPaginatedResponse<AdminBuyerItem>> {
+        const query = new URLSearchParams();
+        if (params?.page) query.set("page", String(params.page));
+        if (params?.page_size) query.set("page_size", String(params.page_size));
+        if (params?.q) query.set("q", params.q);
+        if (params?.status && params.status !== "ALL") query.set("status", params.status);
+        if (params?.is_email_verified !== undefined && params.is_email_verified !== "" && params.is_email_verified !== "ALL") {
+          query.set("is_email_verified", String(params.is_email_verified));
+        }
+        if (params?.ordering) query.set("ordering", params.ordering);
+        const qs = query.toString() ? `?${query.toString()}` : "";
+        return apiRequest<AdminPaginatedResponse<AdminBuyerItem>>(`/admin/buyers/${qs}`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+
+      async get(id: string): Promise<AdminBuyerDetailResponse> {
+        return apiRequest<AdminBuyerDetailResponse>(`/admin/buyers/${id}/`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
+
+      async updateStatus(id: string, payload: { action: "SUSPEND" | "REACTIVATE"; reason?: string }): Promise<{
+        status: string;
+        message: string;
+        account_status: string;
+        is_active: boolean;
+      }> {
+        return apiRequest(`/admin/buyers/${id}/status/`, {
+          method: "POST",
+          requiresAuth: true,
+          body: JSON.stringify(payload),
+        });
+      },
+    },
+
+    orders: {
+      async list(params?: {
+        page?: number;
+        page_size?: number;
+        q?: string;
+        status?: string;
+        order_type?: string;
+        ordering?: string;
+      }): Promise<AdminPaginatedResponse<AdminOrderItem>> {
+        const query = new URLSearchParams();
+        if (params?.page) query.set("page", String(params.page));
+        if (params?.page_size) query.set("page_size", String(params.page_size));
+        if (params?.q) query.set("q", params.q);
+        if (params?.status && params.status !== "ALL") query.set("status", params.status);
+        if (params?.order_type && params.order_type !== "ALL") query.set("order_type", params.order_type);
+        if (params?.ordering) query.set("ordering", params.ordering);
+        const qs = query.toString() ? `?${query.toString()}` : "";
+        return apiRequest<AdminPaginatedResponse<AdminOrderItem>>(`/admin/orders/${qs}`, {
+          method: "GET",
+          requiresAuth: true,
+        });
+      },
     },
   },
 
@@ -1747,6 +2266,53 @@ export const api = {
       );
     },
 
+    // Vehicle Order Documents (Phase 3)
+    async getVehicleOrderDocuments(orderId: string): Promise<VehicleOrderDocumentsResponse> {
+      return apiRequest<VehicleOrderDocumentsResponse>(
+        `/marketplace/vehicle-orders/${orderId}/documents/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async uploadVehicleOrderDocument(
+      orderId: string,
+      formData: FormData
+    ): Promise<VehiclePurchaseDocument> {
+      return apiRequest<VehiclePurchaseDocument>(
+        `/marketplace/vehicle-orders/${orderId}/documents/upload/`,
+        {
+          method: "POST",
+          body: formData,
+          requiresAuth: true,
+        }
+      );
+    },
+
+    async verifyVehicleOrderDocument(
+      orderId: string,
+      docId: string,
+      payload: { action: "APPROVE" | "REJECT"; rejection_reason?: string; notes?: string }
+    ): Promise<VehiclePurchaseDocument> {
+      return apiRequest<VehiclePurchaseDocument>(
+        `/marketplace/vehicle-orders/${orderId}/documents/${docId}/verify/`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+          requiresAuth: true,
+        }
+      );
+    },
+
+    async downloadVehicleOrderDocument(
+      orderId: string,
+      docId: string
+    ): Promise<Blob> {
+      return apiRequestBlob(
+        `/marketplace/vehicle-orders/${orderId}/documents/${docId}/download/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
     async listMyParts(status?: string): Promise<MarketplacePartListing[]> {
       const qs = status ? `?status=${encodeURIComponent(status)}` : "";
       const res = await apiRequest<MarketplacePartListing[] | { results: MarketplacePartListing[] }>(
@@ -2535,6 +3101,82 @@ export const api = {
         { method: "GET", requiresAuth: true }
       );
       return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getBuyerRefund(identifier: string): Promise<PlatformRefund> {
+      return apiRequest<PlatformRefund>(
+        `/marketplace/buyer/refunds/${identifier}/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async confirmBuyerRefundReceipt(identifier: string): Promise<{
+      status: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/buyer/refunds/${identifier}/confirm-receipt/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async listSellerRefunds(status?: string): Promise<PlatformRefund[]> {
+      const q = status && status !== "ALL" ? `?status=${encodeURIComponent(status)}` : "";
+      const res = await apiRequest<PlatformRefund[] | { results: PlatformRefund[] }>(
+        `/marketplace/seller/refunds/${q}`,
+        { method: "GET", requiresAuth: true }
+      );
+      return Array.isArray(res) ? res : res.results || [];
+    },
+
+    async getSellerRefund(identifier: string): Promise<PlatformRefund> {
+      return apiRequest<PlatformRefund>(
+        `/marketplace/seller/refunds/${identifier}/`,
+        { method: "GET", requiresAuth: true }
+      );
+    },
+
+    async recordSellerDirectRefund(
+      orderIdentifier: string,
+      payload: RecordSellerRefundPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/seller/orders/${orderIdentifier}/record-refund/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async requestSellerPlatformRefund(
+      orderIdentifier: string,
+      payload: RequestPlatformRefundPayload
+    ): Promise<{
+      status: string;
+      message: string;
+      refund: PlatformRefund;
+    }> {
+      return apiRequest<{
+        status: string;
+        message: string;
+        refund: PlatformRefund;
+      }>(`/marketplace/seller/orders/${orderIdentifier}/request-platform-refund/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
     },
 
     async listAdminDisputes(status?: string, category?: string): Promise<PlatformDispute[]> {
@@ -5056,6 +5698,7 @@ export interface VehicleOrder {
   confirmed_by?: string | null;
   confirmed_by_name?: string | null;
   latest_payment_report?: VehiclePaymentReport | null;
+  document_readiness?: VehicleDocumentReadiness | null;
   listing_snapshot: Record<string, unknown>;
   cancellation_reason: string;
   cancelled_at?: string | null;
@@ -5110,6 +5753,122 @@ export interface VehiclePaymentReport {
   created_at: string;
   updated_at: string;
   verification_events?: VehiclePaymentVerificationEvent[];
+}
+
+// ==========================================
+// Vehicle Purchase Documents (Phase 3)
+// ==========================================
+
+export type VehicleDocumentCategory =
+  | "V5C_REGISTRATION"
+  | "ROADWORTHINESS_MOT"
+  | "SELLER_AUTHORITY"
+  | "PURCHASE_INVOICE"
+  | "INSURANCE_CERTIFICATE"
+  | "BUYER_IDENTITY"
+  | "BUYER_ADDRESS_PROOF"
+  | "BUYER_FINANCE_AUTHORISATION";
+
+export type VehicleDocumentOwnerRole = "DEALER" | "BUYER";
+
+export type VehicleDocumentStatus =
+  | "PENDING_REVIEW"
+  | "VERIFIED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "SUPERSEDED";
+
+export interface VehicleDocumentReviewEvent {
+  id: string;
+  document: string;
+  order: string;
+  reviewer?: string | null;
+  reviewer_name?: string | null;
+  reviewer_email?: string | null;
+  event_type: "SUBMITTED" | "APPROVED" | "REJECTED" | "SUPERSEDED" | "EXPIRED";
+  rejection_reason: string;
+  notes: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface VehiclePurchaseDocument {
+  id: string;
+  order: string;
+  order_number: string;
+  category: VehicleDocumentCategory;
+  category_display: string;
+  owner_role: VehicleDocumentOwnerRole;
+  submitted_by: string;
+  submitted_by_name: string;
+  version_number: number;
+  original_filename: string;
+  file_size_bytes: number;
+  mime_type: string;
+  status: VehicleDocumentStatus;
+  status_display: string;
+  expiry_date?: string | null;
+  notes: string;
+  is_current: boolean;
+  is_expired: boolean;
+  verified_by?: string | null;
+  verified_by_name?: string | null;
+  verified_at?: string | null;
+  rejection_reason: string;
+  download_url: string;
+  created_at: string;
+  updated_at: string;
+  review_events?: VehicleDocumentReviewEvent[];
+}
+
+export interface DocumentRequirementDetail {
+  category: VehicleDocumentCategory;
+  owner_role: VehicleDocumentOwnerRole;
+  label?: string;
+  name?: string;
+  required?: boolean;
+  is_required?: boolean;
+  notes?: string;
+  description?: string;
+  accepted_alternatives?: string[];
+  current_status?: VehicleDocumentStatus | "MISSING" | string;
+  status?: string;
+  current_document_id?: string | null;
+  latest_version?: number | null;
+  is_verified?: boolean;
+  original_filename?: string | null;
+  rejection_reason?: string | null;
+  download_url?: string | null;
+  expiry_date?: string | null;
+  requires_expiry_date?: boolean;
+  previous_versions_count?: number;
+  latest_document?: VehiclePurchaseDocument | null;
+}
+
+export interface VehicleDocumentReadiness {
+  required_count?: number;
+  total_required?: number;
+  verified_count?: number;
+  verified_required_count?: number;
+  all_verified?: boolean;
+  all_required_verified?: boolean;
+  pending_count?: number;
+  rejected_count?: number;
+  expired_count?: number;
+  has_payment_confirmed?: boolean;
+  can_transition_to_handover?: boolean;
+  market?: string;
+  requirements?: DocumentRequirementDetail[];
+  summary?: Record<string, number>;
+  by_category?: Record<string, DocumentRequirementDetail>;
+}
+
+export interface VehicleOrderDocumentsResponse {
+  order_id: string;
+  order_number: string;
+  order_status: string;
+  readiness: VehicleDocumentReadiness;
+  documents: VehiclePurchaseDocument[];
 }
 
 // ==========================================
@@ -5243,16 +6002,21 @@ export interface OrderRefundSummary {
   currency: string;
   quoted_price?: string;
   total_amount: string | number;
-  payment_method: "ONLINE" | "COD";
+  order_total?: string | number;
+  payment_method: "ONLINE" | "COD" | string;
   payment_status: string;
   cod_collection_status: string;
   is_cod: boolean;
   is_cod_collected: boolean;
+  is_paid?: boolean;
   paid_amount: string | number;
   active_refunded_amount: string | number;
+  total_refunded?: string | number;
   available_refundable_balance: string | number;
+  available_refundable?: string | number;
   can_refund: boolean;
   reason_ineligible?: string | null;
+  is_vehicle_order?: boolean;
   refunds: PlatformRefund[];
 }
 
@@ -5372,6 +6136,23 @@ export interface CreateAdminRefundPayload {
   refund_method?: RefundMethod;
   notes?: string;
   auto_process?: boolean;
+}
+
+export interface RecordSellerRefundPayload {
+  amount: string | number;
+  transaction_reference: string;
+  reason?: string;
+  refund_method?: RefundMethod;
+  evidence_url?: string;
+  return_request_id?: string;
+  notes?: string;
+}
+
+export interface RequestPlatformRefundPayload {
+  amount: string | number;
+  reason: string;
+  return_request_id?: string;
+  notes?: string;
 }
 
 export interface UpdateDisputeStatusPayload {

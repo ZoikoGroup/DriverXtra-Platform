@@ -361,8 +361,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     def get_active_role(self, obj) -> str:
         request = self.context.get('request')
-        if request and hasattr(request, 'auth') and isinstance(request.auth, dict):
-            return request.auth.get('active_role') or obj.get_default_role()
+        if request and hasattr(request, 'auth') and request.auth:
+            active_role = getattr(request.auth, 'get', None) and request.auth.get('active_role')
+            if active_role:
+                return active_role
         return obj.get_default_role()
 
     def get_staff_role(self, obj):
@@ -476,14 +478,17 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 
 class SwitchRoleSerializer(serializers.Serializer):
-    """Validates requested target platform role for active role switching."""
+    """Validates requested target platform role for active role switching.
+    Enforces that users (including superusers) may only switch to roles they legitimately possess.
+    Superuser grants ADMIN, but does not grant operational roles unless explicitly assigned.
+    """
     role = serializers.CharField(required=True)
 
     def validate_role(self, value):
         normalized = RoleChoices.normalize_role(value)
         user = self.context['request'].user
-        if not (user.is_superuser or user.has_role(normalized)):
-            raise serializers.ValidationError(f"User does not hold the '{normalized}' role.")
+        if not user.has_role(normalized):
+            raise serializers.ValidationError(f"You do not possess the role '{normalized}'.")
         return normalized
 
 

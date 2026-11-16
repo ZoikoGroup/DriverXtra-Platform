@@ -173,15 +173,13 @@ export default function MarketplaceBrowseView({
   }, [initialVehicleId]);
 
   // Reviews and Seller Reputation Loaders (Task 4)
-  const loadPartReviewsAndReputation = useCallback(async (partId: string, sellerId?: string | number) => {
+  const loadPartReviewsAndReputation = useCallback(async (partId: string, sellerId?: string | number | { id: string }) => {
     setPartReviewsLoading(true);
     try {
-      const [reviewsRes, ratingSummaryRes] = await Promise.all([
-        api.marketplace.getPartReviews(partId),
-        api.marketplace.getPartRatingSummary(partId),
-      ]);
+      // Single call to getPartReviews returns both results and aggregated rating summary
+      const reviewsRes = await api.marketplace.getPartReviews(partId);
       setPartReviews(reviewsRes?.results || []);
-      setPartRatingSummary(ratingSummaryRes || null);
+      setPartRatingSummary(reviewsRes?.summary || null);
     } catch (err) {
       console.error("Failed to load part reviews", err);
       setPartReviews([]);
@@ -190,10 +188,17 @@ export default function MarketplaceBrowseView({
       setPartReviewsLoading(false);
     }
 
-    if (sellerId) {
+    const resolvedSellerId =
+      typeof sellerId === "object" && sellerId !== null && "id" in sellerId
+        ? String((sellerId as { id: string }).id)
+        : sellerId
+        ? String(sellerId)
+        : "";
+
+    if (resolvedSellerId) {
       setSellerReputationLoading(true);
       try {
-        const rep = await api.marketplace.getSellerReputation(String(sellerId));
+        const rep = await api.marketplace.getSellerReputation(resolvedSellerId);
         setSellerReputation(rep);
       } catch (err) {
         console.error("Failed to load seller reputation", err);

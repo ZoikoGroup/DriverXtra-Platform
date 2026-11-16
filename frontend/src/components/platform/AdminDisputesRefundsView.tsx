@@ -30,6 +30,26 @@ import {
   AlertCircle,
 } from "lucide-react";
 
+/**
+ * Safely parses any value to a finite number.
+ * Returns null if the value is null, undefined, empty, NaN, or non-finite.
+ */
+function parseFiniteAmount(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+/**
+ * Formats a numeric or string monetary value safely.
+ * Returns '0.00' if non-finite, preventing any 'NaN' or 'undefined' outputs.
+ */
+function formatMonetaryAmount(value: unknown): string {
+  const parsed = parseFiniteAmount(value);
+  if (parsed === null) return "0.00";
+  return parsed.toFixed(2);
+}
+
 export default function AdminDisputesRefundsView() {
   const { user } = useAuth();
   const isPlatformAdmin = Boolean(user?.is_superuser || user?.activeRole === "ADMIN" || user?.rawRoles?.includes("ADMIN"));
@@ -284,14 +304,28 @@ export default function AdminDisputesRefundsView() {
 
   // Inspect order refund summary
   const handleFetchOrderSummary = async () => {
-    if (!orderQuery.trim()) return;
+    const q = orderQuery.trim();
+    if (!q) return;
+
+    if (q.toUpperCase().startsWith("VO-")) {
+      setSummaryError("Vehicle orders (VO-...) use offline direct payment between buyer and dealership and are not eligible for platform payment gateway refunds.");
+      setRefundSummary(null);
+      setRefundAmountInput("");
+      return;
+    }
+
     setFetchingSummary(true);
     setSummaryError(null);
     setRefundSummary(null);
     try {
-      const summary = await api.marketplace.getOrderRefundSummary(orderQuery.trim());
+      const summary = await api.marketplace.getOrderRefundSummary(q);
       setRefundSummary(summary);
-      setRefundAmountInput(String(summary.available_refundable_balance));
+      const avail = parseFiniteAmount(summary.available_refundable_balance);
+      if (summary.can_refund && avail !== null && avail > 0) {
+        setRefundAmountInput(avail.toFixed(2));
+      } else {
+        setRefundAmountInput("");
+      }
       // Preselect refund method based on COD
       if (summary.is_cod) {
         setRefundMethodInput("BANK_TRANSFER");
@@ -300,6 +334,7 @@ export default function AdminDisputesRefundsView() {
       }
     } catch (err: unknown) {
       setSummaryError(err instanceof Error ? err.message : "Order not found or refund summary unavailable.");
+      setRefundAmountInput("");
     } finally {
       setFetchingSummary(false);
     }
@@ -312,16 +347,23 @@ export default function AdminDisputesRefundsView() {
     setIsSubmittingRefund(true);
     setIssueRefundError(null);
 
-    const amt = parseFloat(refundAmountInput);
-    if (isNaN(amt) || amt <= 0) {
-      setIssueRefundError("Please enter a valid positive refund amount.");
+    const maxAvail = parseFiniteAmount(refundSummary.available_refundable_balance);
+    if (!refundSummary.can_refund || maxAvail === null || maxAvail <= 0) {
+      setIssueRefundError(refundSummary.reason_ineligible || "This order is not currently eligible for refund.");
       setIsSubmittingRefund(false);
       return;
     }
 
-    if (amt > Number(refundSummary.available_refundable_balance)) {
+    const amt = parseFiniteAmount(refundAmountInput);
+    if (amt === null || amt <= 0) {
+      setIssueRefundError("Please enter a valid positive numeric refund amount.");
+      setIsSubmittingRefund(false);
+      return;
+    }
+
+    if (amt > maxAvail) {
       setIssueRefundError(
-        `Refund amount (${refundSummary.currency} ${amt}) exceeds available balance (${refundSummary.currency} ${refundSummary.available_refundable_balance}).`
+        `Refund amount (${refundSummary.currency} ${amt.toFixed(2)}) exceeds available balance (${refundSummary.currency} ${maxAvail.toFixed(2)}).`
       );
       setIsSubmittingRefund(false);
       return;
@@ -333,13 +375,13 @@ export default function AdminDisputesRefundsView() {
         reason: refundReasonInput.trim(),
         refund_method: refundMethodInput,
         notes: refundNotesInput.trim(),
-        auto_process: autoProcessInput,
+        auto_process: autoProcessInput && canSettleRefunds,
         dispute_id: linkedDisputeId.trim() || undefined,
       });
 
       if (res.status === "success" && res.refund) {
         setSuccessBanner(
-          `Refund ${res.refund.refund_number} for ${res.refund.currency} ${Number(res.refund.amount).toFixed(2)} created successfully (${res.refund.status}).`
+          `Refund ${res.refund.refund_number} for ${res.refund.currency} ${formatMonetaryAmount(res.refund.amount)} created successfully (${res.refund.status}).`
         );
         // Refresh summary
         handleFetchOrderSummary();
@@ -494,7 +536,7 @@ export default function AdminDisputesRefundsView() {
               }`}
             >
               <RotateCcw className="w-4 h-4 text-indigo-400" />
-              <span>Platform Refunds</span>
+              <span>Refund Oversight</span>
             </button>
 
             <button
@@ -506,7 +548,7 @@ export default function AdminDisputesRefundsView() {
               }`}
             >
               <CreditCard className="w-4 h-4 text-emerald-400" />
-              <span>Issue Refund</span>
+              <span>Dispute & Policy Refund</span>
             </button>
           </>
         )}
@@ -674,13 +716,27 @@ export default function AdminDisputesRefundsView() {
 
                       <button
                         onClick={() => {
-                          setOrderQuery(dispute.order_number);
+                          const orderNum = dispute.order_number;
+                          setOrderQuery(orderNum);
                           setLinkedDisputeId(dispute.dispute_number);
                           setActiveTab("issue_refund");
+                          if (orderNum.toUpperCase().startsWith("VO-")) {
+                            setSummaryError("Vehicle orders (VO-...) use offline direct payment between buyer and dealership and are not eligible for platform payment gateway refunds.");
+                            setRefundSummary(null);
+                            setRefundAmountInput("");
+                            return;
+                          }
                           setTimeout(() => {
-                            api.marketplace.getOrderRefundSummary(dispute.order_number).then((s) => {
+                            api.marketplace.getOrderRefundSummary(orderNum).then((s) => {
                               setRefundSummary(s);
-                              setRefundAmountInput(String(s.available_refundable_balance));
+                              const avail = parseFiniteAmount(s.available_refundable_balance);
+                              if (s.can_refund && avail !== null && avail > 0) {
+                                setRefundAmountInput(avail.toFixed(2));
+                              } else {
+                                setRefundAmountInput("");
+                              }
+                            }).catch((err: unknown) => {
+                              setSummaryError(err instanceof Error ? err.message : "Failed to load refund summary.");
                             });
                           }, 100);
                         }}
@@ -808,7 +864,7 @@ export default function AdminDisputesRefundsView() {
                     <div className="text-right">
                       <span className="text-[10px] uppercase font-bold text-slate-400 block">Refund Amount</span>
                       <span className="font-mono font-black text-lg text-slate-900">
-                        {refund.currency} {Number(refund.amount).toFixed(2)}
+                        {refund.currency} {formatMonetaryAmount(refund.amount)}
                       </span>
                     </div>
 
@@ -885,6 +941,16 @@ export default function AdminDisputesRefundsView() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Order Search & Balance Inspection */}
           <div className="lg:col-span-1 space-y-4">
+            <div className="p-4 bg-blue-50 border border-blue-200 rounded-3xl text-blue-900 text-xs space-y-1">
+              <div className="flex items-center gap-2 font-bold">
+                <AlertCircle className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>Operational Responsibility Policy</span>
+              </div>
+              <p className="text-[11px] leading-relaxed text-blue-800">
+                Ordinary customer returns and cancellations must be reviewed, approved, and settled directly by Sellers in their Seller Dashboard. This administrative refund console is reserved strictly for formal commercial dispute adjudications, fraud remediation, and platform policy enforcement.
+              </p>
+            </div>
+
             <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-xs space-y-4">
               <div className="space-y-1">
                 <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
@@ -932,7 +998,9 @@ export default function AdminDisputesRefundsView() {
                   <div className="space-y-1.5 text-slate-600">
                     <div className="flex justify-between">
                       <span>Order Total:</span>
-                      <strong className="font-mono text-slate-900">{refundSummary.currency} {Number(refundSummary.total_amount).toFixed(2)}</strong>
+                      <strong className="font-mono text-slate-900">
+                        {refundSummary.currency} {formatMonetaryAmount(refundSummary.total_amount)}
+                      </strong>
                     </div>
                     <div className="flex justify-between">
                       <span>Payment Method:</span>
@@ -952,15 +1020,21 @@ export default function AdminDisputesRefundsView() {
                     )}
                     <div className="flex justify-between">
                       <span>Paid Amount:</span>
-                      <strong className="font-mono text-emerald-700">{refundSummary.currency} {Number(refundSummary.paid_amount).toFixed(2)}</strong>
+                      <strong className="font-mono text-emerald-700">
+                        {refundSummary.currency} {formatMonetaryAmount(refundSummary.paid_amount)}
+                      </strong>
                     </div>
                     <div className="flex justify-between">
                       <span>Active Refunds:</span>
-                      <strong className="font-mono text-rose-700">-{refundSummary.currency} {Number(refundSummary.active_refunded_amount).toFixed(2)}</strong>
+                      <strong className="font-mono text-rose-700">
+                        -{refundSummary.currency} {formatMonetaryAmount(refundSummary.active_refunded_amount)}
+                      </strong>
                     </div>
                     <div className="flex justify-between pt-2 border-t border-slate-200 font-bold text-slate-900 text-sm">
                       <span>Available Balance:</span>
-                      <span className="font-mono text-indigo-700">{refundSummary.currency} {Number(refundSummary.available_refundable_balance).toFixed(2)}</span>
+                      <span className="font-mono text-indigo-700">
+                        {refundSummary.currency} {formatMonetaryAmount(refundSummary.available_refundable_balance)}
+                      </span>
                     </div>
                   </div>
 
@@ -1004,7 +1078,11 @@ export default function AdminDisputesRefundsView() {
                       type="number"
                       step="0.01"
                       min="0.01"
-                      max={refundSummary ? Number(refundSummary.available_refundable_balance) : undefined}
+                      max={
+                        refundSummary && refundSummary.can_refund && parseFiniteAmount(refundSummary.available_refundable_balance) !== null
+                          ? parseFiniteAmount(refundSummary.available_refundable_balance)!
+                          : undefined
+                      }
                       value={refundAmountInput}
                       onChange={(e) => setRefundAmountInput(e.target.value)}
                       placeholder="0.00"
@@ -1061,17 +1139,22 @@ export default function AdminDisputesRefundsView() {
                     />
                   </div>
 
-                  <div className="flex items-center pt-6">
-                    <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700">
+                  <div className="flex flex-col justify-center pt-2 sm:pt-6">
+                    <label className={`flex items-center gap-2 text-xs font-semibold ${canSettleRefunds ? "cursor-pointer text-slate-700" : "cursor-not-allowed text-slate-400"}`}>
                       <input
                         type="checkbox"
-                        checked={autoProcessInput}
+                        checked={autoProcessInput && canSettleRefunds}
                         onChange={(e) => setAutoProcessInput(e.target.checked)}
-                        disabled={!refundSummary || !refundSummary.can_refund}
-                        className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500"
+                        disabled={!refundSummary || !refundSummary.can_refund || !canSettleRefunds}
+                        className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 disabled:opacity-50"
                       />
                       <span>Auto-mark as settled (Immediate completion)</span>
                     </label>
+                    {!canSettleRefunds && (
+                      <span className="text-[10px] text-slate-400 mt-0.5">
+                        Requires finance.payout permission to auto-dispatch refunds.
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -1102,7 +1185,7 @@ export default function AdminDisputesRefundsView() {
                   ) : (
                     <>
                       <CreditCard className="w-4 h-4 text-emerald-400" />
-                      <span>Issue Refund ({refundSummary ? `${refundSummary.currency} ${refundAmountInput || "0.00"}` : "Select Order"})</span>
+                      <span>Issue Refund ({refundSummary ? `${refundSummary.currency} ${formatMonetaryAmount(refundAmountInput)}` : "Select Order"})</span>
                     </>
                   )}
                 </button>
@@ -1335,7 +1418,7 @@ export default function AdminDisputesRefundsView() {
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
               <div className="flex justify-between">
                 <span className="text-slate-500">Amount:</span>
-                <strong className="font-mono text-slate-900">{processModalRefund.currency} {Number(processModalRefund.amount).toFixed(2)}</strong>
+                <strong className="font-mono text-slate-900">{processModalRefund.currency} {formatMonetaryAmount(processModalRefund.amount)}</strong>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-500">Method:</span>
@@ -1418,7 +1501,7 @@ export default function AdminDisputesRefundsView() {
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
               <div className="flex justify-between">
                 <span className="text-slate-500">Amount:</span>
-                <strong className="font-mono text-slate-900">{rejectModalRefund.currency} {Number(rejectModalRefund.amount).toFixed(2)}</strong>
+                <strong className="font-mono text-slate-900">{rejectModalRefund.currency} {formatMonetaryAmount(rejectModalRefund.amount)}</strong>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-500">Order:</span>

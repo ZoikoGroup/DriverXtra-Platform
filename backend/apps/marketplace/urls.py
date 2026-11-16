@@ -77,6 +77,12 @@ from apps.marketplace.views import (
     AdminRefundDispatchView,
     AdminRefundReconcileView,
     BuyerRefundListView,
+    BuyerRefundDetailView,
+    BuyerRefundConfirmReceiptView,
+    SellerRefundListView,
+    SellerRefundDetailView,
+    SellerOrderRecordRefundView,
+    SellerOrderRequestPlatformRefundView,
     AdminDisputeListView,
     AdminDisputeStatusUpdateView,
     BuyerOrderReviewEligibilityView,
@@ -119,6 +125,10 @@ from apps.marketplace.views import (
     SellerVehicleOrderConfirmPaymentView,
     SellerVehicleOrderRejectPaymentView,
     SellerVehicleOrderFlagPaymentView,
+    VehicleOrderDocumentListView,
+    VehicleOrderDocumentUploadView,
+    VehicleOrderDocumentVerifyView,
+    VehicleOrderDocumentDownloadView,
 )
 
 urlpatterns = [
@@ -218,6 +228,10 @@ urlpatterns = [
     path('seller/returns/<str:identifier>/complete/', SellerReturnRequestCompleteView.as_view(), name='marketplace-seller-return-complete'),
     path('seller/returns/<str:identifier>/', SellerReturnRequestDetailView.as_view(), name='marketplace-seller-return-detail'),
     path('seller/returns/', SellerReturnRequestListView.as_view(), name='marketplace-seller-returns-list'),
+    path('seller/refunds/', SellerRefundListView.as_view(), name='marketplace-seller-refunds-list'),
+    path('seller/refunds/<str:identifier>/', SellerRefundDetailView.as_view(), name='marketplace-seller-refund-detail'),
+    path('seller/orders/<str:identifier>/record-refund/', SellerOrderRecordRefundView.as_view(), name='marketplace-seller-order-record-refund'),
+    path('seller/orders/<str:identifier>/request-platform-refund/', SellerOrderRequestPlatformRefundView.as_view(), name='marketplace-seller-order-request-platform-refund'),
 
     # 10. Commercial Disputes
     path('buyer/orders/<str:identifier>/disputes/', BuyerOrderDisputeCreateView.as_view(), name='marketplace-buyer-order-dispute-create'),
@@ -237,6 +251,8 @@ urlpatterns = [
     path('admin/refunds/<str:identifier>/dispatch/', AdminRefundDispatchView.as_view(), name='marketplace-admin-refund-dispatch'),
     path('admin/refunds/<str:identifier>/reconcile/', AdminRefundReconcileView.as_view(), name='marketplace-admin-refund-reconcile'),
     path('admin/refunds/', AdminRefundListView.as_view(), name='marketplace-admin-refunds-list'),
+    path('buyer/refunds/<str:identifier>/confirm-receipt/', BuyerRefundConfirmReceiptView.as_view(), name='marketplace-buyer-refund-confirm-receipt'),
+    path('buyer/refunds/<str:identifier>/', BuyerRefundDetailView.as_view(), name='marketplace-buyer-refund-detail'),
     path('buyer/refunds/', BuyerRefundListView.as_view(), name='marketplace-buyer-refunds-list'),
 
     # 12. Reviews, Ratings & Seller Reputation (Phase 5 Task 4)
@@ -288,5 +304,16 @@ urlpatterns = [
     path('seller/vehicle-orders/<uuid:id>/confirm-payment/', SellerVehicleOrderConfirmPaymentView.as_view(), name='marketplace-seller-vehicle-order-confirm-payment'),
     path('seller/vehicle-orders/<uuid:id>/reject-payment/', SellerVehicleOrderRejectPaymentView.as_view(), name='marketplace-seller-vehicle-order-reject-payment'),
     path('seller/vehicle-orders/<uuid:id>/flag-payment/', SellerVehicleOrderFlagPaymentView.as_view(), name='marketplace-seller-vehicle-order-flag-payment'),
+
+    # 13. Vehicle Order Documents & Verification
+    path('vehicle-orders/<uuid:id>/documents/', VehicleOrderDocumentListView.as_view(), name='marketplace-vehicle-order-documents'),
+    path('vehicle-orders/<uuid:id>/documents/upload/', VehicleOrderDocumentUploadView.as_view(), name='marketplace-vehicle-order-document-upload'),
+    path('vehicle-orders/<uuid:id>/documents/<uuid:doc_id>/verify/', VehicleOrderDocumentVerifyView.as_view(), name='marketplace-vehicle-order-document-verify'),
+    path('vehicle-orders/<uuid:id>/documents/<uuid:doc_id>/download/', VehicleOrderDocumentDownloadView.as_view(), name='marketplace-vehicle-order-document-download'),
+    path('buyer/vehicle-orders/<uuid:id>/documents/', VehicleOrderDocumentListView.as_view(), name='marketplace-buyer-vehicle-order-documents'),
+    path('buyer/vehicle-orders/<uuid:id>/documents/upload/', VehicleOrderDocumentUploadView.as_view(), name='marketplace-buyer-vehicle-order-document-upload'),
+    path('seller/vehicle-orders/<uuid:id>/documents/', VehicleOrderDocumentListView.as_view(), name='marketplace-seller-vehicle-order-documents'),
+    path('seller/vehicle-orders/<uuid:id>/documents/upload/', VehicleOrderDocumentUploadView.as_view(), name='marketplace-seller-vehicle-order-document-upload'),
+    path('seller/vehicle-orders/<uuid:id>/documents/<uuid:doc_id>/verify/', VehicleOrderDocumentVerifyView.as_view(), name='marketplace-seller-vehicle-order-document-verify'),
 ]
 

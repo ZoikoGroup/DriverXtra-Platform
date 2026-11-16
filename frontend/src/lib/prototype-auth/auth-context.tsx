@@ -116,7 +116,7 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
     "dispute:create"
   ];
 
-  if (activeBackendRole === "ADMIN" || backendUser.is_superuser) {
+  if (activeBackendRole === "ADMIN") {
     role = "MARKETPLACE_ADMIN";
     roleLabel = "Marketplace Administrator (Operations Lead)";
     tenantType = "INTERNAL_OPS";
@@ -127,7 +127,7 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
       "trust:kyb_review",
       "policy:evaluate"
     ];
-  } else if (activeBackendRole === "STAFF" || backendUser.is_staff) {
+  } else if (activeBackendRole === "STAFF") {
     role = "MARKETPLACE_ADMIN";
     roleLabel = backendUser.staff_role ? `${backendUser.staff_role.name}` : "Operations Staff Member";
     tenantType = "INTERNAL_OPS";

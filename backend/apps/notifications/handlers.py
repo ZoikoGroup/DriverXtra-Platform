@@ -579,6 +579,161 @@ def _vehicle_order_verification_escalated_120h(entry):
     return specs
 
 
+def _vehicle_document_submitted(entry):
+    from apps.marketplace.models import VehiclePurchaseDocument
+    doc = (
+        VehiclePurchaseDocument.objects.select_related('order', 'order__buyer', 'order__seller')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if doc is None:
+        return []
+    order = doc.order
+    cat_display = doc.get_category_display()
+    is_replacement = (entry.metadata or {}).get('is_replacement', False)
+    prefix = "Replacement Document Uploaded" if is_replacement else "Document Submitted"
+
+    if doc.document_owner_role == 'BUYER':
+        return [
+            NotificationSpec(
+                order.seller,
+                f"{prefix}: Order #{order.order_number}",
+                f"Buyer uploaded {cat_display} (v{doc.version_number}) for Order #{order.order_number}. Please review and verify.",
+                _tab_link('seller_orders'),
+            )
+        ]
+    else:
+        return [
+            NotificationSpec(
+                order.buyer,
+                f"Dealer Vehicle Document: Order #{order.order_number}",
+                f"Dealership uploaded compliance document '{cat_display}' (v{doc.version_number}) for your order.",
+                _tab_link('my_orders'),
+            )
+        ]
+
+
+def _vehicle_document_approved(entry):
+    from apps.marketplace.models import VehiclePurchaseDocument
+    doc = (
+        VehiclePurchaseDocument.objects.select_related('order', 'order__buyer', 'order__seller')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if doc is None:
+        return []
+    order = doc.order
+    cat_display = doc.get_category_display()
+    recipient = order.buyer if doc.document_owner_role == 'BUYER' else order.seller
+    link = _tab_link('my_orders') if doc.document_owner_role == 'BUYER' else _tab_link('seller_orders')
+    return [
+        NotificationSpec(
+            recipient,
+            f"Document Approved: Order #{order.order_number}",
+            f"Your document '{cat_display}' (v{doc.version_number}) for Order #{order.order_number} has been verified and approved.",
+            link,
+        )
+    ]
+
+
+def _vehicle_document_rejected(entry):
+    from apps.marketplace.models import VehiclePurchaseDocument
+    doc = (
+        VehiclePurchaseDocument.objects.select_related('order', 'order__buyer', 'order__seller')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if doc is None:
+        return []
+    order = doc.order
+    cat_display = doc.get_category_display()
+    reason = (entry.metadata or {}).get('reason', doc.rejection_reason) or "Document does not meet verification requirements."
+    recipient = order.buyer if doc.document_owner_role == 'BUYER' else order.seller
+    link = _tab_link('my_orders') if doc.document_owner_role == 'BUYER' else _tab_link('seller_orders')
+    return [
+        NotificationSpec(
+            recipient,
+            f"Document Rejected: Order #{order.order_number}",
+            f"Your document '{cat_display}' was rejected: {reason}. Please upload a corrected replacement.",
+            link,
+        )
+    ]
+
+
+def _vehicle_document_expired(entry):
+    from apps.marketplace.models import VehiclePurchaseDocument
+    doc = (
+        VehiclePurchaseDocument.objects.select_related('order', 'order__buyer', 'order__seller')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if doc is None:
+        return []
+    order = doc.order
+    cat_display = doc.get_category_display()
+    recipient = order.seller if doc.document_owner_role == 'DEALER' else order.buyer
+    link = _tab_link('seller_orders') if doc.document_owner_role == 'DEALER' else _tab_link('my_orders')
+    return [
+        NotificationSpec(
+            recipient,
+            f"Document Expired: Order #{order.order_number}",
+            f"The document '{cat_display}' for Order #{order.order_number} has expired. A valid renewal must be uploaded.",
+            link,
+        )
+    ]
+
+
+def _vehicle_document_all_verified(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    return [
+        NotificationSpec(
+            order.buyer,
+            f"All Documents Verified: Order #{order.order_number}",
+            f"All required purchase and compliance documents for Order #{order.order_number} have been successfully verified.",
+            _tab_link('my_orders'),
+        ),
+        NotificationSpec(
+            order.seller,
+            f"All Documents Verified: Order #{order.order_number}",
+            f"All required transaction documents for Order #{order.order_number} are verified.",
+            _tab_link('seller_orders'),
+        ),
+    ]
+
+
+def _vehicle_order_ready_for_handover(entry):
+    from apps.marketplace.models import VehicleOrder
+    order = (
+        VehicleOrder.objects.select_related('buyer', 'seller', 'listing')
+        .filter(pk=entry.resource_id)
+        .first()
+    )
+    if order is None:
+        return []
+    return [
+        NotificationSpec(
+            order.buyer,
+            f"Vehicle Ready for Handover! Order #{order.order_number}",
+            f"Payment and all documentation for '{order.listing.title}' are complete! Your order is now Ready for Handover.",
+            _tab_link('my_orders'),
+        ),
+        NotificationSpec(
+            order.seller,
+            f"Order Ready for Handover: #{order.order_number}",
+            f"Payment and required documents for '{order.listing.title}' are verified. You can now coordinate handover with the buyer.",
+            _tab_link('seller_orders'),
+        ),
+    ]
+
+
+
 def _org_member_added(entry):
     from apps.organisations.models import OrganisationMembership
 
@@ -1383,6 +1538,13 @@ EVENT_RESOLVERS = {
     'marketplace.vehicle_order.verification_warning_48h': _vehicle_order_verification_warning_48h,
     'marketplace.vehicle_order.verification_overdue_72h': _vehicle_order_verification_overdue_72h,
     'marketplace.vehicle_order.verification_escalated_120h': _vehicle_order_verification_escalated_120h,
+    'marketplace.vehicle_document.submitted': _vehicle_document_submitted,
+    'marketplace.vehicle_document.replacement_submitted': _vehicle_document_submitted,
+    'marketplace.vehicle_document.approved': _vehicle_document_approved,
+    'marketplace.vehicle_document.rejected': _vehicle_document_rejected,
+    'marketplace.vehicle_document.expired': _vehicle_document_expired,
+    'marketplace.vehicle_document.all_verified': _vehicle_document_all_verified,
+    'marketplace.vehicle_order.ready_for_handover': _vehicle_order_ready_for_handover,
     'org.member.added': _org_member_added,
 
     # Orders & Payments

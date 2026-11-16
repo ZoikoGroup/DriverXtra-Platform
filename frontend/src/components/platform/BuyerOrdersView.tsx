@@ -7,6 +7,7 @@ import {
   PlatformOrder,
   PlatformOrderItem,
   PlatformReturnRequest,
+  PlatformRefund,
   PlatformDispute,
   OrderReturnEligibilityResponse,
   ReturnReason,
@@ -48,12 +49,14 @@ import {
   Edit3,
   Trash2,
   Car,
+  Info,
 } from "lucide-react";
 import BuyerVehicleOrdersOffersSection from "./BuyerVehicleOrdersOffersSection";
 
 interface BuyerOrdersViewProps {
   onNavigateToBrowse?: () => void;
   initialOrderId?: string;
+  initialSection?: "orders" | "vehicles" | "returns" | "disputes" | "reviews";
 }
 
 type OrderStatusFilter =
@@ -67,11 +70,20 @@ type OrderStatusFilter =
 export default function BuyerOrdersView({
   onNavigateToBrowse,
   initialOrderId,
+  initialSection,
 }: BuyerOrdersViewProps) {
   const { user } = useAuth();
 
   // Navigation: Orders / Vehicles / Returns / Disputes / Reviews
-  const [activeSection, setActiveSection] = useState<"orders" | "vehicles" | "returns" | "disputes" | "reviews">("orders");
+  const [activeSection, setActiveSection] = useState<"orders" | "vehicles" | "returns" | "disputes" | "reviews">(
+    initialSection || "orders"
+  );
+
+  useEffect(() => {
+    if (initialSection) {
+      queueMicrotask(() => setActiveSection(initialSection));
+    }
+  }, [initialSection]);
 
   // Orders State
   const [orders, setOrders] = useState<PlatformOrder[]>([]);
@@ -123,6 +135,9 @@ export default function BuyerOrdersView({
   const [buyerReturns, setBuyerReturns] = useState<PlatformReturnRequest[]>([]);
   const [loadingReturns, setLoadingReturns] = useState(false);
   const [returnStatusFilter, setReturnStatusFilter] = useState<string>("ALL");
+  const [buyerRefunds, setBuyerRefunds] = useState<PlatformRefund[]>([]);
+  const [loadingRefunds, setLoadingRefunds] = useState(false);
+  const [returnSubTab, setReturnSubTab] = useState<"requests" | "refunds">("requests");
 
   const [returnModalOrder, setReturnModalOrder] = useState<PlatformOrder | null>(null);
   const [returnEligibility, setReturnEligibility] = useState<OrderReturnEligibilityResponse | null>(null);
@@ -203,6 +218,35 @@ export default function BuyerOrdersView({
     }
   }, [user, returnStatusFilter]);
 
+  // Load refunds
+  const loadBuyerRefunds = useCallback(async () => {
+    if (!user) return;
+    setLoadingRefunds(true);
+    try {
+      const res = await api.marketplace.listBuyerRefunds();
+      setBuyerRefunds(Array.isArray(res) ? res : []);
+    } catch (err) {
+      console.error("Failed to load refunds", err);
+    } finally {
+      setLoadingRefunds(false);
+    }
+  }, [user]);
+
+  const handleEscalateReturnToDispute = useCallback((ret: PlatformReturnRequest) => {
+    const parentOrder = orders.find(
+      (o) => o.id === ret.order || o.order_number === ret.order_number
+    );
+    if (parentOrder) {
+      setDisputeModalOrder(parentOrder);
+      setDisputeCategory("REFUND_NOT_PROCESSED");
+      setDisputeDescription(
+        `[Escalated Return: ${ret.request_number}]\nItem: ${ret.item_title || "Part"}\nReturn Reason: ${ret.reason}\nBuyer Description: ${ret.description}\nSeller Rejection Reason: ${ret.rejection_reason || "None specified"}`
+      );
+    } else {
+      setActiveSection("disputes");
+    }
+  }, [orders]);
+
   // Load disputes
   const loadBuyerDisputes = useCallback(async () => {
     if (!user) return;
@@ -237,6 +281,7 @@ export default function BuyerOrdersView({
       if (!ignore) {
         loadOrders();
         loadBuyerReturns();
+        loadBuyerRefunds();
         loadBuyerDisputes();
         loadBuyerReviews();
       }
@@ -244,7 +289,7 @@ export default function BuyerOrdersView({
     return () => {
       ignore = true;
     };
-  }, [loadOrders, loadBuyerReturns, loadBuyerDisputes, loadBuyerReviews]);
+  }, [loadOrders, loadBuyerReturns, loadBuyerRefunds, loadBuyerDisputes, loadBuyerReviews]);
 
   // Initial order navigation
   useEffect(() => {
@@ -378,6 +423,28 @@ export default function BuyerOrdersView({
       }
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Failed to withdraw return request.");
+    }
+  };
+
+  const [confirmingRefundId, setConfirmingRefundId] = useState<string | null>(null);
+
+  const handleConfirmRefundReceipt = async (refundId: string) => {
+    if (!confirm("Have you verified the refund amount has reached your account? Confirming will finalize this refund.")) {
+      return;
+    }
+    setConfirmingRefundId(refundId);
+    try {
+      const res = await api.marketplace.confirmBuyerRefundReceipt(refundId);
+      if (res.status === "success") {
+        setSuccessBanner("Refund receipt confirmed. Your refund is now completed.");
+        void loadBuyerRefunds();
+        void loadBuyerReturns();
+        void loadOrders();
+      }
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to confirm refund receipt.");
+    } finally {
+      setConfirmingRefundId(null);
     }
   };
 
@@ -1063,136 +1130,318 @@ export default function BuyerOrdersView({
       )}
 
       {/* ========================================================= */}
-      {/* SECTION 2: BUYER RETURNS & CANCELLATIONS                  */}
+      {/* SECTION 2: BUYER RETURNS & REFUNDS                         */}
       {/* ========================================================= */}
       {activeSection === "returns" && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
-            <h3 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-2">
-              <RotateCcw className="w-4 h-4 text-indigo-600" />
-              <span>Return & Cancellation Requests ({buyerReturns.length})</span>
-            </h3>
-
+          {/* Sub Navigation Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
             <div className="flex items-center gap-2">
-              <select
-                value={returnStatusFilter}
-                onChange={(e) => setReturnStatusFilter(e.target.value)}
-                className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs text-slate-800 font-bold bg-white"
+              <button
+                type="button"
+                onClick={() => setReturnSubTab("requests")}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  returnSubTab === "requests"
+                    ? "bg-slate-900 text-white shadow-xs"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
               >
-                <option value="ALL">All Statuses</option>
-                <option value="PENDING">Pending</option>
-                <option value="APPROVED">Approved</option>
-                <option value="COMPLETED">Completed</option>
-                <option value="REJECTED">Rejected</option>
-                <option value="CANCELLED">Withdrawn</option>
-              </select>
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Return Requests ({buyerReturns.length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setReturnSubTab("refunds")}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  returnSubTab === "refunds"
+                    ? "bg-slate-900 text-white shadow-xs"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+              >
+                <Receipt className="w-3.5 h-3.5" />
+                <span>Refund Records ({buyerRefunds.length})</span>
+              </button>
             </div>
+
+            {returnSubTab === "requests" && (
+              <div className="flex items-center gap-2">
+                <select
+                  value={returnStatusFilter}
+                  onChange={(e) => setReturnStatusFilter(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs text-slate-800 font-bold bg-white"
+                >
+                  <option value="ALL">All Statuses</option>
+                  <option value="PENDING">Pending</option>
+                  <option value="APPROVED">Approved</option>
+                  <option value="COMPLETED">Completed</option>
+                  <option value="REJECTED">Rejected</option>
+                  <option value="CANCELLED">Withdrawn</option>
+                </select>
+              </div>
+            )}
           </div>
 
-          {loadingReturns ? (
-            <div className="p-12 text-center text-slate-400 text-xs">
-              <Loader2 className="w-6 h-6 animate-spin mx-auto text-indigo-500 mb-2" />
-              <span>Loading return requests...</span>
-            </div>
-          ) : buyerReturns.length === 0 ? (
-            <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center space-y-2">
-              <RotateCcw className="w-10 h-10 text-slate-300 mx-auto" />
-              <h4 className="text-sm font-black text-slate-900">No Return Requests</h4>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                You haven&apos;t created any return or cancellation requests. Eligible orders can be returned from the &quot;Purchased Orders&quot; tab.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {buyerReturns.map((ret) => (
-                <div key={ret.id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono font-black text-sm text-slate-900">
-                        {ret.request_number}
-                      </span>
-                      <span className="text-slate-300">·</span>
-                      <span className="text-xs text-slate-600 font-mono">
-                        Order #{ret.order_number}
-                      </span>
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-100 text-slate-700">
-                        {ret.request_type_display || ret.request_type}
-                      </span>
-                      {getReturnStatusBadge(ret.status)}
-                    </div>
-
-                    <div className="text-xs text-slate-400">
-                      Requested {new Date(ret.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
-                    </div>
-                  </div>
-
-                  <div className="text-xs space-y-1">
-                    <div>
-                      <span className="font-bold text-slate-800">Reason: </span>
-                      <span>{ret.reason_display || ret.reason}</span>
-                    </div>
-                    {ret.item_title && (
-                      <div>
-                        <span className="font-bold text-slate-800">Item: </span>
-                        <span>{ret.item_title} (Qty: {ret.requested_quantity})</span>
-                      </div>
-                    )}
-                    <div className="p-3 rounded-xl bg-slate-50 text-slate-700 leading-relaxed mt-1">
-                      <span className="font-bold text-slate-900">Description: </span>
-                      {ret.description}
-                    </div>
-                  </div>
-
-                  {/* Seller Notes / Rejection Reason */}
-                  {ret.seller_notes && (
-                    <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-900">
-                      <strong>Seller Feedback: </strong>
-                      {ret.seller_notes}
-                    </div>
-                  )}
-
-                  {ret.rejection_reason && (
-                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-900">
-                      <strong>Rejection Rationale: </strong>
-                      {ret.rejection_reason}
-                    </div>
-                  )}
-
-                  {/* Evidence Images */}
-                  {ret.evidence_urls && ret.evidence_urls.length > 0 && (
-                    <div className="space-y-1 pt-1">
-                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Uploaded Evidence</span>
-                      <div className="flex flex-wrap gap-2">
-                        {ret.evidence_urls.map((url, i) => (
-                          <a
-                            key={i}
-                            href={resolveMediaUrl(url)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity"
-                          >
-                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${i + 1}`} width={56} height={56} className="w-full h-full object-cover" />
-                          </a>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Actions */}
-                  {ret.status === "PENDING" && (
-                    <div className="pt-2 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => handleWithdrawReturnRequest(ret.request_number)}
-                        className="px-3 py-1.5 rounded-xl border border-rose-200 hover:bg-rose-50 text-rose-700 text-xs font-bold transition-colors"
-                      >
-                        Withdraw Request
-                      </button>
-                    </div>
-                  )}
+          {/* Tab 1: Return Requests */}
+          {returnSubTab === "requests" && (
+            <>
+              {loadingReturns ? (
+                <div className="p-12 text-center text-slate-400 text-xs">
+                  <Loader2 className="w-6 h-6 animate-spin mx-auto text-indigo-500 mb-2" />
+                  <span>Loading return requests...</span>
                 </div>
-              ))}
-            </div>
+              ) : buyerReturns.length === 0 ? (
+                <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center space-y-2">
+                  <RotateCcw className="w-10 h-10 text-slate-300 mx-auto" />
+                  <h4 className="text-sm font-black text-slate-900">No Return Requests</h4>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    You haven&apos;t created any return or cancellation requests. Eligible orders can be returned from the &quot;Purchases&quot; tab.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {buyerReturns.map((ret) => (
+                    <div key={ret.id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-black text-sm text-slate-900">
+                            {ret.request_number}
+                          </span>
+                          <span className="text-slate-300">·</span>
+                          <span className="text-xs text-slate-600 font-mono">
+                            Order #{ret.order_number}
+                          </span>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-100 text-slate-700">
+                            {ret.request_type_display || ret.request_type}
+                          </span>
+                          {getReturnStatusBadge(ret.status)}
+                        </div>
+
+                        <div className="text-xs text-slate-400">
+                          Requested {new Date(ret.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
+                        </div>
+                      </div>
+
+                      <div className="text-xs space-y-1">
+                        <div>
+                          <span className="font-bold text-slate-800">Reason: </span>
+                          <span>{ret.reason_display || ret.reason}</span>
+                        </div>
+                        {ret.item_title && (
+                          <div>
+                            <span className="font-bold text-slate-800">Item: </span>
+                            <span>{ret.item_title} (Qty: {ret.requested_quantity})</span>
+                          </div>
+                        )}
+                        <div className="p-3 rounded-xl bg-slate-50 text-slate-700 leading-relaxed mt-1">
+                          <span className="font-bold text-slate-900">Description: </span>
+                          {ret.description}
+                        </div>
+                      </div>
+
+                      {/* Seller Notes / Rejection Reason */}
+                      {ret.seller_notes && (
+                        <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-900">
+                          <strong>Seller Feedback: </strong>
+                          {ret.seller_notes}
+                        </div>
+                      )}
+
+                      {ret.rejection_reason && (
+                        <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-900">
+                          <strong>Rejection Rationale: </strong>
+                          {ret.rejection_reason}
+                        </div>
+                      )}
+
+                      {/* Evidence Images */}
+                      {ret.evidence_urls && ret.evidence_urls.length > 0 && (
+                        <div className="space-y-1 pt-1">
+                          <span className="text-[10px] uppercase font-bold text-slate-400 block">Uploaded Evidence</span>
+                          <div className="flex flex-wrap gap-2">
+                            {ret.evidence_urls.map((url, i) => (
+                              <a
+                                key={i}
+                                href={resolveMediaUrl(url)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity"
+                              >
+                                <Image src={resolveMediaUrl(url)} alt={`Evidence ${i + 1}`} width={56} height={56} className="w-full h-full object-cover" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Actions */}
+                      <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100">
+                        {ret.status === "REJECTED" ? (
+                          <>
+                            <p className="text-[11px] text-slate-500">Unsatisfied with the rejection? Escalate directly to neutral DriverXtra mediation.</p>
+                            <button
+                              type="button"
+                              onClick={() => handleEscalateReturnToDispute(ret)}
+                              className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-colors flex items-center gap-1.5 shadow-xs"
+                            >
+                              <Scale className="w-3.5 h-3.5" />
+                              <span>Escalate to Dispute</span>
+                            </button>
+                          </>
+                        ) : ret.status === "PENDING" ? (
+                          <div className="w-full flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => handleWithdrawReturnRequest(ret.request_number)}
+                              className="px-3 py-1.5 rounded-xl border border-rose-200 hover:bg-rose-50 text-rose-700 text-xs font-bold transition-colors"
+                            >
+                              Withdraw Request
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-slate-400 italic">
+                            {ret.status === "APPROVED" ? "Return approved by seller. Processing refund/replacement." : "Return completed."}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Tab 2: Refund Records */}
+          {returnSubTab === "refunds" && (
+            <>
+              {loadingRefunds ? (
+                <div className="p-12 text-center text-slate-400 text-xs">
+                  <Loader2 className="w-6 h-6 animate-spin mx-auto text-amber-500 mb-2" />
+                  <span>Loading refund records...</span>
+                </div>
+              ) : buyerRefunds.length === 0 ? (
+                <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center space-y-2">
+                  <Receipt className="w-10 h-10 text-slate-300 mx-auto" />
+                  <h4 className="text-sm font-black text-slate-900">No Refunds Issued</h4>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    You do not have any issued or pending refunds at this time.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {buyerRefunds.map((rf) => (
+                    <div key={rf.id} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-black text-sm text-slate-900">
+                            {rf.refund_number}
+                          </span>
+                          <span className="text-slate-300">·</span>
+                          <span className="text-xs text-slate-600 font-mono">
+                            Order #{rf.order_number}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                            rf.status === "SUCCEEDED"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : rf.status === "PROCESSING" || rf.status === "PENDING"
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-rose-100 text-rose-800"
+                          }`}>
+                            {rf.status_display || rf.status}
+                          </span>
+                        </div>
+
+                        <div className="text-right">
+                          <span className="font-mono font-black text-base text-slate-900">
+                            {rf.currency} {Number(rf.amount).toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                        <div className="p-3 bg-slate-50 rounded-xl space-y-1">
+                          <span className="text-[10px] uppercase font-bold text-slate-400 block">Payout Method & Details</span>
+                          <p className="font-bold text-slate-800">{rf.refund_method_display || rf.refund_method}</p>
+                          {rf.gateway_refund_id && (
+                            <p className="font-mono text-[11px] text-slate-600">
+                              Ref/UTR: <strong className="text-slate-900">{rf.gateway_refund_id}</strong>
+                            </p>
+                          )}
+                          {rf.gateway_provider && (
+                            <p className="text-[11px] text-slate-500">Provider: {rf.gateway_provider}</p>
+                          )}
+                        </div>
+
+                        <div className="p-3 bg-slate-50 rounded-xl space-y-1">
+                          <span className="text-[10px] uppercase font-bold text-slate-400 block">Reason & Notes</span>
+                          <p className="text-slate-800">{rf.reason || "Order Refund"}</p>
+                          {rf.notes && (
+                            <p className="text-[11px] text-slate-600 whitespace-pre-wrap">{rf.notes}</p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Distinct state for seller direct refund awaiting buyer confirmation */}
+                      {rf.gateway_provider === "SELLER_DIRECT" && rf.status === "PROCESSING" && (
+                        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                          <div className="space-y-0.5">
+                            <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                              <Info className="w-4 h-4 text-amber-600 shrink-0" />
+                              <span>Seller Submitted Direct Settlement Evidence</span>
+                            </span>
+                            <p className="text-amber-800 text-[11px]">
+                              UTR / Reference: <strong className="font-mono text-amber-950">{rf.gateway_refund_id || "N/A"}</strong>. Please inspect your bank account. Once funds appear, confirm receipt to finalize.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={confirmingRefundId === rf.id}
+                              onClick={() => handleConfirmRefundReceipt(rf.id)}
+                              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-50"
+                            >
+                              {confirmingRefundId === rf.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                              <span>Confirm Receipt</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const targetOrder = orders.find((o) => o.id === (rf.order_id || rf.order) || o.order_number === rf.order_number);
+                                if (targetOrder) {
+                                  handleOpenDisputeModal(targetOrder);
+                                  setDisputeCategory("OTHER");
+                                  setDisputeDescription(`Seller submitted direct refund reference ${rf.gateway_refund_id || rf.refund_number}, but funds have not been received.`);
+                                } else {
+                                  alert(`Order #${rf.order_number} details could not be found to open dispute.`);
+                                }
+                              }}
+                              className="px-3 py-1.5 border border-rose-300 bg-white text-rose-700 hover:bg-rose-50 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors"
+                            >
+                              <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
+                              <span>Dispute Payout</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {rf.gateway_provider === "SELLER_DIRECT" && rf.status === "SUCCEEDED" && (
+                        <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2 text-xs text-emerald-800 font-medium">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <span>Buyer Confirmed Receipt · Funds Verified (Ref: {rf.gateway_refund_id || "N/A"})</span>
+                        </div>
+                      )}
+
+                      <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
+                        <span>Created: {new Date(rf.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                        {rf.processed_at && (
+                          <span className="text-emerald-700 font-semibold">Processed: {new Date(rf.processed_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
