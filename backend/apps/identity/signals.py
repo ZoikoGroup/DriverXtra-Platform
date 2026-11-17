@@ -4,7 +4,7 @@ Session revocation on suspension/deactivation (supplementary control).
 
 Primary controls (``apps.identity.authentication``):
 - per-request and per-refresh account-status enforcement;
-- session-version revocation: the database trigger from migration 0008 increments
+- session-version revocation: the database trigger from migration 0011 increments
   ``User.session_version`` on every usable -> unusable transition, by ANY update path
   (save, QuerySet.update, bulk_update, raw SQL), and tokens carrying an older ``sv`` are
   rejected, including after reactivation.

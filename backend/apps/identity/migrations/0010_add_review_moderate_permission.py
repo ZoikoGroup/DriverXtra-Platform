@@ -34,7 +34,7 @@ def remove_review_moderate_permission(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('identity', '0006_add_catalogue_manage_permission'),
+        ('identity', '0009_seed_support_ticket_permissions'),
     ]
 
     operations = [

@@ -2,9 +2,11 @@
 
 Every actor is checked against every endpoint and must receive exactly the expected success
 status or HTTP 403. Allowed sets follow the seeded permission matrix plus approved decisions:
-  - refund mutations: 'order.refund'                  (U3)
-  - refund list: 'order.refund' or 'finance.payout'   (U3)
-  - dispute management: 'dispute.manage'              (U1: SUPPORT_AGENT keeps it)
+  - refund create/reject: 'order.refund' or 'finance.payout'  (D2: main's maker-checker model)
+  - refund process/settlement (incl. approving a manual refund, which settles it):
+    'finance.payout' only                              (D2: Dispute Manager cannot pay out)
+  - refund list: 'order.refund' or 'finance.payout'
+  - dispute management: 'dispute.manage'              (D1: SUPPORT_AGENT no longer holds it)
   - dispute detail read: also 'order.refund'          (U4)
   - review moderation: 'review.moderate'              (U2: VERIFICATION_OFFICER; STAFF without a
                                                        sub-role falls back to VERIFICATION_OFFICER)
@@ -45,7 +47,8 @@ ACTORS = [
 ADMINS = {'admin_role', 'superuser'}
 REFUND = {'DISPUTE_MANAGER', 'FINANCE_OFFICER'} | ADMINS
 REFUND_LIST = REFUND  # FINANCE_OFFICER also holds finance.payout
-DISPUTE_MANAGE = {'SUPPORT_AGENT', 'DISPUTE_MANAGER'} | ADMINS
+REFUND_PAYOUT = {'FINANCE_OFFICER'} | ADMINS  # D2: settlement requires 'finance.payout'
+DISPUTE_MANAGE = {'DISPUTE_MANAGER'} | ADMINS
 DISPUTE_READ = DISPUTE_MANAGE | {'FINANCE_OFFICER', 'buyer', 'seller'}
 DISPUTE_MESSAGE = DISPUTE_MANAGE | {'buyer', 'seller'}
 REFUND_SUMMARY = REFUND | {'buyer', 'seller'}
@@ -57,9 +60,9 @@ ENDPOINTS = {
                       lambda c: {'amount': '10.00', 'reason': 'Matrix', 'refund_method': 'BANK_TRANSFER'},
                       status.HTTP_201_CREATED, REFUND),
     'refund_approve': ('post', lambda c: f"/api/v1/marketplace/admin/refunds/{c['refund'].refund_number}/approve/",
-                       lambda c: {}, status.HTTP_200_OK, REFUND),
+                       lambda c: {}, status.HTTP_200_OK, REFUND_PAYOUT),  # manual refund: approval settles it
     'refund_process': ('post', lambda c: f"/api/v1/marketplace/admin/refunds/{c['refund'].refund_number}/process/",
-                       lambda c: {}, status.HTTP_200_OK, REFUND),
+                       lambda c: {}, status.HTTP_200_OK, REFUND_PAYOUT),
     'refund_reject': ('post', lambda c: f"/api/v1/marketplace/admin/refunds/{c['refund'].refund_number}/reject/",
                       lambda c: {'reason': 'Matrix rejection'}, status.HTTP_200_OK, REFUND),
     'refund_list': ('get', lambda c: '/api/v1/marketplace/admin/refunds/', None, status.HTTP_200_OK, REFUND_LIST),
@@ -193,64 +196,43 @@ def test_review_author_vs_non_author(matrix_context, buyer_user, seller_user):
 
 
 # =============================================================================
-# U3 strict verification: 'finance.payout' never authorises refund mutations
+# D2 segregation of duties: 'order.refund' alone never settles or dispatches a refund
 # =============================================================================
 
-REFUND_MUTATION_ENDPOINTS = ['refund_create', 'refund_approve', 'refund_process', 'refund_reject']
-
-
-def _payout_only_staff():
-    """STAFF user whose sub-role grants ONLY 'finance.payout' (no 'order.refund')."""
-    from apps.identity.models import Permission
-    role = StaffRole.objects.create(code='PAYOUT_ONLY_TEST', name='Payout only (test)')
-    role.role_permissions.create(permission=Permission.objects.get(code='finance.payout'))
-    user = _staff('matrix_payout_only@driverxtra.com')
-    profile, _ = StaffProfile.objects.get_or_create(user=user)
-    profile.staff_role = role
-    profile.save()
-    assert user.has_permission('finance.payout') is True
-    assert user.has_permission('order.refund') is False
-    return user
+PAYOUT_ENDPOINTS = ['refund_approve', 'refund_process']  # matrix refund is manual: approval settles it
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize('endpoint', REFUND_MUTATION_ENDPOINTS)
-def test_finance_payout_only_gets_403_on_every_refund_mutation_endpoint(matrix_context, endpoint):
-    from apps.marketplace.models import Refund, RefundStatusChoices
+@pytest.mark.parametrize('endpoint', PAYOUT_ENDPOINTS)
+def test_dispute_manager_cannot_settle_refunds_and_nothing_changes(matrix_context, endpoint):
+    from apps.marketplace.models import Refund, PaymentTransaction, RefundStatusChoices
     method, url_fn, payload_fn, _, _ = ENDPOINTS[endpoint]
     client = APIClient()
-    client.force_authenticate(user=_payout_only_staff())
-    before = Refund.objects.count()
+    client.force_authenticate(user=_actor('DISPUTE_MANAGER', None, None))
+    refunds_before, txns_before = Refund.objects.count(), PaymentTransaction.objects.count()
+    approved_by_before = matrix_context['refund'].approved_by_id
     response = getattr(client, method)(url_fn(matrix_context), payload_fn(matrix_context), format='json')
     assert response.status_code == status.HTTP_403_FORBIDDEN, response.data
     matrix_context['refund'].refresh_from_db()
     assert matrix_context['refund'].status == RefundStatusChoices.PENDING
-    assert Refund.objects.count() == before
+    assert matrix_context['refund'].approved_by_id == approved_by_before
+    assert (Refund.objects.count(), PaymentTransaction.objects.count()) == (refunds_before, txns_before)
 
 
 @pytest.mark.django_db
-def test_finance_payout_only_can_list_refunds_but_not_mutate_via_service(matrix_context):
+def test_order_refund_without_finance_payout_cannot_settle_via_service(matrix_context):
     from django.core.exceptions import ValidationError as DjangoValidationError
     from apps.marketplace.models import RefundStatusChoices
-    user = _payout_only_staff()
-    client = APIClient()
-    client.force_authenticate(user=user)
-    assert client.get('/api/v1/marketplace/admin/refunds/').status_code == status.HTTP_200_OK
-    # Refund summary requires 'order.refund' (or being the buyer/seller), so payout-only is refused.
-    assert client.get(f"/api/v1/marketplace/orders/{matrix_context['order'].id}/refund-summary/").status_code == status.HTTP_403_FORBIDDEN
-
-    refund, order = matrix_context['refund'], matrix_context['order']
-    calls = [
-        lambda: RefundService.create_refund(order=order, amount=Decimal('5.00'), reason='x', actor=user),
-        lambda: RefundService.create_refund(order=order, amount=Decimal('5.00'), reason='x', actor=user, auto_process=True),
-        lambda: RefundService.approve_refund(refund, user),
-        lambda: RefundService.process_refund(refund, user),
-        lambda: RefundService.reject_refund(refund, user, reason='x'),
-        lambda: RefundService.fail_refund(refund, user, failure_reason='x'),
-        lambda: RefundService.dispatch_gateway_refund(refund, user),
-    ]
-    for call in calls:
-        with pytest.raises(DjangoValidationError, match='Permission denied'):
+    manager = _actor('DISPUTE_MANAGER', None, None)
+    assert manager.has_permission('order.refund') is True
+    assert manager.has_permission('finance.payout') is False
+    refund = matrix_context['refund']
+    for call in (
+        lambda: RefundService.process_refund(refund, manager),
+        lambda: RefundService.dispatch_gateway_refund(refund, manager),
+        lambda: RefundService.approve_refund(refund, manager),  # manual refund: approval would settle it
+    ):
+        with pytest.raises(DjangoValidationError, match='finance.payout'):
             call()
     refund.refresh_from_db()
     assert refund.status == RefundStatusChoices.PENDING
@@ -260,8 +242,8 @@ def test_finance_payout_only_can_list_refunds_but_not_mutate_via_service(matrix_
 def test_matrix_allowed_sets_match_seeded_permissions():
     """The allowed-actor sets above are derived from the seeded matrix, not assumed.
 
-    FINANCE_OFFICER is in the refund-mutation set only because it is seeded with 'order.refund'
-    (migration 0005); 'finance.payout' alone grants refund list access only.
+    Refund create/reject follow 'order.refund' or 'finance.payout'; settlement follows
+    'finance.payout' only (D2). Dispute management follows 'dispute.manage' (D1).
     """
     def staff_roles_with(*codes):
         roles = set()
@@ -277,7 +259,9 @@ def test_matrix_allowed_sets_match_seeded_permissions():
         return roles | ({fallback} if 'VERIFICATION_OFFICER' in roles else set())
 
     assert REFUND - ADMINS == with_fallback(staff_roles_with('order.refund'))
+    assert REFUND - ADMINS == with_fallback(staff_roles_with('order.refund', 'finance.payout'))
     assert REFUND_LIST - ADMINS == with_fallback(staff_roles_with('order.refund', 'finance.payout'))
+    assert REFUND_PAYOUT - ADMINS == with_fallback(staff_roles_with('finance.payout'))
     assert DISPUTE_MANAGE - ADMINS == with_fallback(staff_roles_with('dispute.manage'))
     assert REVIEW_MODERATE - ADMINS == with_fallback(staff_roles_with('review.moderate'))
     # Explicit seeded facts relied on by the matrix.
@@ -285,3 +269,5 @@ def test_matrix_allowed_sets_match_seeded_permissions():
     dm = set(StaffRole.objects.get(code='DISPUTE_MANAGER').role_permissions.values_list('permission__code', flat=True))
     assert fin == {'finance.payout', 'order.refund'}
     assert dm == {'dispute.manage', 'order.refund'}
+    support = set(StaffRole.objects.get(code='SUPPORT_AGENT').role_permissions.values_list('permission__code', flat=True))
+    assert support == {'support.ticket.manage'}  # D1

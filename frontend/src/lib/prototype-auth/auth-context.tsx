@@ -181,7 +181,7 @@ export function mapBackendUserToPrototypeUser(backendUser: BackendUserProfile): 
     organizationName: orgName,
     jurisdiction: "GB-ENG",
     tenantType,
-    permissions: backendUser.permissions && backendUser.permissions.length > 0 ? backendUser.permissions : permissions,
+    permissions: Array.isArray(backendUser.permissions) ? backendUser.permissions : permissions,
     first_name: backendUser.first_name,
     last_name: backendUser.last_name,
     phone_number: backendUser.phone_number,
@@ -245,7 +245,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [mfaChallenge, setMfaChallenge] = useState<{ preAuthToken: string; email: string } | null>(null);
+  const [mfaChallenge, setMfaChallenge] = useState<{ preAuthToken: string; email: string; enrollmentRequired?: boolean } | null>(null);
 
   const clearAuthError = useCallback(() => {
     setAuthError(null);
@@ -356,7 +356,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const login = async (email: string, password?: string, code?: string): Promise<{ success: boolean; mfaRequired?: boolean; error?: string }> => {
+  const login = async (
+    email: string,
+    password?: string,
+    code?: string
+  ): Promise<{ success: boolean; mfaRequired?: boolean; activeRole?: string; user?: PrototypeUser; error?: string }> => {
     setIsLoading(true);
     setAuthError(null);
 
@@ -369,10 +373,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const response = await api.auth.login(email, password, code);
-      if (response.mfa_required && response.pre_auth_token) {
-        setMfaChallenge({ preAuthToken: response.pre_auth_token, email: response.email || email });
+
+      const isMfaChallenge = Boolean(
+        response.pre_auth_token && (
+          response.mfa_required ||
+          response.mfa_enrollment_required ||
+          response.status === "mfa_required" ||
+          response.status === "mfa_enrollment_required" ||
+          response.code === "MFA_REQUIRED" ||
+          response.code === "MFA_ENROLLMENT_REQUIRED"
+        )
+      );
+
+      if (isMfaChallenge) {
+        const enrollmentRequired = Boolean(
+          response.mfa_enrollment_required ||
+          response.status === "mfa_enrollment_required" ||
+          response.code === "MFA_ENROLLMENT_REQUIRED"
+        );
+
+        setMfaChallenge({
+          preAuthToken: response.pre_auth_token!,
+          email: response.email || email,
+          enrollmentRequired,
+        });
         setIsLoading(false);
-        return { success: true, mfaRequired: true };
+        return { success: true, mfaRequired: true, activeRole: response.active_role };
       }
 
       if (!response?.tokens?.access || !response?.tokens?.refresh) {
@@ -383,7 +409,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(mappedUser);
       setMfaChallenge(null);
       setIsLoading(false);
-      return { success: true, mfaRequired: false };
+      return { success: true, mfaRequired: false, activeRole: mappedUser.activeRole || response.active_role, user: mappedUser };
     } catch (err: unknown) {
       setIsLoading(false);
       const msg = getAuthErrorMessage(err, "Authentication failed. Please verify credentials.");
@@ -392,7 +418,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const verifyMfaLogin = async (code: string): Promise<{ success: boolean; error?: string }> => {
+  const verifyMfaLogin = async (code: string): Promise<{ success: boolean; activeRole?: string; user?: PrototypeUser; error?: string }> => {
     if (!mfaChallenge) {
       return { success: false, error: "Your sign-in session has expired. Please log in again." };
     }
@@ -401,9 +427,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const response = await api.auth.verifyMfa(code, mfaChallenge.preAuthToken);
       const profile = response.user || await api.users.getMe();
-      setUser(mapBackendUserToPrototypeUser(profile));
+      const mappedUser = mapBackendUserToPrototypeUser(profile);
+      setUser(mappedUser);
       setMfaChallenge(null);
-      return { success: true };
+      return { success: true, activeRole: mappedUser.activeRole || response.active_role, user: mappedUser };
     } catch (err: unknown) {
       const msg = getAuthErrorMessage(err, "Invalid MFA code. Please try again.");
       setAuthError(msg);

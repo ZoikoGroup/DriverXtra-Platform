@@ -11,7 +11,7 @@ accounts when an access token is obtained through token refresh (docs/auth-desig
 Session-version revocation: every issued JWT carries the user's ``session_version`` as the
 ``sv`` claim. A database trigger increments the version whenever the account becomes unusable,
 by any update path, so tokens issued before a suspension stay invalid after reactivation.
-Tokens without ``sv`` (issued before migration 0008) are treated as version 0.
+Tokens without ``sv`` (issued before migration 0011) are treated as version 0.
 """
 from datetime import timedelta
 
@@ -105,34 +105,3 @@ class StatusAwareJWTAuthentication(JWTAuthentication):
         if not session_version_matches(user, validated_token):
             raise AuthenticationFailed(SESSION_REVOKED_MESSAGE, code="session_revoked")
         return user
-
-
-class StaffAwareTokenRefreshSerializer(TokenRefreshSerializer):
-    """Token refresh that keeps the 15-minute access lifetime for staff/admin accounts.
-
-    Account status is enforced by the parent serializer through USER_AUTHENTICATION_RULE.
-    The session version is checked BEFORE the parent rotates/blacklists the token, so a revoked
-    refresh token is never exchanged for a new pair. The ``sv`` claim is carried forward by
-    rotation and copied into the new access token.
-    """
-
-    def validate(self, attrs):
-        try:
-            presented = RefreshToken(attrs['refresh'])
-        except TokenError:
-            presented = None  # invalid/expired/blacklisted: the parent raises the standard error
-        if presented is not None:
-            user_id = presented.payload.get(api_settings.USER_ID_CLAIM)
-            user = get_user_model().objects.filter(**{api_settings.USER_ID_FIELD: user_id}).first() if user_id else None
-            if user is not None and not session_version_matches(user, presented.payload):
-                raise AuthenticationFailed(SESSION_REVOKED_MESSAGE, code="session_revoked")
-
-        data = super().validate(attrs)
-
-        access = AccessToken(data['access'])
-        user_id = access.payload.get(api_settings.USER_ID_CLAIM)
-        user = get_user_model().objects.filter(**{api_settings.USER_ID_FIELD: user_id}).first() if user_id else None
-        if user is not None and requires_short_lived_access(user, access.payload.get('active_role')):
-            access.set_exp(lifetime=STAFF_ACCESS_TOKEN_LIFETIME)
-            data['access'] = str(access)
-        return data

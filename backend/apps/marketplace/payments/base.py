@@ -61,3 +61,20 @@ class BasePaymentProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    def inquire_refund(
+        self,
+        payment_reference: str,
+        refund_number: str,
+        gateway_refund_id: Optional[str] = None,
+    ) -> Tuple[str, Optional[str], Dict[str, Any]]:
+        """
+        Inquires the provider's authoritative refund state for an ambiguous or timed-out refund.
+        Returns:
+            status: 'SUCCEEDED' | 'FAILED' | 'PROCESSING' | 'NOT_FOUND' | 'UNKNOWN'
+            gateway_refund_id_or_error: Gateway refund ID if found, or error message
+            extra_details: Raw payload or diagnostics from provider
+        """
+        pass
+
+

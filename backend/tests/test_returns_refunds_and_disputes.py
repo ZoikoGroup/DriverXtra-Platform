@@ -99,6 +99,7 @@ def dispute_manager_user(db):
         is_email_verified=True,
     )
     user.add_role(RoleChoices.STAFF)
+    user.add_role(RoleChoices.ADMIN)
     role = StaffRole.objects.filter(code='DISPUTE_MANAGER').first()
     if role:
         profile, _ = StaffProfile.objects.get_or_create(user=user)
@@ -1008,24 +1009,19 @@ def test_staff_without_order_refund_cannot_mutate_refunds_service(sample_paid_or
 
 
 @pytest.mark.django_db
-def test_finance_payout_alone_does_not_authorise_refund_execution(sample_paid_order):
-    """U3/safeguard 5: 'finance.payout' is separate from refund execution."""
-    from apps.identity.models import Permission
+def test_dispute_manager_cannot_settle_or_dispatch_refunds(sample_paid_order, admin_user):
+    """D2: maker-checker segregation. 'order.refund' without 'finance.payout' cannot pay out."""
     order, _ = sample_paid_order
-    payout_only_role = StaffRole.objects.create(code='SUPPORT_AGENT_PAYOUT_TEST', name='Payout only (test)')
-    payout_only_role.role_permissions.create(permission=Permission.objects.get(code='finance.payout'))
-    staff = _make_staff('payoutonly@driverxtra.com')
-    profile, _ = StaffProfile.objects.get_or_create(user=staff)
-    profile.staff_role = payout_only_role
-    profile.save()
-
-    with pytest.raises(DjangoValidationError, match='Permission denied'):
-        RefundService.create_refund(order=order, amount=Decimal('50.00'), reason='x', actor=staff)
-    # Read access to the refund list is kept for finance reconciliation.
-    assert _client_for(staff).get('/api/v1/marketplace/admin/refunds/').status_code == status.HTTP_200_OK
-    assert _client_for(staff).post(
-        f'/api/v1/marketplace/admin/orders/{order.id}/refund/', {'amount': '10.00', 'reason': 'x'}, format='json'
-    ).status_code == status.HTTP_403_FORBIDDEN
+    refund = RefundService.create_refund(order=order, amount=Decimal('100.00'), reason='Pending refund', actor=admin_user)
+    manager = _make_staff('dm_no_payout@driverxtra.com', 'DISPUTE_MANAGER')
+    with pytest.raises(DjangoValidationError, match='finance.payout'):
+        RefundService.process_refund(refund, manager)
+    with pytest.raises(DjangoValidationError, match='finance.payout'):
+        RefundService.dispatch_gateway_refund(refund, manager)
+    refund.refresh_from_db()
+    assert refund.status == RefundStatusChoices.PENDING
+    # Read access to the refund list is unchanged for refund staff.
+    assert _client_for(manager).get('/api/v1/marketplace/admin/refunds/').status_code == status.HTTP_200_OK
 
 
 @pytest.mark.django_db
@@ -1075,7 +1071,7 @@ def _open_dispute(order, buyer_user):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize('staff_role_code', [None, 'VERIFICATION_OFFICER', 'FINANCE_OFFICER'])
+@pytest.mark.parametrize('staff_role_code', [None, 'SUPPORT_AGENT', 'VERIFICATION_OFFICER', 'FINANCE_OFFICER'])
 def test_staff_without_dispute_manage_cannot_manage_disputes(sample_delivered_order, buyer_user, staff_role_code):
     order, _, _ = sample_delivered_order
     dispute = _open_dispute(order, buyer_user)
@@ -1106,21 +1102,8 @@ def test_dispute_detail_read_access_by_permission(sample_delivered_order, buyer_
     assert _client_for(_make_staff('det_none@driverxtra.com')).get(url).status_code == status.HTTP_403_FORBIDDEN
     assert _client_for(_make_staff('det_verif@driverxtra.com', 'VERIFICATION_OFFICER')).get(url).status_code == status.HTTP_403_FORBIDDEN
     assert _client_for(_make_staff('det_fin@driverxtra.com', 'FINANCE_OFFICER')).get(url).status_code == status.HTTP_200_OK
-    assert _client_for(_make_staff('det_sup@driverxtra.com', 'SUPPORT_AGENT')).get(url).status_code == status.HTTP_200_OK
-
-
-@pytest.mark.django_db
-def test_support_agent_with_dispute_manage_can_manage_disputes(sample_delivered_order, buyer_user):
-    """U1: SUPPORT_AGENT keeps 'dispute.manage' per the seeded matrix."""
-    order, _, _ = sample_delivered_order
-    dispute = _open_dispute(order, buyer_user)
-    client = _client_for(_make_staff('support_dm@driverxtra.com', 'SUPPORT_AGENT'))
-    assert client.get('/api/v1/marketplace/admin/disputes/').status_code == status.HTTP_200_OK
-    assert client.post(f'/api/v1/marketplace/disputes/{dispute.dispute_number}/messages/',
-                       {'message': 'Mediation note'}, format='json').status_code == status.HTTP_201_CREATED
-    res = client.post(f'/api/v1/marketplace/admin/disputes/{dispute.dispute_number}/status/',
-                      {'status': 'UNDER_REVIEW', 'resolution_notes': 'Reviewing'}, format='json')
-    assert res.status_code == status.HTTP_200_OK
+    # D1: SUPPORT_AGENT no longer holds 'dispute.manage' (main migration 0007).
+    assert _client_for(_make_staff('det_sup@driverxtra.com', 'SUPPORT_AGENT')).get(url).status_code == status.HTTP_403_FORBIDDEN
 
 
 @pytest.mark.django_db

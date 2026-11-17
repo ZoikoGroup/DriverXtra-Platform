@@ -761,6 +761,204 @@ def _review_moderated(entry):
     ]
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: Customer Support & Ticketing Resolvers
+# ---------------------------------------------------------------------------
+
+def _support_ticket_created(entry):
+    from apps.support.models import Ticket
+    ticket = Ticket.objects.select_related('customer').filter(pk=entry.resource_id).first()
+    if not ticket or not ticket.customer:
+        return []
+    return [
+        NotificationSpec(
+            recipient=ticket.customer,
+            title="Support ticket received",
+            message=f"Your support ticket {ticket.ticket_number} ('{ticket.subject}') has been received. Our team will review it shortly.",
+            link="/platform?tab=my_tickets",
+        )
+    ]
+
+
+def _support_ticket_assigned(entry):
+    from apps.support.models import Ticket
+    ticket = Ticket.objects.select_related('assigned_to').filter(pk=entry.resource_id).first()
+    if not ticket or not ticket.assigned_to:
+        return []
+    return [
+        NotificationSpec(
+            recipient=ticket.assigned_to,
+            title="Support ticket assigned",
+            message=f"You have been assigned ticket {ticket.ticket_number}: '{ticket.subject}'.",
+            link="/platform?tab=support_overview",
+        )
+    ]
+
+
+def _support_ticket_customer_replied(entry):
+    from apps.support.models import Ticket
+    ticket = Ticket.objects.select_related('assigned_to').filter(pk=entry.resource_id).first()
+    if not ticket or not ticket.assigned_to:
+        return []
+    return [
+        NotificationSpec(
+            recipient=ticket.assigned_to,
+            title="Customer replied to support ticket",
+            message=f"Customer replied on ticket {ticket.ticket_number}: '{ticket.subject}'.",
+            link="/platform?tab=support_overview",
+        )
+    ]
+
+
+def _support_ticket_agent_replied(entry):
+    meta = entry.metadata or {}
+    if meta.get('is_internal'):
+        # Internal notes are STRICTLY hidden from customers!
+        return []
+    from apps.support.models import Ticket
+    ticket = Ticket.objects.select_related('customer').filter(pk=entry.resource_id).first()
+    if not ticket or not ticket.customer:
+        return []
+    return [
+        NotificationSpec(
+            recipient=ticket.customer,
+            title="New reply from Support Agent",
+            message=f"A support agent has replied to your ticket {ticket.ticket_number}: '{ticket.subject}'.",
+            link="/platform?tab=my_tickets",
+        )
+    ]
+
+
+def _support_ticket_status_updated(entry):
+    from apps.support.models import Ticket
+    ticket = Ticket.objects.select_related('customer').filter(pk=entry.resource_id).first()
+    if not ticket or not ticket.customer:
+        return []
+    return [
+        NotificationSpec(
+            recipient=ticket.customer,
+            title=f"Support ticket {ticket.status.lower()}",
+            message=f"Your support ticket {ticket.ticket_number} is now marked as {ticket.status}.",
+            link="/platform?tab=my_tickets",
+        )
+    ]
+
+
+def _support_ticket_sla_breached(entry):
+    from apps.support.models import Ticket
+    from apps.identity.models import User, RoleChoices
+    from django.db import models
+
+    ticket = Ticket.objects.select_related('assigned_to').filter(pk=entry.resource_id).first()
+    if not ticket:
+        return []
+
+    recipients = []
+    if ticket.assigned_to and ticket.assigned_to.is_active:
+        recipients.append(ticket.assigned_to)
+    else:
+        leads = User.objects.filter(
+            models.Q(user_roles__role__in=['SUPPORT_LEAD', RoleChoices.ADMIN])
+            | models.Q(staff_profile__staff_role__code='SUPPORT_LEAD')
+            | models.Q(is_superuser=True),
+            is_active=True,
+        ).distinct()
+        recipients.extend(leads)
+
+    unique_recipients = {r.id: r for r in recipients}
+    specs = []
+    for r in unique_recipients.values():
+        specs.append(
+            NotificationSpec(
+                recipient=r,
+                title="SLA breach notification",
+                message=f"SLA threshold reached on ticket {ticket.ticket_number}: '{ticket.subject}'.",
+                link="/platform?tab=support_overview",
+            )
+        )
+    return specs
+
+
+def _support_ticket_escalated(entry):
+    from apps.support.models import Ticket, EscalationStageChoices
+    from apps.identity.models import User, RoleChoices
+    from django.db import models
+
+    ticket = Ticket.objects.select_related('assigned_to', 'customer').filter(pk=entry.resource_id).first()
+    if not ticket:
+        return []
+
+    meta = entry.metadata or {}
+    stage = meta.get('escalation_stage') or ticket.escalation_stage
+    reason = meta.get('reason') or ticket.escalation_reason or 'Ticket escalated'
+
+    try:
+        stage = int(stage)
+    except (TypeError, ValueError):
+        stage = 1
+
+    stage_labels = {
+        EscalationStageChoices.WARNING_75: "75% SLA Warning",
+        EscalationStageChoices.BREACH_100: "100% SLA Breach",
+        EscalationStageChoices.TIER_3: "Tier 3 Critical Escalation",
+    }
+    stage_desc = stage_labels.get(stage, f"Stage {stage}")
+
+    def has_confidential_access(u):
+        if not u or not u.is_active:
+            return False
+        if getattr(u, 'is_superuser', False) or (hasattr(u, 'has_role') and u.has_role(RoleChoices.ADMIN)):
+            return True
+        return bool(hasattr(u, 'has_permission') and u.has_permission('support.ticket.confidential'))
+
+    recipients = []
+
+    # 1. Notify assigned agent if assigned
+    if ticket.assigned_to and ticket.assigned_to.is_active:
+        if not ticket.is_confidential or has_confidential_access(ticket.assigned_to):
+            recipients.append(ticket.assigned_to)
+
+    # 2. Notify eligible Support Leads for unassigned tickets
+    if not ticket.assigned_to:
+        leads = User.objects.filter(
+            models.Q(user_roles__role='SUPPORT_LEAD')
+            | models.Q(staff_profile__staff_role__code='SUPPORT_LEAD'),
+            is_active=True,
+        ).distinct()
+        for lead in leads:
+            if not ticket.is_confidential or has_confidential_access(lead):
+                recipients.append(lead)
+
+    # 3. Notify Platform Admins for Tier 3 escalation
+    if stage == EscalationStageChoices.TIER_3:
+        admins = User.objects.filter(
+            models.Q(user_roles__role=RoleChoices.ADMIN)
+            | models.Q(is_superuser=True),
+            is_active=True,
+        ).distinct()
+        for admin in admins:
+            recipients.append(admin)
+
+    # Deduplicate recipients by ID
+    unique_recipients = {}
+    for r in recipients:
+        if r.id not in unique_recipients:
+            unique_recipients[r.id] = r
+
+    specs = []
+    for r in unique_recipients.values():
+        title = f"Ticket {ticket.ticket_number} Escalated - {stage_desc}"
+        msg = f"Ticket {ticket.ticket_number} has reached {stage_desc}: {reason}"
+        specs.append(NotificationSpec(
+            recipient=r,
+            title=title[:255],
+            message=msg,
+            link="/platform?tab=support_overview",
+        ))
+
+    return specs
+
+
 EVENT_RESOLVERS = {
     # Phase 1 & 2
     'seller.application.approved': _seller_application_decision,
@@ -809,6 +1007,15 @@ EVENT_RESOLVERS = {
     'marketplace.productreview.replied': _review_replied,
     'marketplace.sellerreview.replied': _review_replied,
     'marketplace.review.moderated': _review_moderated,
+
+    # Support Tickets
+    'support.ticket.created': _support_ticket_created,
+    'support.ticket.assigned': _support_ticket_assigned,
+    'support.ticket.customer_replied': _support_ticket_customer_replied,
+    'support.ticket.agent_replied': _support_ticket_agent_replied,
+    'support.ticket.status_updated': _support_ticket_status_updated,
+    'support.ticket.sla_breached': _support_ticket_sla_breached,
+    'support.ticket.escalated': _support_ticket_escalated,
 }
 
 

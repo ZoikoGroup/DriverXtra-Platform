@@ -35,6 +35,9 @@ urlpatterns = [
     # Phase 6: Workshop Services, Bookings & Quotations
     path('api/v1/workshops/', include('apps.workshops.urls')),
 
+    # Phase 4: Customer Support & Ticketing System
+    path('api/v1/support/', include('apps.support.urls')),
+
     # Platform Core: Regional Configuration & Multi-Country Specifications
     path('api/v1/regions/', include('platform_core.regional.urls')),
 

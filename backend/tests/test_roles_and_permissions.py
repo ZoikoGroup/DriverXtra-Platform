@@ -1,4 +1,5 @@
 import pytest
+from django.test import override_settings
 from rest_framework import status
 from apps.identity.models import User, RoleChoices
 
@@ -94,7 +95,7 @@ class TestRolesAndPermissions:
 
         support_role = StaffRole.objects.get(code='SUPPORT_AGENT')
         support_perm_codes = list(support_role.role_permissions.values_list('permission__code', flat=True))
-        assert 'dispute.manage' in support_perm_codes
+        assert 'dispute.manage' not in support_perm_codes
         assert 'seller.verify' not in support_perm_codes
 
     def test_has_permission_drf_class(self, admin_user, staff_user, buyer_user):
@@ -110,7 +111,7 @@ class TestRolesAndPermissions:
         profile.staff_role = support_role
         profile.save()
 
-        assert staff_user.has_permission('dispute.manage') is True
+        assert staff_user.has_permission('dispute.manage') is False
         assert staff_user.has_permission('seller.verify') is False
         assert staff_user.has_permission('listing.review') is False
 
@@ -209,6 +210,7 @@ class TestRolesAndPermissions:
         bad_switch = api_client.post('/api/v1/auth/switch-role/', {'role': 'ADMIN'}, format='json')
         assert bad_switch.status_code == status.HTTP_400_BAD_REQUEST
 
+    @override_settings(MFA_MANDATORY_ENFORCED=True)
     def test_staff_totp_mfa_flow_and_15_minute_tokens(self, api_client, staff_user):
         import pyotp
         import jwt
@@ -265,6 +267,7 @@ class TestRolesAndPermissions:
         # 15 minutes = 900 seconds
         assert 890 <= exp_diff <= 910
 
+    @override_settings(MFA_MANDATORY_ENFORCED=True)
     def test_mfa_login_challenge_rejects_invalid_code_and_tampered_token(self, api_client, staff_user):
         import pyotp
 
@@ -418,6 +421,7 @@ class TestActiveRoleAndSessionConsistency:
         assert set(api_client.get('/api/v1/users/me/').json()['permissions']) == set(
             Permission.objects.values_list('code', flat=True))
 
+    @override_settings(MFA_MANDATORY_ENFORCED=True)
     def test_mfa_verify_rejected_after_account_suspended(self, api_client, staff_user):
         import pyotp
         from apps.identity.models import AccountStatusChoices
@@ -447,7 +451,7 @@ class TestActiveRoleAndSessionConsistency:
 
 @pytest.mark.django_db
 class TestReviewModeratePermissionSeed:
-    """Phase 2: migration 0007 adds 'review.moderate' to VERIFICATION_OFFICER only (decision U2)."""
+    """Phase 2: migration 0010 adds 'review.moderate' to VERIFICATION_OFFICER only (decision U2)."""
 
     def test_review_moderate_permission_seeded_for_verification_officer_only(self):
         from apps.identity.models import Permission, StaffRole
@@ -460,7 +464,7 @@ class TestReviewModeratePermissionSeed:
     def test_existing_staff_role_permissions_unchanged(self):
         from apps.identity.models import StaffRole
         expected = {
-            'SUPPORT_AGENT': {'dispute.manage'},
+            'SUPPORT_AGENT': {'support.ticket.manage'},  # D1: main 0007 removed dispute.manage, 0009 added this
             'VERIFICATION_OFFICER': {'seller.verify', 'listing.review', 'review.moderate'},
             'DISPUTE_MANAGER': {'dispute.manage', 'order.refund'},
             'FINANCE_OFFICER': {'finance.payout', 'order.refund'},

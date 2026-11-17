@@ -93,7 +93,7 @@ def drop_session_version_trigger(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('identity', '0007_add_review_moderate_permission'),
+        ('identity', '0010_add_review_moderate_permission'),
     ]
 
     operations = [

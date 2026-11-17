@@ -560,7 +560,7 @@ class PaymentService:
             data_obj = payload.get('data', {}).get('object', {})
             obj_type = data_obj.get('object')
 
-            if obj_type == 'refund':
+            if obj_type == 'refund' or str(data_obj.get('id', '')).startswith('re_'):
                 gateway_refund_id = data_obj.get('id')
                 rfnd_meta = data_obj.get('metadata', {}) or {}
                 rfnd_num = rfnd_meta.get('refund_number')
@@ -570,7 +570,7 @@ class PaymentService:
                     refund_obj = Refund.objects.filter(gateway_refund_id=gateway_refund_id).first()
                 if not refund_obj and rfnd_num:
                     refund_obj = Refund.objects.filter(refund_number=rfnd_num).first()
-            elif obj_type == 'charge':
+            elif obj_type == 'charge' or 'refunds' in data_obj or str(data_obj.get('id', '')).startswith('ch_'):
                 refunds_data = data_obj.get('refunds', {}).get('data', [])
                 if refunds_data:
                     first_rfnd = refunds_data[0]
@@ -776,8 +776,14 @@ class PaymentService:
             ):
                 if not refund_obj and locked_order:
                     refund_obj = locked_order.refunds.filter(
-                        status__in=[RefundStatusChoices.PENDING, RefundStatusChoices.PROCESSING]
+                        status__in=[
+                            RefundStatusChoices.PENDING,
+                            RefundStatusChoices.PROCESSING,
+                            RefundStatusChoices.PROCESSING_UNKNOWN,
+                        ]
                     ).first()
+                if not refund_obj and locked_order:
+                    refund_obj = locked_order.refunds.order_by('-created_at').first()
 
                 if refund_obj:
                     locked_rfnd = Refund.objects.select_for_update().get(id=refund_obj.id)
@@ -791,64 +797,231 @@ class PaymentService:
                             is_succeeded = True
 
                     if is_succeeded and locked_rfnd.status != RefundStatusChoices.SUCCEEDED:
-                        locked_rfnd.status = RefundStatusChoices.SUCCEEDED
-                        locked_rfnd.processed_at = timezone.now()
-                        locked_rfnd.save(update_fields=['status', 'gateway_refund_id', 'processed_at', 'updated_at'])
+                        ord_target = locked_order or locked_rfnd.order
+                        is_late_resolution = locked_rfnd.status in (
+                            RefundStatusChoices.FAILED,
+                            RefundStatusChoices.CANCELLED,
+                        )
 
-                        existing_rfnd_tx = PaymentTransaction.objects.filter(
-                            order=locked_order or locked_rfnd.order,
-                            transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
-                            status=PaymentTransaction.StatusChoices.SUCCESS,
-                            provider_transaction_id=gateway_refund_id or locked_rfnd.gateway_refund_id or locked_rfnd.refund_number,
-                        ).first()
+                        # Check whether replacement refunds exist on this order
+                        other_refunds = ord_target.refunds.exclude(id=locked_rfnd.id)
+                        replacement_succeeded = other_refunds.filter(status=RefundStatusChoices.SUCCEEDED).exists()
+                        replacement_active = other_refunds.filter(status__in=[
+                            RefundStatusChoices.PENDING,
+                            RefundStatusChoices.PROCESSING,
+                            RefundStatusChoices.PROCESSING_UNKNOWN,
+                        ]).exists()
 
-                        if not existing_rfnd_tx:
+                        # Authoritative balance check: ensure total succeeded will not exceed order total paid
+                        other_succeeded_total = other_refunds.filter(
+                            status=RefundStatusChoices.SUCCEEDED
+                        ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+
+                        would_over_refund = (other_succeeded_total + locked_rfnd.amount) > ord_target.total_amount
+
+                        # If this is a late success after FAILED/CANCELLED and a replacement exists OR would over-refund:
+                        # Prevent duplicate refund execution and balance corruption!
+                        if is_late_resolution and (replacement_succeeded or replacement_active or would_over_refund):
+                            conflict_reason = (
+                                "REPLACEMENT_REFUND_SUCCEEDED" if replacement_succeeded
+                                else ("REPLACEMENT_REFUND_ACTIVE" if replacement_active else "ORDER_BALANCE_EXCEEDED")
+                            )
+                            logger.warning(
+                                "Late gateway success webhook %s for %s refund %s detected conflict (%s) on order %s.",
+                                event_id, locked_rfnd.status, locked_rfnd.refund_number, conflict_reason, ord_target.order_number
+                            )
+
+                            if gateway_refund_id and not locked_rfnd.gateway_refund_id:
+                                locked_rfnd.gateway_refund_id = gateway_refund_id
+
+                            conflict_note = (
+                                f"[FINANCIAL RECONCILIATION REQUIRED - CONFLICTING GATEWAY SUCCESS]: "
+                                f"Late gateway webhook confirmed success ({gateway_refund_id or event_id}), "
+                                f"but refund was previously {locked_rfnd.status} and replacement refund or balance limit "
+                                f"detected (other succeeded: {ord_target.currency} {other_succeeded_total}, order total: {ord_target.currency} {ord_target.total_amount}). "
+                                f"Status preserved as {locked_rfnd.status} to prevent duplicate payout."
+                            )
+                            locked_rfnd.notes = f"{locked_rfnd.notes}\n{conflict_note}".strip()
+                            locked_rfnd.save(update_fields=['gateway_refund_id', 'notes', 'updated_at'])
+
+                            # Record genuine gateway outcome in immutable payment transaction ledger with conflict flag
                             PaymentTransaction.objects.create(
-                                order=locked_order or locked_rfnd.order,
+                                order=ord_target,
                                 transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
                                 provider=p_name,
                                 amount=locked_rfnd.amount,
                                 currency=locked_rfnd.currency,
                                 status=PaymentTransaction.StatusChoices.SUCCESS,
                                 provider_transaction_id=gateway_refund_id or locked_rfnd.gateway_refund_id or locked_rfnd.refund_number,
-                                provider_order_id=(locked_order or locked_rfnd.order).payment_reference or '',
-                                raw_response=payload,
+                                provider_order_id=ord_target.payment_reference or '',
+                                idempotency_key=f"conflict_{event_id}_{locked_rfnd.refund_number}",
+                                error_message=f"CONFLICT: Late gateway success for {locked_rfnd.status} refund. Flagged for financial reconciliation.",
+                                raw_response={
+                                    "conflict": True,
+                                    "conflict_reason": conflict_reason,
+                                    "manual_reconciliation_required": True,
+                                    "original_refund_status": locked_rfnd.status,
+                                    "gateway_refund_id": gateway_refund_id,
+                                    "other_refunded_total": str(other_succeeded_total),
+                                    "order_total": str(ord_target.total_amount),
+                                    "payload": payload,
+                                },
                             )
 
-                        ord_target = locked_order or locked_rfnd.order
-                        tot_refunded = ord_target.refunds.filter(
-                            status=RefundStatusChoices.SUCCEEDED
-                        ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+                            record_audit_entry(
+                                event_type="marketplace.refund.webhook_conflict",
+                                action="marketplace:refund.webhook_conflict",
+                                resource_type="Refund",
+                                resource_id=str(locked_rfnd.id),
+                                actor_id=ord_target.buyer_id,
+                                metadata={
+                                    "conflict_type": conflict_reason,
+                                    "refund_number": locked_rfnd.refund_number,
+                                    "order_number": ord_target.order_number,
+                                    "amount": str(locked_rfnd.amount),
+                                    "currency": locked_rfnd.currency,
+                                    "gateway_refund_id": gateway_refund_id,
+                                    "current_status": locked_rfnd.status,
+                                    "reconciliation_required": True,
+                                },
+                            )
+                            settled_this_request = True
+                        elif would_over_refund:
+                            logger.error(
+                                "Gateway success webhook %s for refund %s would exceed order %s total (%s + %s > %s). Flagged.",
+                                event_id, locked_rfnd.refund_number, ord_target.order_number,
+                                other_succeeded_total, locked_rfnd.amount, ord_target.total_amount
+                            )
+                            conflict_note = (
+                                f"[FINANCIAL RECONCILIATION REQUIRED - OVER-REFUND BLOCKED]: "
+                                f"Gateway webhook confirmed success ({gateway_refund_id or event_id}), "
+                                f"but adding {ord_target.currency} {locked_rfnd.amount} would exceed order total "
+                                f"{ord_target.currency} {ord_target.total_amount} (already succeeded: {ord_target.currency} {other_succeeded_total})."
+                            )
+                            locked_rfnd.notes = f"{locked_rfnd.notes}\n{conflict_note}".strip()
+                            locked_rfnd.save(update_fields=['notes', 'updated_at'])
 
-                        if tot_refunded >= ord_target.total_amount:
-                            ord_target.payment_status = PaymentStatusChoices.REFUNDED
-                            ord_target.save(update_fields=['payment_status', 'updated_at'])
+                            PaymentTransaction.objects.create(
+                                order=ord_target,
+                                transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                                provider=p_name,
+                                amount=locked_rfnd.amount,
+                                currency=locked_rfnd.currency,
+                                status=PaymentTransaction.StatusChoices.SUCCESS,
+                                provider_transaction_id=gateway_refund_id or locked_rfnd.gateway_refund_id or locked_rfnd.refund_number,
+                                provider_order_id=ord_target.payment_reference or '',
+                                idempotency_key=f"conflict_{event_id}_{locked_rfnd.refund_number}",
+                                error_message="CONFLICT: Gateway success would exceed order total refundable balance.",
+                                raw_response={
+                                    "conflict": True,
+                                    "conflict_reason": "ORDER_BALANCE_EXCEEDED",
+                                    "manual_reconciliation_required": True,
+                                    "payload": payload,
+                                },
+                            )
+                            record_audit_entry(
+                                event_type="marketplace.refund.webhook_conflict",
+                                action="marketplace:refund.webhook_conflict",
+                                resource_type="Refund",
+                                resource_id=str(locked_rfnd.id),
+                                actor_id=ord_target.buyer_id,
+                                metadata={
+                                    "conflict_type": "ORDER_BALANCE_EXCEEDED",
+                                    "refund_number": locked_rfnd.refund_number,
+                                    "order_number": ord_target.order_number,
+                                    "amount": str(locked_rfnd.amount),
+                                    "reconciliation_required": True,
+                                },
+                            )
+                            settled_this_request = True
+                        else:
+                            # Genuine gateway success with no replacement conflicts: transition to SUCCEEDED
+                            previous_status = locked_rfnd.status
+                            locked_rfnd.status = RefundStatusChoices.SUCCEEDED
+                            locked_rfnd.processed_at = timezone.now()
+                            locked_rfnd.failure_reason = ''
+                            locked_rfnd.next_reconciliation_at = None
+                            if is_late_resolution:
+                                locked_rfnd.notes = f"{locked_rfnd.notes}\n[Processed via Late Gateway Webhook]: Reconciled from {previous_status} to SUCCEEDED. No replacement conflict detected.".strip()
+                            locked_rfnd.save(update_fields=['status', 'gateway_refund_id', 'processed_at', 'failure_reason', 'next_reconciliation_at', 'notes', 'updated_at'])
 
-                        record_audit_entry(
-                            event_type="marketplace.refund.processed",
-                            action="marketplace:refund.process",
-                            resource_type="Refund",
-                            resource_id=str(locked_rfnd.id),
-                            actor_id=ord_target.buyer_id,
-                            metadata={
-                                "refund_number": locked_rfnd.refund_number,
-                                "order_number": ord_target.order_number,
-                                "amount": str(locked_rfnd.amount),
-                                "currency": locked_rfnd.currency,
-                                "gateway_refund_id": gateway_refund_id or locked_rfnd.gateway_refund_id,
-                                "settlement_source": "webhook",
-                                "provider": p_name,
-                            },
-                        )
-                        settled_this_request = True
+                            existing_rfnd_tx = PaymentTransaction.objects.filter(
+                                order=ord_target,
+                                transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                                status=PaymentTransaction.StatusChoices.SUCCESS,
+                                provider_transaction_id=gateway_refund_id or locked_rfnd.gateway_refund_id or locked_rfnd.refund_number,
+                            ).first()
+
+                            if not existing_rfnd_tx:
+                                PaymentTransaction.objects.create(
+                                    order=ord_target,
+                                    transaction_type=PaymentTransaction.TransactionTypeChoices.REFUND,
+                                    provider=p_name,
+                                    amount=locked_rfnd.amount,
+                                    currency=locked_rfnd.currency,
+                                    status=PaymentTransaction.StatusChoices.SUCCESS,
+                                    provider_transaction_id=gateway_refund_id or locked_rfnd.gateway_refund_id or locked_rfnd.refund_number,
+                                    provider_order_id=ord_target.payment_reference or '',
+                                    idempotency_key=locked_rfnd.idempotency_key or locked_rfnd.refund_number,
+                                    raw_response=payload,
+                                )
+
+                            tot_refunded = ord_target.refunds.filter(
+                                status=RefundStatusChoices.SUCCEEDED
+                            ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+
+                            if tot_refunded >= ord_target.total_amount:
+                                ord_target.payment_status = PaymentStatusChoices.REFUNDED
+                                ord_target.save(update_fields=['payment_status', 'updated_at'])
+
+                            # Check and execute associated ApprovalRequest if any
+                            from apps.identity.models import ApprovalRequest, ApprovalStatusChoices
+                            app_req = ApprovalRequest.objects.filter(
+                                target_type='Refund',
+                                target_id=str(locked_rfnd.id),
+                                status=ApprovalStatusChoices.APPROVED,
+                            ).first()
+                            if app_req:
+                                if app_req.execution_error:
+                                    app_req.execution_error = ""
+                                    app_req.save(update_fields=['execution_error', 'updated_at'])
+                                app_req.mark_executed(
+                                    executor=locked_rfnd.approved_by,
+                                    notes=f"Gateway refund confirmed via webhook event {event_id}."
+                                )
+
+                            record_audit_entry(
+                                event_type="marketplace.refund.processed",
+                                action="marketplace:refund.process",
+                                resource_type="Refund",
+                                resource_id=str(locked_rfnd.id),
+                                actor_id=ord_target.buyer_id,
+                                metadata={
+                                    "refund_number": locked_rfnd.refund_number,
+                                    "order_number": ord_target.order_number,
+                                    "amount": str(locked_rfnd.amount),
+                                    "currency": locked_rfnd.currency,
+                                    "gateway_refund_id": gateway_refund_id or locked_rfnd.gateway_refund_id,
+                                    "settlement_source": "late_webhook" if is_late_resolution else "webhook",
+                                    "revived_from": previous_status if is_late_resolution else None,
+                                    "provider": p_name,
+                                },
+                            )
+                            settled_this_request = True
 
             elif event_type in (
                 'refund.failed',
             ):
                 if not refund_obj and locked_order:
                     refund_obj = locked_order.refunds.filter(
-                        status__in=[RefundStatusChoices.PENDING, RefundStatusChoices.PROCESSING]
+                        status__in=[
+                            RefundStatusChoices.PENDING,
+                            RefundStatusChoices.PROCESSING,
+                            RefundStatusChoices.PROCESSING_UNKNOWN,
+                        ]
                     ).first()
+                if not refund_obj and locked_order:
+                    refund_obj = locked_order.refunds.order_by('-created_at').first()
 
                 if refund_obj:
                     locked_rfnd = Refund.objects.select_for_update().get(id=refund_obj.id)
@@ -856,7 +1029,9 @@ class PaymentService:
                         locked_rfnd.status = RefundStatusChoices.FAILED
                         err_text = payload.get('payload', {}).get('refund', {}).get('entity', {}).get('error_description') or 'Refund failed at payment gateway'
                         locked_rfnd.failure_reason = err_text
-                        locked_rfnd.save(update_fields=['status', 'failure_reason', 'updated_at'])
+                        locked_rfnd.next_reconciliation_at = None
+                        locked_rfnd.save(update_fields=['status', 'failure_reason', 'next_reconciliation_at', 'updated_at'])
+
 
                         PaymentTransaction.objects.create(
                             order=locked_order or locked_rfnd.order,

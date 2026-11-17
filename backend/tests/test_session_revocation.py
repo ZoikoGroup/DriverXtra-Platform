@@ -1,4 +1,4 @@
-"""Session-version revocation (migration 0008 trigger + 'sv' JWT claim).
+"""Session-version revocation (migration 0011 trigger + 'sv' JWT claim).
 
 Every suspension pathway (Model.save, QuerySet.update, bulk_update, raw SQL) must:
   - block old access and refresh tokens while suspended;
@@ -14,6 +14,7 @@ import pytest
 from django.conf import settings
 from django.core import signing
 from django.db import connection
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -195,7 +196,7 @@ def test_login_suspension_race_token_is_rejected(buyer_user):
 
 @pytest.mark.django_db
 def test_tokens_without_sv_claim_are_version_zero(buyer_user, seller_user):
-    legacy = RefreshToken.for_user(buyer_user)  # no 'sv' claim, as issued before migration 0008
+    legacy = RefreshToken.for_user(buyer_user)  # no 'sv' claim, as issued before migration 0011
     assert 'sv' not in legacy.payload
     assert _me(str(legacy.access_token)).status_code == status.HTTP_200_OK
     refreshed = _refresh(str(legacy))
@@ -263,6 +264,7 @@ def _mfa_verify(pre_auth_token, code):
 
 
 @pytest.mark.django_db
+@override_settings(MFA_MANDATORY_ENFORCED=True)
 def test_mfa_challenge_revoked_by_suspension_even_after_reactivation(staff_user):
     totp = _enable_mfa(staff_user)
     pre_auth = _mfa_challenge(staff_user)
@@ -298,7 +300,7 @@ def test_mfa_payload_without_sv_is_version_zero(staff_user):
 @pytest.mark.django_db
 def test_backfill_targets_only_currently_unusable_accounts():
     from django.apps import apps as django_apps
-    migration = importlib.import_module('apps.identity.migrations.0008_user_session_version')
+    migration = importlib.import_module('apps.identity.migrations.0011_user_session_version')
     active = User.objects.create_user(email='bf_active@driverxtra.com', password=PASSWORD)
     suspended = User.objects.create_user(email='bf_susp@driverxtra.com', password=PASSWORD,
                                          status=AccountStatusChoices.SUSPENDED)
@@ -365,7 +367,7 @@ def _trigger_present():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_migration_0008_is_reversible():
+def test_migration_0011_is_reversible():
     """Runs only against the automated test database (never the development database)."""
     if connection.vendor not in ('sqlite', 'postgresql'):
         pytest.skip('Trigger only implemented for SQLite and PostgreSQL.')
@@ -374,13 +376,13 @@ def test_migration_0008_is_reversible():
     assert 'session_version' in _user_columns() and _trigger_present()
 
     executor = MigrationExecutor(connection)
-    executor.migrate([('identity', '0007_add_review_moderate_permission')])
+    executor.migrate([('identity', '0010_add_review_moderate_permission')])
     assert 'session_version' not in _user_columns()
     assert not _trigger_present()
 
     executor = MigrationExecutor(connection)
     executor.loader.build_graph()
-    executor.migrate([('identity', '0008_user_session_version')])
+    executor.migrate([('identity', '0011_user_session_version')])
     assert 'session_version' in _user_columns()
     assert _trigger_present()
 
@@ -388,3 +390,70 @@ def test_migration_0008_is_reversible():
     user = User.objects.create_user(email='rev_check@driverxtra.com', password=PASSWORD)
     User.objects.filter(pk=user.pk).update(status=AccountStatusChoices.SUSPENDED)
     assert _version(user) == 1
+
+
+# --------------------------------------------------------------------------- merge regressions (main + indra)
+
+def _enrollment_challenge(user):
+    data = APIClient().post('/api/v1/auth/login/', {'email': user.email, 'password': PASSWORD}, format='json').json()
+    assert data['mfa_required'] is True and data['mfa_enrollment_required'] is True, data
+    assert 'tokens' not in data
+    return data['pre_auth_token']
+
+
+@pytest.mark.django_db
+@override_settings(MFA_MANDATORY_ENFORCED=True)
+def test_mfa_enrollment_token_carries_sv_and_completes_with_stamped_tokens(staff_user):
+    import pyotp
+    pre_auth = _enrollment_challenge(staff_user)
+    payload = signing.loads(pre_auth, salt='driverxtra.mfa', max_age=300)
+    assert payload['action'] == 'mfa_enrollment' and payload['sv'] == 0
+
+    enrol = APIClient().post('/api/v1/auth/mfa/enrol/', {'pre_auth_token': pre_auth}, format='json')
+    assert enrol.status_code == status.HTTP_200_OK, enrol.content
+    res = _mfa_verify(pre_auth, pyotp.TOTP(enrol.json()['secret']).now())
+    assert res.status_code == status.HTTP_200_OK, res.content
+    assert _sv_claim(res.json()['tokens']['access']) == 0
+    assert _me(res.json()['tokens']['access']).status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+@override_settings(MFA_MANDATORY_ENFORCED=True)
+def test_mfa_enrollment_token_revoked_by_suspension_even_after_reactivation(staff_user):
+    pre_auth = _enrollment_challenge(staff_user)
+    User.objects.filter(pk=staff_user.pk).update(status=AccountStatusChoices.SUSPENDED)
+    suspended = APIClient().post('/api/v1/auth/mfa/enrol/', {'pre_auth_token': pre_auth}, format='json')
+    assert suspended.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'secret' not in suspended.json()
+
+    User.objects.filter(pk=staff_user.pk).update(status=AccountStatusChoices.ACTIVE)
+    reactivated = APIClient().post('/api/v1/auth/mfa/enrol/', {'pre_auth_token': pre_auth}, format='json')
+    assert reactivated.status_code == status.HTTP_400_BAD_REQUEST
+    assert 'secret' not in reactivated.json()
+    assert _mfa_verify(pre_auth, '123456').status_code == status.HTTP_400_BAD_REQUEST
+
+    fresh = _enrollment_challenge(staff_user)
+    assert signing.loads(fresh, salt='driverxtra.mfa', max_age=300)['sv'] == 1
+    assert APIClient().post('/api/v1/auth/mfa/enrol/', {'pre_auth_token': fresh}, format='json').status_code == status.HTTP_200_OK
+
+
+def test_routed_refresh_endpoint_uses_the_single_session_version_aware_serializer():
+    """Guards the hidden merge conflict: the routed refresh view must use the configured serializer."""
+    from django.urls import resolve
+    from rest_framework_simplejwt.settings import api_settings
+    from apps.identity import authentication
+    from apps.identity.serializers import StaffAwareTokenRefreshSerializer
+
+    view_cls = resolve('/api/v1/auth/token/refresh/').func.view_class
+    assert view_cls.serializer_class is StaffAwareTokenRefreshSerializer
+    assert settings.SIMPLE_JWT['TOKEN_REFRESH_SERIALIZER'] == 'apps.identity.serializers.StaffAwareTokenRefreshSerializer'
+    assert api_settings.TOKEN_REFRESH_SERIALIZER is not None
+    assert not hasattr(authentication, 'StaffAwareTokenRefreshSerializer')
+
+
+@pytest.mark.django_db
+def test_suspended_account_refresh_still_blocked_after_d4(buyer_user):
+    tokens = _login(buyer_user.email)
+    buyer_user.status = AccountStatusChoices.DEACTIVATED
+    buyer_user.save()
+    assert _refresh(tokens['refresh']).status_code == status.HTTP_401_UNAUTHORIZED

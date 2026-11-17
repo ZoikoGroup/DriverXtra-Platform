@@ -497,3 +497,108 @@ class RazorpayPaymentProvider(BasePaymentProvider):
             }
 
         return False, "Live Razorpay refunds require configured credentials (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET).", {}
+
+    def inquire_refund(
+        self,
+        payment_reference: str,
+        refund_number: str,
+        gateway_refund_id: Optional[str] = None,
+    ) -> Tuple[str, Optional[str], Dict[str, Any]]:
+        """
+        Inquires Razorpay to determine the authoritative status of a refund.
+        Queries https://api.razorpay.com/v1/payments/{payment_id}/refunds
+        or https://api.razorpay.com/v1/refunds/{gateway_refund_id}.
+        Matches by receipt or notes[refund_number].
+        Returns:
+            status: 'SUCCEEDED' | 'FAILED' | 'PROCESSING' | 'NOT_FOUND' | 'UNKNOWN'
+            gateway_refund_id_or_error: string
+            extra_details: dict
+        """
+        payment_id = (payment_reference or '').strip()
+        rfnd_num = (refund_number or '').strip()
+        gw_id = (gateway_refund_id or '').strip()
+
+        # Live / Sandbox call when configured (or when force_network_call is enabled for tests)
+        if (self.is_configured and not getattr(settings, 'IS_TESTING', False)) or getattr(self, 'force_network_call', False):
+            auth_str = f"{self.key_id}:{self.key_secret}"
+            auth_header = base64.b64encode(auth_str.encode('utf-8')).decode('ascii')
+            headers = {
+                "Authorization": f"Basic {auth_header}",
+                "Content-Type": "application/json",
+                "User-Agent": "DriverXtra-Platform/1.0",
+            }
+
+            # 1. Query by known gateway_refund_id if available
+            if gw_id:
+                url = f"{self.api_url}/refunds/{urllib.parse.quote(gw_id)}"
+                req = urllib.request.Request(url, headers=headers, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        st = data.get('status', '').lower()
+                        if st == 'processed':
+                            return 'SUCCEEDED', data.get('id'), data
+                        elif st == 'pending':
+                            return 'PROCESSING', data.get('id'), data
+                        elif st == 'failed':
+                            return 'FAILED', data.get('error_description') or 'Razorpay refund failed', data
+                        return 'UNKNOWN', f"Unrecognized Razorpay refund status '{st}'", data
+                except urllib.error.HTTPError as http_err:
+                    if http_err.code == 404:
+                        return 'NOT_FOUND', f"Refund '{gw_id}' not found on Razorpay", {}
+                    err_text = http_err.read().decode('utf-8', errors='replace')
+                    return 'UNKNOWN', f"Razorpay API error (HTTP {http_err.code}): {err_text}", {}
+                except Exception as exc:
+                    return 'UNKNOWN', f"Connection error querying Razorpay: {str(exc)}", {}
+
+            # 2. Query payment's refunds list to match receipt or notes
+            if payment_id:
+                url = f"{self.api_url}/payments/{urllib.parse.quote(payment_id)}/refunds"
+                req = urllib.request.Request(url, headers=headers, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        items = data.get('items', [])
+                        for item in items:
+                            item_notes = item.get('notes', {}) or {}
+                            receipt = item.get('receipt', '')
+                            if receipt == rfnd_num or item_notes.get('refund_number') == rfnd_num or (gw_id and item.get('id') == gw_id):
+                                st = item.get('status', '').lower()
+                                if st == 'processed':
+                                    return 'SUCCEEDED', item.get('id'), item
+                                elif st == 'pending':
+                                    return 'PROCESSING', item.get('id'), item
+                                elif st == 'failed':
+                                    return 'FAILED', item.get('error_description') or 'Razorpay refund failed', item
+                                return 'UNKNOWN', f"Unrecognized Razorpay refund status '{st}'", item
+                        return 'NOT_FOUND', f"No refund with number '{rfnd_num}' found on Razorpay for payment '{payment_id}'", data
+                except urllib.error.HTTPError as http_err:
+                    if http_err.code == 404:
+                        return 'NOT_FOUND', f"Payment '{payment_id}' not found on Razorpay", {}
+                    err_text = http_err.read().decode('utf-8', errors='replace')
+                    return 'UNKNOWN', f"Razorpay API error (HTTP {http_err.code}): {err_text}", {}
+                except Exception as exc:
+                    return 'UNKNOWN', f"Connection error querying Razorpay: {str(exc)}", {}
+
+        # Test mode / sandbox mock behavior
+        if self.test_mode or getattr(settings, 'IS_TESTING', False):
+            check_key = f"{gw_id}_{rfnd_num}".lower()
+            if "fail" in check_key:
+                return 'FAILED', "Simulated Razorpay refund failure", {"status": "failed", "test_mode": True}
+            if "unknown" in check_key or "timeout" in check_key:
+                return 'UNKNOWN', "Simulated gateway connection error during inquiry", {"test_mode": True}
+            if "not_found" in check_key:
+                return 'NOT_FOUND', "Simulated Razorpay refund not found", {"test_mode": True}
+            if "processing" in check_key or "pending" in check_key:
+                return 'PROCESSING', gw_id or f"rfnd_test_{rfnd_num}", {"status": "pending", "test_mode": True}
+
+            rfnd_id = gw_id or f"rfnd_test_reconciled_{rfnd_num}"
+            return 'SUCCEEDED', rfnd_id, {
+                "id": rfnd_id,
+                "status": "processed",
+                "payment_id": payment_id,
+                "test_mode": True,
+            }
+
+        return 'UNKNOWN', "Live Razorpay inquiry requires configured credentials.", {}
+

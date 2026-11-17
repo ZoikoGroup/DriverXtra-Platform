@@ -41,3 +41,7 @@ yarn-error.log*
 next-env.d.ts
 
 driverxtra_db_before_part_b.dump
+
+# Database dumps and private support attachments (never commit)
+*.dump
+backend/private_media/

@@ -101,7 +101,7 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     # Session revocation counter. JWTs carry it as the 'sv' claim and are rejected when it differs.
-    # Maintained by the database trigger created in migration 0008 (PostgreSQL and SQLite): it is
+    # Maintained by the database trigger created in migration 0011 (PostgreSQL and SQLite): it is
     # incremented whenever the account becomes unusable (is_active=False, SUSPENDED or DEACTIVATED)
     # by ANY path (save, QuerySet.update, bulk_update, raw SQL) and can never be lowered.
     # Renaming this column, status, is_active or the identity_user table requires updating the trigger.
@@ -452,6 +452,7 @@ class ApprovalStatusChoices(models.TextChoices):
     APPROVED = 'APPROVED', 'Approved'
     REJECTED = 'REJECTED', 'Rejected'
     CANCELLED = 'CANCELLED', 'Cancelled'
+    EXECUTED = 'EXECUTED', 'Executed'
 
 
 class ApprovalRequest(BaseUUIDModel):
@@ -470,6 +471,9 @@ class ApprovalRequest(BaseUUIDModel):
     action_type = models.CharField(max_length=64, db_index=True)
     target_type = models.CharField(max_length=64, db_index=True)
     target_id = models.CharField(max_length=128, db_index=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, blank=True, default='GBP')
+    reason = models.TextField(blank=True, default='')
     payload = models.JSONField(default=dict, blank=True)
     status = models.CharField(
         max_length=32,
@@ -481,6 +485,15 @@ class ApprovalRequest(BaseUUIDModel):
     notes = models.TextField(blank=True, default='')
     requested_at = models.DateTimeField(default=timezone.now)
     reviewed_at = models.DateTimeField(null=True, blank=True)
+    executed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approval_requests_executed',
+    )
+    executed_at = models.DateTimeField(null=True, blank=True)
+    execution_error = models.TextField(blank=True, default='')
 
     class Meta:
         verbose_name = 'Approval Request'
@@ -493,6 +506,8 @@ class ApprovalRequest(BaseUUIDModel):
     def approve(self, approver, notes=''):
         if approver.id == self.requester_id:
             raise ValueError("Maker-checker violation: Requester cannot approve their own request.")
+        if self.status != ApprovalStatusChoices.PENDING:
+            raise ValueError(f"Cannot approve request with status '{self.status}'.")
         self.approver = approver
         self.status = ApprovalStatusChoices.APPROVED
         self.notes = notes
@@ -502,9 +517,30 @@ class ApprovalRequest(BaseUUIDModel):
     def reject(self, approver, reason, notes=''):
         if approver.id == self.requester_id:
             raise ValueError("Maker-checker violation: Requester cannot review their own request.")
+        if self.status != ApprovalStatusChoices.PENDING:
+            raise ValueError(f"Cannot reject request with status '{self.status}'.")
         self.approver = approver
         self.status = ApprovalStatusChoices.REJECTED
         self.rejection_reason = reason
         self.notes = notes
         self.reviewed_at = timezone.now()
         self.save(update_fields=['approver', 'status', 'rejection_reason', 'notes', 'reviewed_at', 'updated_at'])
+
+    def cancel(self, actor, notes=''):
+        if self.status != ApprovalStatusChoices.PENDING:
+            raise ValueError(f"Cannot cancel request with status '{self.status}'.")
+        self.status = ApprovalStatusChoices.CANCELLED
+        if notes:
+            self.notes = f"{self.notes}\n[Cancelled]: {notes}".strip()
+        self.save(update_fields=['status', 'notes', 'updated_at'])
+
+    def mark_executed(self, executor, notes=''):
+        if self.status != ApprovalStatusChoices.APPROVED:
+            raise ValueError(f"Cannot execute request with status '{self.status}'.")
+        self.status = ApprovalStatusChoices.EXECUTED
+        self.executed_by = executor
+        self.executed_at = timezone.now()
+        self.execution_error = ''
+        if notes:
+            self.notes = f"{self.notes}\n[Executed]: {notes}".strip()
+        self.save(update_fields=['status', 'executed_by', 'executed_at', 'execution_error', 'notes', 'updated_at'])
