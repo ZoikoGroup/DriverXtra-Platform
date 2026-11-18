@@ -716,6 +716,7 @@ class TestStockBackfillMigration:
         # Stock quantity remains untouched
         assert RevListing.objects.get(id=listing_needs_backfill.id).stock_quantity == 8
 
-        # 5. Restore executor to latest state for subsequent tests
+        # 5. Restore ALL apps to their latest migration state
         executor = MigrationExecutor(connection)
-        executor.migrate([('marketplace', '0003_backfill_initial_stock_movements')])
+        latest_migrations = executor.loader.graph.leaf_nodes()
+        executor.migrate(latest_migrations)

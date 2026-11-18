@@ -112,6 +112,10 @@ def staff_admin(db):
         is_email_verified=True,
     )
     user.add_role(RoleChoices.STAFF)
+    # Review moderator: explicit VERIFICATION_OFFICER sub-role ('review.moderate'); staff
+    # without a sub-role hold no permissions.
+    from apps.identity.models import StaffProfile, StaffRole
+    StaffProfile.objects.create(user=user, staff_role=StaffRole.objects.get(code='VERIFICATION_OFFICER'))
     return user
 
 
@@ -837,7 +841,7 @@ def _ws_staff(email, staff_role_code=None):
     ('DISPUTE_MANAGER', False),
     ('FINANCE_OFFICER', False),
     ('VERIFICATION_OFFICER', True),
-    (None, True),  # STAFF without a sub-role falls back to VERIFICATION_OFFICER
+    (None, False),  # STAFF without an assigned sub-role holds no permissions (no implicit fallback)
 ])
 def test_workshop_review_moderation_requires_review_moderate(completed_service, buyer, workshop, staff_role_code, allowed):
     from django.core.exceptions import PermissionDenied

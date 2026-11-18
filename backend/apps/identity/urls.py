@@ -28,6 +28,19 @@ from .views import (
     ApprovalRequestCancelView,
     ApprovalRequestExecuteView,
 )
+from .admin_management_views import (
+    AdminOverviewMetricsView,
+    AdminSellerListView,
+    AdminSellerDetailView,
+    AdminSellerStatusView,
+    AdminWorkshopListView,
+    AdminWorkshopDetailView,
+    AdminWorkshopStatusView,
+    AdminBuyerListView,
+    AdminBuyerDetailView,
+    AdminBuyerStatusView,
+    AdminOrderMonitoringListView,
+)
 
 urlpatterns = [
     # Auth endpoints
@@ -61,6 +74,19 @@ urlpatterns = [
     path('admin/approvals/<str:pk>/reject/', ApprovalRequestRejectView.as_view(), name='admin-approvals-reject'),
     path('admin/approvals/<str:pk>/cancel/', ApprovalRequestCancelView.as_view(), name='admin-approvals-cancel'),
     path('admin/approvals/<str:pk>/execute/', ApprovalRequestExecuteView.as_view(), name='admin-approvals-execute'),
+
+    # Centralized Admin Management (Overview, Sellers, Workshops, Buyers, Orders)
+    path('admin/overview/metrics/', AdminOverviewMetricsView.as_view(), name='admin-overview-metrics'),
+    path('admin/sellers/', AdminSellerListView.as_view(), name='admin-sellers-list'),
+    path('admin/sellers/<uuid:pk>/', AdminSellerDetailView.as_view(), name='admin-sellers-detail'),
+    path('admin/sellers/<uuid:pk>/status/', AdminSellerStatusView.as_view(), name='admin-sellers-status'),
+    path('admin/workshops/', AdminWorkshopListView.as_view(), name='admin-workshops-list'),
+    path('admin/workshops/<uuid:pk>/', AdminWorkshopDetailView.as_view(), name='admin-workshops-detail'),
+    path('admin/workshops/<uuid:pk>/status/', AdminWorkshopStatusView.as_view(), name='admin-workshops-status'),
+    path('admin/buyers/', AdminBuyerListView.as_view(), name='admin-buyers-list'),
+    path('admin/buyers/<uuid:pk>/', AdminBuyerDetailView.as_view(), name='admin-buyers-detail'),
+    path('admin/buyers/<uuid:pk>/status/', AdminBuyerStatusView.as_view(), name='admin-buyers-status'),
+    path('admin/orders/', AdminOrderMonitoringListView.as_view(), name='admin-orders-monitoring-list'),
 
     # User profile endpoints
     path('users/me/', UserProfileView.as_view(), name='user-profile-me'),

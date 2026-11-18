@@ -248,6 +248,7 @@ def _enable_mfa(user):
     client = APIClient()
     client.force_authenticate(user=user)
     secret = client.post('/api/v1/auth/mfa/enrol/', format='json').json()['secret']
+    user.refresh_from_db()  # drop the cached staff_profile, as a fresh request would
     totp = pyotp.TOTP(secret)
     assert client.post('/api/v1/auth/mfa/verify/', {'code': totp.now()}, format='json').status_code == status.HTTP_200_OK
     return totp

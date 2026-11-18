@@ -36,5 +36,4 @@ Desktop.ini
 # Local database backups
 *.dump
 
-# Media / Generated uploads
-media/
+

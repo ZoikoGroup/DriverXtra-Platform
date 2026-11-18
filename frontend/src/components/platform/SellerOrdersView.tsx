@@ -9,8 +9,11 @@ import {
   PlatformShipment,
   CarrierOption,
   PlatformReturnRequest,
+  PlatformRefund,
+  RefundMethod,
   PlatformDispute,
   PlatformDisputeEvent,
+  resolveMediaUrl,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
@@ -41,11 +44,13 @@ import {
   Send,
   Scale,
   MessageSquare,
+  Car,
 } from "lucide-react";
+import SellerVehicleOrdersOffersSection from "./SellerVehicleOrdersOffersSection";
 
 interface SellerOrdersViewProps {
   initialOrderId?: string;
-  initialMainTab?: "orders" | "returns" | "disputes";
+  initialMainTab?: "orders" | "vehicles" | "returns" | "refunds" | "disputes";
 }
 
 type OrderStatusFilter =
@@ -117,13 +122,47 @@ export default function SellerOrdersView({
   const [trackingEventError, setTrackingEventError] = useState<string | null>(null);
 
   // Main Tab Navigation
-  const [activeMainTab, setActiveMainTab] = useState<"orders" | "returns" | "disputes">(initialMainTab || "orders");
+  const [activeMainTab, setActiveMainTab] = useState<"orders" | "vehicles" | "returns" | "refunds" | "disputes">(initialMainTab || "orders");
 
   useEffect(() => {
     if (initialMainTab) {
       queueMicrotask(() => setActiveMainTab(initialMainTab));
     }
   }, [initialMainTab]);
+
+  // Refunds State
+  const [sellerRefunds, setSellerRefunds] = useState<PlatformRefund[]>([]);
+  const [loadingRefunds, setLoadingRefunds] = useState(false);
+  const [refundsError, setRefundsError] = useState<string | null>(null);
+  const [refundStatusFilter, setRefundStatusFilter] = useState<string>("ALL");
+
+  // Direct Settlement Modal State
+  const [directSettlementModal, setDirectSettlementModal] = useState<{
+    returnReq?: PlatformReturnRequest;
+    orderId: string;
+    orderNumber: string;
+    amount: string;
+    currency: string;
+  } | null>(null);
+  const [directTxnRef, setDirectTxnRef] = useState("");
+  const [directRefundMethod, setDirectRefundMethod] = useState<RefundMethod>("BANK_TRANSFER");
+  const [directEvidenceUrl, setDirectEvidenceUrl] = useState("");
+  const [directNotes, setDirectNotes] = useState("");
+  const [isSubmittingDirectRefund, setIsSubmittingDirectRefund] = useState(false);
+  const [directRefundError, setDirectRefundError] = useState<string | null>(null);
+
+  // Platform Refund Request Modal State
+  const [platformRefundModal, setPlatformRefundModal] = useState<{
+    returnReq?: PlatformReturnRequest;
+    orderId: string;
+    orderNumber: string;
+    amount: string;
+    currency: string;
+  } | null>(null);
+  const [platformRefundReason, setPlatformRefundReason] = useState("");
+  const [platformRefundNotes, setPlatformRefundNotes] = useState("");
+  const [isSubmittingPlatformRefund, setIsSubmittingPlatformRefund] = useState(false);
+  const [platformRefundError, setPlatformRefundError] = useState<string | null>(null);
 
   // Returns & RMAs State
   const [sellerReturns, setSellerReturns] = useState<PlatformReturnRequest[]>([]);
@@ -619,6 +658,91 @@ export default function SellerOrdersView({
     }
   }, [user, disputeStatusFilter]);
 
+  const loadSellerRefunds = useCallback(async () => {
+    if (!user) return;
+    setLoadingRefunds(true);
+    setRefundsError(null);
+    try {
+      const data = await api.marketplace.listSellerRefunds(
+        refundStatusFilter !== "ALL" ? refundStatusFilter : undefined
+      );
+      setSellerRefunds(data || []);
+    } catch (err: unknown) {
+      setRefundsError(
+        err instanceof Error ? err.message : "Failed to load seller refunds."
+      );
+    } finally {
+      setLoadingRefunds(false);
+    }
+  }, [user, refundStatusFilter]);
+
+  const handleRecordDirectRefund = async () => {
+    if (!directSettlementModal) return;
+    if (!directTxnRef.trim()) {
+      setDirectRefundError("Transaction reference (UTR / payment receipt reference) is mandatory.");
+      return;
+    }
+    setIsSubmittingDirectRefund(true);
+    setDirectRefundError(null);
+    try {
+      const res = await api.marketplace.recordSellerDirectRefund(
+        directSettlementModal.orderId,
+        {
+          amount: directSettlementModal.amount,
+          transaction_reference: directTxnRef.trim(),
+          refund_method: directRefundMethod,
+          evidence_url: directEvidenceUrl.trim(),
+          return_request_id: directSettlementModal.returnReq?.id,
+          notes: directNotes.trim(),
+        }
+      );
+      setSuccessBanner(res.message || "Direct refund settlement recorded successfully.");
+      setDirectSettlementModal(null);
+      setDirectTxnRef("");
+      setDirectEvidenceUrl("");
+      setDirectNotes("");
+      loadSellerReturns();
+      loadSellerRefunds();
+      loadSellerOrders();
+    } catch (err: unknown) {
+      setDirectRefundError(err instanceof Error ? err.message : "Failed to record direct refund.");
+    } finally {
+      setIsSubmittingDirectRefund(false);
+    }
+  };
+
+  const handleRequestPlatformRefund = async () => {
+    if (!platformRefundModal) return;
+    if (!platformRefundReason.trim()) {
+      setPlatformRefundError("Reason is mandatory.");
+      return;
+    }
+    setIsSubmittingPlatformRefund(true);
+    setPlatformRefundError(null);
+    try {
+      const res = await api.marketplace.requestSellerPlatformRefund(
+        platformRefundModal.orderId,
+        {
+          amount: platformRefundModal.amount,
+          reason: platformRefundReason.trim(),
+          return_request_id: platformRefundModal.returnReq?.id,
+          notes: platformRefundNotes.trim(),
+        }
+      );
+      setSuccessBanner(res.message || "Platform gateway refund requested. Queued for Finance authorization.");
+      setPlatformRefundModal(null);
+      setPlatformRefundReason("");
+      setPlatformRefundNotes("");
+      loadSellerReturns();
+      loadSellerRefunds();
+      loadSellerOrders();
+    } catch (err: unknown) {
+      setPlatformRefundError(err instanceof Error ? err.message : "Failed to request platform refund.");
+    } finally {
+      setIsSubmittingPlatformRefund(false);
+    }
+  };
+
   // Initial fetch for count badges
   useEffect(() => {
     if (user) {
@@ -628,6 +752,9 @@ export default function SellerOrdersView({
       api.marketplace.listSellerDisputes().then((data) => {
         if (data) setSellerDisputes(data);
       }).catch(() => {});
+      api.marketplace.listSellerRefunds().then((data) => {
+        if (data) setSellerRefunds(data);
+      }).catch(() => {});
     }
   }, [user]);
 
@@ -635,11 +762,13 @@ export default function SellerOrdersView({
     queueMicrotask(() => {
       if (activeMainTab === "returns") {
         void loadSellerReturns();
+      } else if (activeMainTab === "refunds") {
+        void loadSellerRefunds();
       } else if (activeMainTab === "disputes") {
         void loadSellerDisputes();
       }
     });
-  }, [activeMainTab, loadSellerReturns, loadSellerDisputes]);
+  }, [activeMainTab, loadSellerReturns, loadSellerRefunds, loadSellerDisputes]);
 
   const pendingReturnsCount = useMemo(() => {
     return sellerReturns.filter((r) => r.status === "PENDING").length;
@@ -911,6 +1040,18 @@ export default function SellerOrdersView({
         </button>
 
         <button
+          onClick={() => setActiveMainTab("vehicles")}
+          className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${
+            activeMainTab === "vehicles"
+              ? "border-amber-500 text-slate-900"
+              : "border-transparent text-slate-400 hover:text-slate-600"
+          }`}
+        >
+          <Car className="w-4 h-4 text-emerald-500" />
+          <span>Vehicle Sales & Offers</span>
+        </button>
+
+        <button
           onClick={() => setActiveMainTab("returns")}
           className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${
             activeMainTab === "returns"
@@ -929,6 +1070,21 @@ export default function SellerOrdersView({
               {sellerReturns.length}
             </span>
           )}
+        </button>
+
+        <button
+          onClick={() => setActiveMainTab("refunds")}
+          className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all ${
+            activeMainTab === "refunds"
+              ? "border-amber-500 text-slate-900"
+              : "border-transparent text-slate-400 hover:text-slate-600"
+          }`}
+        >
+          <Receipt className="w-4 h-4" />
+          <span>Refunds & Payouts</span>
+          <span className="px-2 py-0.5 rounded-full text-[10px] bg-slate-100 text-slate-700 font-mono">
+            {sellerRefunds.length}
+          </span>
         </button>
 
         <button
@@ -1262,6 +1418,13 @@ export default function SellerOrdersView({
       )}
 
       {/* ========================================================= */}
+      {/* VEHICLE SALES & OFFERS VIEW                               */}
+      {/* ========================================================= */}
+      {activeMainTab === "vehicles" && (
+        <SellerVehicleOrdersOffersSection />
+      )}
+
+      {/* ========================================================= */}
       {/* RETURNS & RMAS VIEW                                       */}
       {/* ========================================================= */}
       {activeMainTab === "returns" && (
@@ -1395,13 +1558,13 @@ export default function SellerOrdersView({
                         {ret.evidence_urls.map((url, eIdx) => (
                           <a
                             key={eIdx}
-                            href={url}
+                            href={resolveMediaUrl(url)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity block shrink-0"
                             title="Click to view full image"
                           >
-                            <Image src={url} alt={`Evidence ${eIdx + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${eIdx + 1}`} width={56} height={56} className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -1467,18 +1630,61 @@ export default function SellerOrdersView({
                         </>
                       )}
 
-                      {!isAdmin && ret.status === "APPROVED" && ret.request_type === "RETURN" && (
-                        <button
-                          onClick={() => {
-                            setCompleteReturnError(null);
-                            setReturnTrackingNumberInput("");
-                            setCompleteReturnModal(ret);
-                          }}
-                          className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
-                        >
-                          <Boxes className="w-3.5 h-3.5" />
-                          <span>Confirm Receipt & Restock</span>
-                        </button>
+                      {!isAdmin && ret.status === "APPROVED" && (
+                        <>
+                          <button
+                            onClick={() => {
+                              setDirectRefundError(null);
+                              setDirectTxnRef("");
+                              setDirectEvidenceUrl("");
+                              setDirectNotes("");
+                              setDirectSettlementModal({
+                                returnReq: ret,
+                                orderId: ret.order || ret.order_id || ret.order_number,
+                                orderNumber: ret.order_number,
+                                amount: String(ret.refund_amount || "0.00"),
+                                currency: "INR",
+                              });
+                            }}
+                            className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
+                          >
+                            <Banknote className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Record Direct Settlement (UTR)</span>
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setPlatformRefundError(null);
+                              setPlatformRefundReason(`Approved return ${ret.request_number}`);
+                              setPlatformRefundNotes("");
+                              setPlatformRefundModal({
+                                returnReq: ret,
+                                orderId: ret.order || ret.order_id || ret.order_number,
+                                orderNumber: ret.order_number,
+                                amount: String(ret.refund_amount || "0.00"),
+                                currency: "INR",
+                              });
+                            }}
+                            className="px-3.5 py-2 rounded-xl border border-slate-300 text-slate-800 bg-white hover:bg-slate-50 text-xs font-bold transition-colors flex items-center gap-1.5"
+                          >
+                            <CreditCard className="w-3.5 h-3.5 text-indigo-500" />
+                            <span>Request Platform Refund</span>
+                          </button>
+
+                          {ret.request_type === "RETURN" && (
+                            <button
+                              onClick={() => {
+                                setCompleteReturnError(null);
+                                setReturnTrackingNumberInput("");
+                                setCompleteReturnModal(ret);
+                              }}
+                              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
+                            >
+                              <Boxes className="w-3.5 h-3.5" />
+                              <span>Confirm Receipt & Restock</span>
+                            </button>
+                          )}
+                        </>
                       )}
 
                       {ret.status === "COMPLETED" && (
@@ -1488,6 +1694,157 @@ export default function SellerOrdersView({
                         </span>
                       )}
                     </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* REFUNDS & PAYOUTS VIEW                                    */}
+      {/* ========================================================= */}
+      {activeMainTab === "refunds" && (
+        <div className="space-y-6">
+          {/* Sub Header & Filters */}
+          <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
+            <div className="flex flex-wrap gap-2">
+              {[
+                { id: "ALL", label: "All Refunds" },
+                { id: "SUCCEEDED", label: "Succeeded" },
+                { id: "PENDING", label: "Pending Finance" },
+                { id: "PROCESSING", label: "Processing" },
+                { id: "FAILED", label: "Failed" },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => setRefundStatusFilter(f.id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                    refundStatusFilter === f.id
+                      ? "bg-slate-900 text-white border-slate-900 shadow-xs"
+                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            <button
+              onClick={loadSellerRefunds}
+              disabled={loadingRefunds}
+              className="px-3.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-2 transition-colors shadow-xs disabled:opacity-50"
+            >
+              <RotateCcw className={`w-3.5 h-3.5 ${loadingRefunds ? "animate-spin" : ""}`} />
+              <span>Refresh</span>
+            </button>
+          </div>
+
+          {/* Refunds List */}
+          {loadingRefunds ? (
+            <div className="py-20 flex flex-col items-center justify-center space-y-3 bg-white rounded-2xl border border-slate-200">
+              <Loader2 className="w-8 h-8 text-amber-500 animate-spin" />
+              <span className="text-xs font-bold text-slate-600">Loading seller refund records...</span>
+            </div>
+          ) : refundsError ? (
+            <div className="p-8 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-3">
+              <AlertCircle className="w-10 h-10 text-rose-500 mx-auto" />
+              <h3 className="text-sm font-bold text-rose-900">Failed to Load Refunds</h3>
+              <p className="text-xs text-rose-700 max-w-md mx-auto">{refundsError}</p>
+              <button
+                onClick={loadSellerRefunds}
+                className="px-4 py-2 bg-rose-600 text-white text-xs font-bold rounded-xl hover:bg-rose-700 transition-colors"
+              >
+                Try Again
+              </button>
+            </div>
+          ) : sellerRefunds.length === 0 ? (
+            <div className="py-20 bg-white rounded-2xl border border-slate-200 text-center space-y-4 p-6">
+              <div className="w-16 h-16 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                <Receipt className="w-8 h-8" />
+              </div>
+              <div className="space-y-1 max-w-sm mx-auto">
+                <h3 className="text-base font-black text-slate-900">No Refund Records</h3>
+                <p className="text-xs text-slate-500">
+                  {refundStatusFilter !== "ALL"
+                    ? `No refunds match the "${refundStatusFilter}" status filter.`
+                    : "No refunds have been issued or recorded for your sales orders."}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {sellerRefunds.map((rf) => (
+                <div
+                  key={rf.id}
+                  className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs hover:border-slate-300 transition-all space-y-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="font-mono font-black text-sm text-slate-900">
+                        {rf.refund_number}
+                      </span>
+                      <span className="text-xs text-slate-500">
+                        Order Ref: <strong className="font-mono text-slate-800">{rf.order_number}</strong>
+                      </span>
+                      {rf.return_request_number && (
+                        <span className="text-xs text-slate-500">
+                          Return: <strong className="font-mono text-slate-800">{rf.return_request_number}</strong>
+                        </span>
+                      )}
+                      <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                        rf.status === "SUCCEEDED"
+                          ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                          : rf.status === "PROCESSING" && rf.gateway_provider === "SELLER_DIRECT"
+                          ? "bg-amber-100 text-amber-900 border border-amber-300"
+                          : rf.status === "PROCESSING" || rf.status === "PENDING"
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-rose-100 text-rose-800"
+                      }`}>
+                        {rf.status === "PROCESSING" && rf.gateway_provider === "SELLER_DIRECT"
+                          ? "Evidence Submitted (Awaiting Buyer Confirmation)"
+                          : rf.status === "SUCCEEDED" && rf.gateway_provider === "SELLER_DIRECT"
+                          ? "Confirmed Received by Buyer"
+                          : rf.status_display || rf.status}
+                      </span>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="font-mono font-black text-base text-slate-900">
+                        {rf.currency} {Number(rf.amount).toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                    <div className="p-3 bg-slate-50 rounded-xl space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Method & Reference</span>
+                      <p className="font-bold text-slate-900">{rf.refund_method_display || rf.refund_method}</p>
+                      {rf.gateway_refund_id && (
+                        <p className="font-mono text-[11px] text-slate-600">
+                          Ref/UTR: <strong className="text-slate-900">{rf.gateway_refund_id}</strong>
+                        </p>
+                      )}
+                      {rf.gateway_provider && (
+                        <p className="text-[11px] text-slate-500">Provider: {rf.gateway_provider}</p>
+                      )}
+                    </div>
+
+                    <div className="p-3 bg-slate-50 rounded-xl space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Reason & Record Notes</span>
+                      <p className="text-slate-800 font-medium">{rf.reason || "Order Refund"}</p>
+                      {rf.notes && (
+                        <p className="text-[11px] text-slate-600 whitespace-pre-wrap">{rf.notes}</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
+                    <span>Created: {new Date(rf.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                    {rf.processed_at && (
+                      <span className="text-emerald-700 font-semibold">Settled: {new Date(rf.processed_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1626,13 +1983,13 @@ export default function SellerOrdersView({
                         {disp.evidence_urls.map((url, eIdx) => (
                           <a
                             key={eIdx}
-                            href={url}
+                            href={resolveMediaUrl(url)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="w-14 h-14 rounded-xl border border-slate-200 overflow-hidden bg-slate-100 hover:opacity-80 transition-opacity block shrink-0"
                             title="Click to view full image"
                           >
-                            <Image src={url} alt={`Evidence ${eIdx + 1}`} width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                            <Image src={resolveMediaUrl(url)} alt={`Evidence ${eIdx + 1}`} width={56} height={56} className="w-full h-full object-cover" />
                           </a>
                         ))}
                       </div>
@@ -3167,12 +3524,12 @@ export default function SellerOrdersView({
                     {activeDisputeDrawer.evidence_urls.map((url, idx) => (
                       <a
                         key={idx}
-                        href={url}
+                        href={resolveMediaUrl(url)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="w-14 h-14 rounded-lg border border-slate-200 overflow-hidden block bg-slate-100 shrink-0"
                       >
-                        <Image src={url} alt="Evidence" width={56} height={56} unoptimized className="w-full h-full object-cover" />
+                        <Image src={resolveMediaUrl(url)} alt="Evidence" width={56} height={56} className="w-full h-full object-cover" />
                       </a>
                     ))}
                   </div>
@@ -3279,6 +3636,233 @@ export default function SellerOrdersView({
                   )}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* SELLER DIRECT SETTLEMENT (UTR / PROOF) MODAL              */}
+      {/* ========================================================= */}
+      {directSettlementModal && (
+        <div className="fixed inset-0 z-60 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <Banknote className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900">
+                  Record Direct Settlement
+                </h3>
+                <p className="text-xs text-slate-500 font-mono">
+                  Order: {directSettlementModal.orderNumber}
+                  {directSettlementModal.returnReq && ` · Return: ${directSettlementModal.returnReq.request_number}`}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Use this form to record a direct payment refund (wire transfer / UTR or cash settlement) you arranged directly with the buyer for this order or approved return.
+            </p>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700 block">
+                  Refund Amount ({directSettlementModal.currency}) <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={directSettlementModal.amount}
+                  onChange={(e) => setDirectSettlementModal({ ...directSettlementModal, amount: e.target.value })}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 font-mono font-bold"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-700 block">
+                  Payout Method
+                </label>
+                <select
+                  value={directRefundMethod}
+                  onChange={(e) => setDirectRefundMethod(e.target.value as RefundMethod)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 font-bold bg-white"
+                >
+                  <option value="BANK_TRANSFER">Bank Wire / NEFT / IMPS</option>
+                  <option value="MANUAL_PAYOUT">Cash Payout / In-Person Voucher</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                Transaction Reference / UTR Number <span className="text-rose-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={directTxnRef}
+                onChange={(e) => setDirectTxnRef(e.target.value)}
+                placeholder="e.g. UTR1234567890 / WIRE-REF-9988"
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 font-mono placeholder:text-slate-400"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                Payment Proof / Receipt Document URL (Optional)
+              </label>
+              <input
+                type="text"
+                value={directEvidenceUrl}
+                onChange={(e) => setDirectEvidenceUrl(e.target.value)}
+                placeholder="https://... or uploaded image URL"
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 font-mono placeholder:text-slate-400"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                Notes for Buyer & Audit Log
+              </label>
+              <textarea
+                value={directNotes}
+                onChange={(e) => setDirectNotes(e.target.value)}
+                placeholder="Details of bank account or settlement notes..."
+                rows={2}
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 placeholder:text-slate-400"
+              />
+            </div>
+
+            {directRefundError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs">
+                {directRefundError}
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setDirectSettlementModal(null)}
+                disabled={isSubmittingDirectRefund}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-bold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRecordDirectRefund}
+                disabled={isSubmittingDirectRefund || !directTxnRef.trim()}
+                className="flex-1 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSubmittingDirectRefund ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Recording...</span>
+                  </>
+                ) : (
+                  <span>Record Direct Settlement</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* SELLER REQUEST PLATFORM GATEWAY REFUND MODAL              */}
+      {/* ========================================================= */}
+      {platformRefundModal && (
+        <div className="fixed inset-0 z-60 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                <CreditCard className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900">
+                  Request Platform Gateway Refund
+                </h3>
+                <p className="text-xs text-slate-500 font-mono">
+                  Order: {platformRefundModal.orderNumber}
+                  {platformRefundModal.returnReq && ` · Return: ${platformRefundModal.returnReq.request_number}`}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              For orders paid online through the platform, this queues a refund request for DriverXtra Finance to authorize and dispatch back to the customer&apos;s original payment card/account.
+            </p>
+
+            <div className="space-y-1">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                Refund Amount ({platformRefundModal.currency}) <span className="text-rose-500">*</span>
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                value={platformRefundModal.amount}
+                onChange={(e) => setPlatformRefundModal({ ...platformRefundModal, amount: e.target.value })}
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 font-mono font-bold"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                Refund Reason <span className="text-rose-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={platformRefundReason}
+                onChange={(e) => setPlatformRefundReason(e.target.value)}
+                placeholder="e.g. Approved return request, item defective"
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 placeholder:text-slate-400"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                Internal Notes for Finance
+              </label>
+              <textarea
+                value={platformRefundNotes}
+                onChange={(e) => setPlatformRefundNotes(e.target.value)}
+                placeholder="Return inspected and verified at warehouse..."
+                rows={2}
+                className="w-full p-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 placeholder:text-slate-400"
+              />
+            </div>
+
+            {platformRefundError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs">
+                {platformRefundError}
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setPlatformRefundModal(null)}
+                disabled={isSubmittingPlatformRefund}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-bold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRequestPlatformRefund}
+                disabled={isSubmittingPlatformRefund || !platformRefundReason.trim()}
+                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSubmittingPlatformRefund ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Submitting...</span>
+                  </>
+                ) : (
+                  <span>Submit to Finance Queue</span>
+                )}
+              </button>
             </div>
           </div>
         </div>

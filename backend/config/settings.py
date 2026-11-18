@@ -34,7 +34,9 @@ if not SECRET_KEY:
         "SECRET_KEY must be configured in the .env file or environment."
     )
 
-DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
+# Secure default: DEBUG is off unless explicitly enabled (e.g. DEBUG=True in a local .env).
+# With DEBUG off, Django's static() helper in config/urls.py does not serve MEDIA_ROOT.
+DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
 IS_TESTING = "pytest" in sys.modules or "test" in sys.argv or os.getenv("IS_TESTING", "False").lower() in ("true", "1", "yes")
 
 ALLOWED_HOSTS = [
@@ -375,6 +377,24 @@ SUPPORT_SLA_TIMEZONE = os.getenv("SUPPORT_SLA_TIMEZONE", "UTC")
 _holidays_raw = os.getenv("SUPPORT_PUBLIC_HOLIDAYS", "")
 SUPPORT_PUBLIC_HOLIDAYS = [h.strip() for h in _holidays_raw.split(",") if h.strip()]
 PRIVATE_STORAGE_ROOT = Path(os.getenv("PRIVATE_STORAGE_ROOT", BASE_DIR / "private_media"))
+
+# Test isolation: an actual test run (pytest, or `manage.py test`) never writes into the real
+# media directories. Both roots are redirected to a per-process temporary directory that is
+# removed at exit. This is resolved here, before any model module is imported, because the
+# private storages (support attachments, vehicle documents) read PRIVATE_STORAGE_ROOT at import.
+# Deliberately not keyed on the IS_TESTING environment variable, so a misconfigured deployment
+# can never redirect real uploads into a temporary directory.
+if "pytest" in sys.modules or "test" in sys.argv:
+    import atexit
+    import shutil
+    import tempfile
+
+    _TEST_STORAGE_DIR = Path(tempfile.mkdtemp(prefix="driverxtra-test-storage-"))
+    MEDIA_ROOT = _TEST_STORAGE_DIR / "media"
+    PRIVATE_STORAGE_ROOT = _TEST_STORAGE_DIR / "private_media"
+    MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+    PRIVATE_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    atexit.register(shutil.rmtree, _TEST_STORAGE_DIR, ignore_errors=True)
 SUPPORT_ATTACHMENT_MAX_BYTES = int(os.getenv("SUPPORT_ATTACHMENT_MAX_BYTES", "10485760"))  # 10 MB per file
 SUPPORT_ATTACHMENT_MAX_FILES_PER_MESSAGE = int(os.getenv("SUPPORT_ATTACHMENT_MAX_FILES_PER_MESSAGE", "5"))
 SUPPORT_INACTIVITY_CLOSE_DAYS = int(os.getenv("SUPPORT_INACTIVITY_CLOSE_DAYS", "5"))

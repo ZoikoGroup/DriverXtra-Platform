@@ -138,12 +138,21 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
 
     @property
     def roles(self) -> list[str]:
-        """Returns a list of active role codes assigned to the user."""
-        return list(self.user_roles.values_list('role', flat=True))
+        """Returns a list of active role codes assigned to the user.
+        Superuser automatically has ADMIN privileges, but does NOT automatically inherit
+        operational roles (BUYER, SELLER, WORKSHOP) unless explicitly assigned.
+        """
+        roles_list = list(self.user_roles.values_list('role', flat=True))
+        if self.is_superuser and RoleChoices.ADMIN not in roles_list:
+            roles_list.append(RoleChoices.ADMIN)
+        return roles_list
 
     def has_role(self, role_name: str) -> bool:
+        """Checks if user has the specified platform role.
+        Superuser grants ADMIN governance, but operational membership requires explicit assignment.
+        """
         normalized = RoleChoices.normalize_role(role_name)
-        if self.is_superuser and normalized in (RoleChoices.ADMIN, RoleChoices.STAFF):
+        if self.is_superuser and normalized == RoleChoices.ADMIN:
             return True
         return self.user_roles.filter(role=normalized).exists()
 
@@ -210,15 +219,15 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
     def _get_effective_staff_role(self):
         """Staff sub-role whose permissions apply to this user, or None.
 
-        Uses the assigned StaffProfile sub-role; staff without an assigned sub-role fall back to
-        VERIFICATION_OFFICER. Shared by has_permission() and get_effective_permissions() so that
-        enforced and reported permissions always agree.
+        Uses the explicitly assigned StaffProfile sub-role only. Staff without an assigned
+        sub-role hold no operational permissions (fail closed); there is no implicit fallback.
+        Existing unassigned staff were given an explicit VERIFICATION_OFFICER profile by
+        migration identity.0012. Shared by has_permission() and get_effective_permissions() so
+        that enforced and reported permissions always agree.
         """
         profile = getattr(self, 'staff_profile', None)
         if profile and profile.staff_role:
             return profile.staff_role
-        if self.is_staff or self.has_role(RoleChoices.STAFF):
-            return StaffRole.objects.filter(code='VERIFICATION_OFFICER').first()
         return None
 
     def has_permission(self, perm_code: str) -> bool:
@@ -383,9 +392,11 @@ class StaffProfile(BaseUUIDModel):
         on_delete=models.CASCADE,
         related_name='staff_profile',
     )
+    # PROTECT: a sub-role that still has members cannot be deleted; members must be reassigned
+    # first, so deleting a role can never silently change anyone's permissions.
     staff_role = models.ForeignKey(
         StaffRole,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name='staff_members',

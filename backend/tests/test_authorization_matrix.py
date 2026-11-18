@@ -3,13 +3,14 @@
 Every actor is checked against every endpoint and must receive exactly the expected success
 status or HTTP 403. Allowed sets follow the seeded permission matrix plus approved decisions:
   - refund create/reject: 'order.refund' or 'finance.payout'  (D2: main's maker-checker model)
-  - refund process/settlement (incl. approving a manual refund, which settles it):
-    'finance.payout' only                              (D2: Dispute Manager cannot pay out)
+  - refund approve: 'order.refund' or 'finance.payout'. An approver without 'finance.payout'
+    (Dispute Manager) only moves the refund to PROCESSING; it is never settled by that approval.
+  - refund process/settlement/dispatch: 'finance.payout' only  (D2: Dispute Manager cannot pay out)
   - refund list: 'order.refund' or 'finance.payout'
   - dispute management: 'dispute.manage'              (D1: SUPPORT_AGENT no longer holds it)
   - dispute detail read: also 'order.refund'          (U4)
-  - review moderation: 'review.moderate'              (U2: VERIFICATION_OFFICER; STAFF without a
-                                                       sub-role falls back to VERIFICATION_OFFICER)
+  - review moderation: 'review.moderate'              (U2: VERIFICATION_OFFICER)
+STAFF without an assigned sub-role holds no operational permissions (no implicit fallback).
 Platform ADMIN and superusers hold every permission. Buyer/seller party access is unchanged.
 Workshop review moderation is covered per staff role in tests/test_workshop_reviews.py.
 """
@@ -52,7 +53,7 @@ DISPUTE_MANAGE = {'DISPUTE_MANAGER'} | ADMINS
 DISPUTE_READ = DISPUTE_MANAGE | {'FINANCE_OFFICER', 'buyer', 'seller'}
 DISPUTE_MESSAGE = DISPUTE_MANAGE | {'buyer', 'seller'}
 REFUND_SUMMARY = REFUND | {'buyer', 'seller'}
-REVIEW_MODERATE = {'VERIFICATION_OFFICER', 'staff_no_profile'} | ADMINS
+REVIEW_MODERATE = {'VERIFICATION_OFFICER'} | ADMINS
 
 # key: (method, url builder, payload builder, success status, allowed actors)
 ENDPOINTS = {
@@ -60,7 +61,7 @@ ENDPOINTS = {
                       lambda c: {'amount': '10.00', 'reason': 'Matrix', 'refund_method': 'BANK_TRANSFER'},
                       status.HTTP_201_CREATED, REFUND),
     'refund_approve': ('post', lambda c: f"/api/v1/marketplace/admin/refunds/{c['refund'].refund_number}/approve/",
-                       lambda c: {}, status.HTTP_200_OK, REFUND_PAYOUT),  # manual refund: approval settles it
+                       lambda c: {}, status.HTTP_200_OK, REFUND),  # DM approval -> PROCESSING (not settled)
     'refund_process': ('post', lambda c: f"/api/v1/marketplace/admin/refunds/{c['refund'].refund_number}/process/",
                        lambda c: {}, status.HTTP_200_OK, REFUND_PAYOUT),
     'refund_reject': ('post', lambda c: f"/api/v1/marketplace/admin/refunds/{c['refund'].refund_number}/reject/",
@@ -199,14 +200,10 @@ def test_review_author_vs_non_author(matrix_context, buyer_user, seller_user):
 # D2 segregation of duties: 'order.refund' alone never settles or dispatches a refund
 # =============================================================================
 
-PAYOUT_ENDPOINTS = ['refund_approve', 'refund_process']  # matrix refund is manual: approval settles it
-
-
 @pytest.mark.django_db
-@pytest.mark.parametrize('endpoint', PAYOUT_ENDPOINTS)
-def test_dispute_manager_cannot_settle_refunds_and_nothing_changes(matrix_context, endpoint):
+def test_dispute_manager_cannot_settle_refunds_and_nothing_changes(matrix_context):
     from apps.marketplace.models import Refund, PaymentTransaction, RefundStatusChoices
-    method, url_fn, payload_fn, _, _ = ENDPOINTS[endpoint]
+    method, url_fn, payload_fn, _, _ = ENDPOINTS['refund_process']
     client = APIClient()
     client.force_authenticate(user=_actor('DISPUTE_MANAGER', None, None))
     refunds_before, txns_before = Refund.objects.count(), PaymentTransaction.objects.count()
@@ -220,6 +217,39 @@ def test_dispute_manager_cannot_settle_refunds_and_nothing_changes(matrix_contex
 
 
 @pytest.mark.django_db
+def test_dispute_manager_approval_only_moves_manual_refund_to_processing(matrix_context):
+    """Maker-checker: the Dispute Manager's approval never settles; Finance settles afterwards."""
+    from apps.marketplace.models import PaymentTransaction, RefundStatusChoices
+    refund, order = matrix_context['refund'], matrix_context['order']
+    order.refresh_from_db()
+    payment_status_before, txns_before = order.payment_status, PaymentTransaction.objects.count()
+    manager = APIClient()
+    manager.force_authenticate(user=_actor('DISPUTE_MANAGER', None, None))
+
+    res = manager.post(f'/api/v1/marketplace/admin/refunds/{refund.refund_number}/approve/', {}, format='json')
+    assert res.status_code == status.HTTP_200_OK, res.data
+    refund.refresh_from_db(); order.refresh_from_db()
+    assert refund.status == RefundStatusChoices.PROCESSING  # awaiting Finance, not SUCCEEDED
+    assert refund.approved_by.email == 'matrix_dispute_manager@driverxtra.com'
+    assert PaymentTransaction.objects.count() == txns_before
+    assert order.payment_status == payment_status_before
+
+    # The approver still cannot settle it.
+    res = manager.post(f'/api/v1/marketplace/admin/refunds/{refund.refund_number}/process/', {}, format='json')
+    assert res.status_code == status.HTTP_403_FORBIDDEN, res.data
+    refund.refresh_from_db()
+    assert refund.status == RefundStatusChoices.PROCESSING
+
+    # Finance (finance.payout) settles it.
+    finance = APIClient()
+    finance.force_authenticate(user=_actor('FINANCE_OFFICER', None, None))
+    res = finance.post(f'/api/v1/marketplace/admin/refunds/{refund.refund_number}/process/', {}, format='json')
+    assert res.status_code == status.HTTP_200_OK, res.data
+    refund.refresh_from_db()
+    assert refund.status == RefundStatusChoices.SUCCEEDED
+
+
+@pytest.mark.django_db
 def test_order_refund_without_finance_payout_cannot_settle_via_service(matrix_context):
     from django.core.exceptions import ValidationError as DjangoValidationError
     from apps.marketplace.models import RefundStatusChoices
@@ -230,12 +260,18 @@ def test_order_refund_without_finance_payout_cannot_settle_via_service(matrix_co
     for call in (
         lambda: RefundService.process_refund(refund, manager),
         lambda: RefundService.dispatch_gateway_refund(refund, manager),
-        lambda: RefundService.approve_refund(refund, manager),  # manual refund: approval would settle it
     ):
         with pytest.raises(DjangoValidationError, match='finance.payout'):
             call()
     refund.refresh_from_db()
     assert refund.status == RefundStatusChoices.PENDING
+
+    approved = RefundService.approve_refund(refund, manager)  # approval only, never settlement
+    assert approved.status == RefundStatusChoices.PROCESSING
+    with pytest.raises(DjangoValidationError, match='finance.payout'):
+        RefundService.process_refund(approved, manager)
+    refund.refresh_from_db()
+    assert refund.status == RefundStatusChoices.PROCESSING
 
 
 @pytest.mark.django_db
@@ -253,17 +289,15 @@ def test_matrix_allowed_sets_match_seeded_permissions():
                 roles.add(role.code)
         return roles
 
-    fallback = 'staff_no_profile'  # STAFF without sub-role uses VERIFICATION_OFFICER permissions
-
-    def with_fallback(roles):
-        return roles | ({fallback} if 'VERIFICATION_OFFICER' in roles else set())
-
-    assert REFUND - ADMINS == with_fallback(staff_roles_with('order.refund'))
-    assert REFUND - ADMINS == with_fallback(staff_roles_with('order.refund', 'finance.payout'))
-    assert REFUND_LIST - ADMINS == with_fallback(staff_roles_with('order.refund', 'finance.payout'))
-    assert REFUND_PAYOUT - ADMINS == with_fallback(staff_roles_with('finance.payout'))
-    assert DISPUTE_MANAGE - ADMINS == with_fallback(staff_roles_with('dispute.manage'))
-    assert REVIEW_MODERATE - ADMINS == with_fallback(staff_roles_with('review.moderate'))
+    assert REFUND - ADMINS == staff_roles_with('order.refund')
+    assert REFUND - ADMINS == staff_roles_with('order.refund', 'finance.payout')
+    assert REFUND_LIST - ADMINS == staff_roles_with('order.refund', 'finance.payout')
+    assert REFUND_PAYOUT - ADMINS == staff_roles_with('finance.payout')
+    assert DISPUTE_MANAGE - ADMINS == staff_roles_with('dispute.manage')
+    assert REVIEW_MODERATE - ADMINS == staff_roles_with('review.moderate')
+    # STAFF without an assigned sub-role holds nothing: it is in no staff-permission allowed set.
+    for allowed in (REFUND, REFUND_LIST, REFUND_PAYOUT, DISPUTE_MANAGE, REVIEW_MODERATE):
+        assert 'staff_no_profile' not in allowed
     # Explicit seeded facts relied on by the matrix.
     fin = set(StaffRole.objects.get(code='FINANCE_OFFICER').role_permissions.values_list('permission__code', flat=True))
     dm = set(StaffRole.objects.get(code='DISPUTE_MANAGER').role_permissions.values_list('permission__code', flat=True))

@@ -656,9 +656,9 @@ def test_staff_without_review_moderate_cannot_moderate(completed_order, buyer_us
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize('staff_role_code', ['VERIFICATION_OFFICER', None])
+@pytest.mark.parametrize('staff_role_code', ['VERIFICATION_OFFICER'])
 def test_review_moderate_holders_can_moderate(completed_order, buyer_user, seller_user, other_buyer, staff_role_code):
-    """VERIFICATION_OFFICER holds 'review.moderate'; STAFF without a sub-role falls back to it."""
+    """VERIFICATION_OFFICER holds 'review.moderate'."""
     review = _flagged_review(completed_order, buyer_user, seller_user)
     report = ReviewReport.objects.create(product_review=review, reporter=other_buyer,
                                          reason=ReviewReportReasonChoices.OFFENSIVE, status=ReviewReportStatusChoices.PENDING)
@@ -674,6 +674,28 @@ def test_review_moderate_holders_can_moderate(completed_order, buyer_user, selle
     assert review.status == ReviewStatusChoices.REJECTED
     res = client.post(f'/api/v1/marketplace/admin/reviews/{review.id}/moderate/', {'action': 'APPROVE'}, format='json')
     assert res.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_staff_without_sub_role_cannot_moderate_reviews(completed_order, buyer_user, seller_user, other_buyer):
+    """STAFF without an assigned sub-role has no implicit 'review.moderate' (no fallback)."""
+    review = _flagged_review(completed_order, buyer_user, seller_user)
+    report = ReviewReport.objects.create(product_review=review, reporter=other_buyer,
+                                         reason=ReviewReportReasonChoices.OFFENSIVE, status=ReviewReportStatusChoices.PENDING)
+    review_status_before = review.status
+    client = _auth(_make_staff_user('mod_unassigned@driverxtra.com', None))
+
+    assert client.get('/api/v1/marketplace/admin/reviews/').status_code == status.HTTP_403_FORBIDDEN
+    assert client.get('/api/v1/marketplace/admin/review-reports/').status_code == status.HTTP_403_FORBIDDEN
+    res = client.post(f'/api/v1/marketplace/admin/review-reports/{report.id}/resolve/',
+                      {'action': 'HIDE_REVIEW', 'admin_notes': 'Policy violation'}, format='json')
+    assert res.status_code == status.HTTP_403_FORBIDDEN
+    res = client.post(f'/api/v1/marketplace/admin/reviews/{review.id}/moderate/', {'action': 'APPROVE'}, format='json')
+    assert res.status_code == status.HTTP_403_FORBIDDEN
+    review.refresh_from_db()
+    report.refresh_from_db()
+    assert review.status == review_status_before
+    assert report.status == ReviewReportStatusChoices.PENDING
 
 
 @pytest.mark.django_db
@@ -701,3 +723,54 @@ def test_seller_rating_staff_edit_delete_requires_review_moderate(completed_orde
     assert _auth(buyer_user).patch(url, {'rating': 3}, format='json').status_code == status.HTTP_200_OK
     moderator = _auth(_make_staff_user('sr_mod@driverxtra.com', 'VERIFICATION_OFFICER'))
     assert moderator.delete(url).status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+def test_public_seller_reputation_endpoint_anonymous(api_client, seller_user):
+    """Verifies that an anonymous buyer can fetch seller reputation without 'User is not defined' error."""
+    url = f"/api/v1/marketplace/sellers/{seller_user.id}/reputation/"
+    response = api_client.get(url)
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data["seller_id"] == str(seller_user.id)
+    assert "average_rating" in response.data
+    assert "positive_percentage" in response.data
+
+
+@pytest.mark.django_db
+def test_public_seller_reputation_endpoint_authenticated(buyer_auth_client, seller_user):
+    """Verifies that an authenticated buyer can fetch seller reputation without errors."""
+    url = f"/api/v1/marketplace/sellers/{seller_user.id}/reputation/"
+    response = buyer_auth_client.get(url)
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data["seller_id"] == str(seller_user.id)
+
+
+@pytest.mark.django_db
+def test_public_seller_reputation_endpoint_not_found(api_client):
+    """Verifies that querying a non-existent seller returns 404 cleanly."""
+    import uuid
+    url = f"/api/v1/marketplace/sellers/{uuid.uuid4()}/reputation/"
+    response = api_client.get(url)
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.data["error"] == "Seller not found."
+
+
+@pytest.mark.django_db
+def test_seller_rating_creation_resolves_user_model(buyer_auth_client, completed_order, seller_user):
+    """Verifies that creating a seller rating resolves seller User model cleanly without NameError."""
+    order, item, listing = completed_order
+    url = "/api/v1/marketplace/seller-ratings/"
+    payload = {
+        "order_id": str(order.id),
+        "seller_id": str(seller_user.id),
+        "rating": 5,
+        "communication_rating": 5,
+        "delivery_rating": 5,
+        "item_description_rating": 5,
+        "comment": "Excellent seller, fast shipping!",
+    }
+    response = buyer_auth_client.post(url, payload, format="json")
+    assert response.status_code == status.HTTP_201_CREATED
+    assert response.data["rating"] == 5
+    assert response.data["seller_name"] == seller_user.full_name
+

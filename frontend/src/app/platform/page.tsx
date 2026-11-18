@@ -16,6 +16,11 @@ import SellerInventoryView from "@/components/platform/SellerInventoryView";
 import WorkshopLandingView from "@/components/platform/WorkshopLandingView";
 import BuyerWorkshopsView from "@/components/platform/BuyerWorkshopsView";
 import AdminMarketplaceReviewView from "@/components/platform/AdminMarketplaceReviewView";
+import AdminOverviewView from "@/components/platform/AdminOverviewView";
+import AdminSellerManagementView from "@/components/platform/AdminSellerManagementView";
+import AdminWorkshopManagementView from "@/components/platform/AdminWorkshopManagementView";
+import AdminBuyerManagementView from "@/components/platform/AdminBuyerManagementView";
+import AdminOrdersMonitoringView from "@/components/platform/AdminOrdersMonitoringView";
 import AdminStaffManagementView from "@/components/platform/AdminStaffManagementView";
 import AdminWorkshopOversightView from "@/components/platform/AdminWorkshopOversightView";
 import AdminDisputesRefundsView from "@/components/platform/AdminDisputesRefundsView";
@@ -28,39 +33,7 @@ import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
 import BuyerOrdersView from "@/components/platform/BuyerOrdersView";
 import SellerOrdersView from "@/components/platform/SellerOrdersView";
 import NotificationDrawer, { useNotificationUnreadCount } from "@/components/platform/NotificationDrawer";
-
-function getDefaultTabForRole(user?: PrototypeUser | null): string {
-  if (!user) return "marketplace_browse";
-  const activeRole = user.activeRole || (user.rawRoles && user.rawRoles[0]) || "BUYER";
-  const staffRoleCode = user.staff_role?.code?.toUpperCase();
-
-  if (activeRole === "ADMIN") {
-    return "admin_marketplace_review";
-  }
-  if (activeRole === "STAFF") {
-    switch (staffRoleCode) {
-      case "DISPUTE_MANAGER":
-        return "admin_disputes_refunds";
-      case "FINANCE_OFFICER":
-        return "admin_approvals";
-      case "VERIFICATION_OFFICER":
-        return "admin_marketplace_review";
-      case "SUPPORT_AGENT":
-        return "support_overview";
-      default:
-        return "marketplace_browse";
-    }
-  }
-  const hasSeller = Boolean(user.rawRoles?.includes("SELLER") || activeRole === "SELLER");
-  const hasWorkshop = Boolean(user.rawRoles?.includes("WORKSHOP") || activeRole === "WORKSHOP");
-  if (hasWorkshop && !hasSeller) {
-    return "workshop_landing";
-  }
-  if (hasSeller) {
-    return "seller_inventory";
-  }
-  return "marketplace_browse";
-}
+import { getDefaultTabForRole, isTabAllowedForRole, getTabLabel } from "@/lib/navigation";
 
 export default function PlatformDashboardPage() {
   const router = useRouter();
@@ -101,9 +74,14 @@ export default function PlatformDashboardPage() {
     }
   }, [isInitialized, isAuthenticated, router]);
 
-  const currentTab = (selectedTab && selectedTab.role === activeRole)
+  const candidateTab = (selectedTab && selectedTab.role === activeRole)
     ? selectedTab.tab
-    : getDefaultTabForRole(user);
+    : getDefaultTabForRole(activeRole, user);
+
+  // Enforce role-based route protection: if currentTab is not allowed for activeRole, fall back to default
+  const currentTab = isTabAllowedForRole(candidateTab, activeRole, user)
+    ? candidateTab
+    : getDefaultTabForRole(activeRole, user);
 
   if (!isAuthenticated || !user) {
     return (
@@ -116,47 +94,9 @@ export default function PlatformDashboardPage() {
     );
   }
 
-  const isSellerOnlyTab = (tab: string) =>
-    tab === "seller_orders" || tab === "seller_disputes";
-
-  const getTabLabel = (tab: string) => {
-    if (isAdmin && isSellerOnlyTab(tab)) {
-      return "Admin Moderation — Listing Review Queue";
-    }
-    if (tab === "seller_disputes") {
-      return "Customer Orders — Customer Disputes";
-    }
-    const map: Record<string, string> = {
-      marketplace_browse: "Marketplace — Approved Vehicles & Spare Parts",
-      my_orders: "My Orders — Order History & Status",
-      seller_orders: "Customer Orders — Seller Order Fulfillment",
-      favourites: "Saved Items — Vehicles & Spare Parts",
-      my_enquiries: "My Enquiries — Vehicle Questions & Seller Replies",
-      seller_inventory: "Seller Inventory — Vehicles & Spare Parts Submission",
-      admin_marketplace_review: "Admin Moderation — Listing Review Queue",
-      admin_staff_management: "Staff Administration & Access Control",
-      admin_workshop_oversight: "Workshop Operations Oversight (Platform Administration)",
-      admin_disputes_refunds: "Disputes & Refunds Adjudication Console",
-      admin_approvals: "Maker-Checker Dual Authorization & Approvals Queue",
-      support_overview: "Support Operations & Customer Inquiries Workspace",
-      my_tickets: "Help & Support — Customer Inquiries",
-      commercial_admin: "Commercial Control Plane — SKUs, Gates, Rates & Quotes",
-      profile: "User Profile & Account Settings",
-      organisations: "Organisations & Teams",
-      garage: "My Garage — Vehicle Management",
-      catalogue: "Vehicle & Parts Catalogue",
-      parts_fitment: "Vehicle Parts & Fitment Verification",
-      seller_onboarding: "Apply to sell / Apply as workshop (Seller Verification)",
-      seller_reviews: "Seller Applications Compliance Queue",
-      workshop_landing: "Workshop Services — Workshop Partner Hub",
-      workshops_browse: "Workshop Services & Bookings",
-    };
-    return map[tab] || "Dashboard Overview";
-  };
-
-  const isPlatformAdmin = activeRole === "ADMIN" || Boolean(user?.is_superuser || user?.rawRoles?.includes("ADMIN"));
-  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF" || Boolean(user?.is_staff || user?.is_superuser);
-  const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP" || Boolean(user?.rawRoles?.includes("SELLER") || user?.rawRoles?.includes("WORKSHOP"));
+  const isPlatformAdmin = activeRole === "ADMIN";
+  const isAdmin = activeRole === "ADMIN" || activeRole === "STAFF";
+  const isSellerOrWorkshop = activeRole === "SELLER" || activeRole === "WORKSHOP";
 
   const userPerms = Array.isArray(user?.permissions) ? user.permissions : [];
   const hasPerm = (code: string) => isPlatformAdmin || userPerms.includes(code);
@@ -218,24 +158,51 @@ export default function PlatformDashboardPage() {
         />
 
         <main className="flex-1 overflow-y-auto">
-          {currentTab === "my_orders" ? (
+          {currentTab === "my_orders" || currentTab === "buyer_returns_refunds" ? (
             <BuyerOrdersView
               onNavigateToBrowse={() => setSelectedTab({ role: activeRole, tab: "marketplace_browse" })}
               initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
+              initialSection={currentTab === "buyer_returns_refunds" ? "returns" : undefined}
             />
           ) : currentTab === "seller_orders" || currentTab === "seller_disputes" ? (
-            isAdmin ? (
-              <AdminMarketplaceReviewView />
+            <SellerOrdersView
+              initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
+              initialMainTab={
+                currentTab === "seller_disputes" ||
+                (activeItemData?.type === "tab" && activeItemData.id === "disputes")
+                  ? "disputes"
+                  : "orders"
+              }
+            />
+          ) : currentTab === "admin_overview" ? (
+            isPlatformAdmin ? (
+              <AdminOverviewView onNavigateTab={(tab) => setSelectedTab({ role: activeRole, tab })} />
             ) : (
-              <SellerOrdersView
-                initialOrderId={activeItemData?.type === "order" ? activeItemData.id : undefined}
-                initialMainTab={
-                  currentTab === "seller_disputes" ||
-                  (activeItemData?.type === "tab" && activeItemData.id === "disputes")
-                    ? "disputes"
-                    : "orders"
-                }
-              />
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_sellers" ? (
+            isPlatformAdmin ? (
+              <AdminSellerManagementView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_workshops" ? (
+            isPlatformAdmin ? (
+              <AdminWorkshopManagementView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_buyers" ? (
+            isPlatformAdmin ? (
+              <AdminBuyerManagementView />
+            ) : (
+              <MarketplaceBrowseView />
+            )
+          ) : currentTab === "admin_orders_monitoring" ? (
+            isPlatformAdmin ? (
+              <AdminOrdersMonitoringView />
+            ) : (
+              <MarketplaceBrowseView />
             )
           ) : currentTab === "admin_disputes_refunds" ? (
             canAccessDisputes ? (
