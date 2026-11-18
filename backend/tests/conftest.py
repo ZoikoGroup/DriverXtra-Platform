@@ -62,6 +62,15 @@ def staff_user(db):
         is_email_verified=True,
     )
     user.add_role(RoleChoices.STAFF)
+    # Staff permissions come only from an explicitly assigned sub-role (no implicit fallback).
+    # This mirrors migration identity.0012, which gave existing unassigned staff an explicit
+    # VERIFICATION_OFFICER profile. Tests needing a sub-role-less staff user create their own.
+    from apps.identity.models import StaffProfile, StaffRole
+    StaffProfile.objects.create(
+        user=user,
+        staff_role=StaffRole.objects.get(code='VERIFICATION_OFFICER'),
+        department='Operations',
+    )
     return user
 
 

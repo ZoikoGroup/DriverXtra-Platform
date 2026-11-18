@@ -1575,8 +1575,8 @@ class AdminWorkshopReviewListView(generics.ListAPIView):
     serializer_class = WorkshopReviewSerializer
 
     def get_queryset(self):
-        from apps.workshops.permissions import is_platform_admin_or_staff
-        if not is_platform_admin_or_staff(self.request.user):
+        from apps.workshops.permissions import can_moderate_reviews
+        if not can_moderate_reviews(self.request.user):
             raise PermissionDenied("Only authorized platform administrators and staff can view review moderation lists.")
 
         qs = WorkshopReview.objects.select_related('workshop', 'buyer', 'booking', 'work_order', 'workshop_replied_by').all()
@@ -1609,8 +1609,8 @@ class AdminWorkshopReviewModerationView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, id):
-        from apps.workshops.permissions import is_platform_admin_or_staff
-        if not is_platform_admin_or_staff(request.user):
+        from apps.workshops.permissions import can_moderate_reviews
+        if not can_moderate_reviews(request.user):
             raise PermissionDenied("Only authorized platform administrators and staff can moderate reviews.")
 
         review = get_object_or_404(WorkshopReview, id=id)

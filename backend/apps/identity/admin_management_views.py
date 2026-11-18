@@ -18,8 +18,45 @@ from apps.marketplace.models import VehicleListing, SparePartListing, Order, Veh
 from apps.organisations.models import Organisation, OrganisationMembership
 from common.pagination import ScalableAdminPagination
 from common.permissions import IsPlatformStaff, IsMarketplaceAdmin, HasPermission
-from platform_core.audit.writer import record_audit_entry
+from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
 from common.middleware import get_current_correlation_id
+
+
+def _guard_account_status_target(request, target, required_role, action_code):
+    """Refuse account-status changes on targets outside the endpoint's scope.
+
+    Account suspension/reactivation endpoints may only act on ordinary marketplace accounts
+    of the expected type. Platform staff, administrators, superusers and the acting user are
+    never valid targets, and arbitrary user IDs cannot be used to bypass the type check.
+    Denials are audited. Raises NotFound/PermissionDenied; returns None when allowed.
+    """
+    corr_id = getattr(request, 'correlation_id', '') or get_current_correlation_id()
+
+    def deny(reason_code, exc):
+        record_denied_audit_entry(
+            action=action_code,
+            resource_type="User",
+            resource_id=str(target.id),
+            actor_id=request.user.id,
+            reason_code=reason_code,
+            correlation_id=corr_id,
+        )
+        raise exc
+
+    if target.id == request.user.id:
+        deny("SELF_TARGET", PermissionDenied("You cannot change the status of your own account."))
+    if (
+        target.is_superuser
+        or target.is_staff
+        or target.has_role(RoleChoices.ADMIN)
+        or target.has_role(RoleChoices.STAFF)
+    ):
+        deny("PRIVILEGED_TARGET", PermissionDenied(
+            "Platform staff and administrator accounts cannot be managed through this endpoint."
+        ))
+    if not target.has_role(required_role):
+        label = RoleChoices(required_role).label.split(' /')[0]
+        deny("TARGET_ROLE_MISMATCH", NotFound(f"{label} account not found."))
 
 
 # =============================================================================
@@ -401,6 +438,9 @@ class AdminSellerStatusView(views.APIView):
         if action not in ('SUSPEND', 'REACTIVATE'):
             raise ValidationError({"action": "Action must be either 'SUSPEND' or 'REACTIVATE'."})
 
+        # S2: only ordinary SELLER accounts; never staff/admins/superusers/self.
+        _guard_account_status_target(request, user, RoleChoices.SELLER, "admin:seller.status")
+
         corr_id = getattr(request, 'correlation_id', '') or get_current_correlation_id()
 
         if action == 'SUSPEND':
@@ -642,8 +682,11 @@ class AdminWorkshopStatusView(views.APIView):
     Approve, verify, suspend or reactivate a workshop.
     POST /api/v1/admin/workshops/<uuid:pk>/status/
     Body: {"action": "VERIFY" | "UNVERIFY" | "SUSPEND" | "REACTIVATE", "reason": "Notes"}
+
+    S3: requires 'seller.verify' (VERIFICATION_OFFICER; platform admins hold every permission).
+    VERIFY grants the WORKSHOP role to the owner, so general staff must not reach it.
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsPlatformStaff, HasPermission('seller.verify')]
 
     def post(self, request, pk):
         try:
@@ -849,8 +892,12 @@ class AdminBuyerStatusView(views.APIView):
     Suspend or reactivate a buyer account.
     POST /api/v1/admin/buyers/<uuid:pk>/status/
     Body: {"action": "SUSPEND" | "REACTIVATE", "reason": "Notes"}
+
+    S1: platform administrators only (ADMIN / MARKETPLACE_ADMIN / superuser). Support agents and
+    other staff cannot suspend or reactivate accounts. Suspension is enforced immediately by the
+    session-version trigger (existing tokens are revoked and stay revoked after reactivation).
     """
-    permission_classes = [IsPlatformStaff]
+    permission_classes = [IsMarketplaceAdmin]
 
     def post(self, request, pk):
         try:
@@ -863,6 +910,9 @@ class AdminBuyerStatusView(views.APIView):
 
         if action not in ('SUSPEND', 'REACTIVATE'):
             raise ValidationError({"action": "Action must be either SUSPEND or REACTIVATE."})
+
+        # S1: only ordinary BUYER accounts; never staff/admins/superusers/self.
+        _guard_account_status_target(request, buyer, RoleChoices.BUYER, "admin:buyer.status")
 
         corr_id = getattr(request, 'correlation_id', '') or get_current_correlation_id()
 

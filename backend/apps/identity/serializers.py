@@ -10,6 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.settings import api_settings
 from .models import User, UserRole, RoleChoices, AccountStatusChoices
+from .authentication import stamp_session_version, session_version_matches, SESSION_REVOKED_MESSAGE
 
 
 RESTRICTED_PUBLIC_ROLES = {
@@ -148,7 +149,7 @@ class UserLoginSerializer(serializers.Serializer):
             if not user.has_mfa_enabled:
                 from django.core import signing
                 pre_auth_token = signing.dumps(
-                    {'user_id': str(user.id), 'action': 'mfa_enrollment'},
+                    {'user_id': str(user.id), 'action': 'mfa_enrollment', 'sv': user.session_version},
                     salt='driverxtra.mfa',
                 )
                 return {
@@ -160,8 +161,10 @@ class UserLoginSerializer(serializers.Serializer):
                 }
             elif not code:
                 from django.core import signing
+                # 'sv' binds the challenge to the current session version: a suspension before the
+                # code is verified invalidates it, even if the account is reactivated in between.
                 pre_auth_token = signing.dumps(
-                    {'user_id': str(user.id), 'action': 'mfa_login'},
+                    {'user_id': str(user.id), 'action': 'mfa_login', 'sv': user.session_version},
                     salt='driverxtra.mfa',
                 )
                 return {
@@ -178,6 +181,7 @@ class UserLoginSerializer(serializers.Serializer):
 
         # Generate SimpleJWT tokens with active_role claim
         refresh = RefreshToken.for_user(user)
+        stamp_session_version(refresh, user)
         refresh['email'] = user.email
         refresh['roles'] = user.roles
         refresh['full_name'] = user.full_name
@@ -243,7 +247,16 @@ class StaffAwareTokenRefreshSerializer(TokenRefreshSerializer):
             except Exception:
                 user = None
 
-        if not user or not user.is_active or getattr(user, 'status', 'ACTIVE') != 'ACTIVE' or not api_settings.USER_AUTHENTICATION_RULE(user):
+        # Session-version revocation (migration 0011): checked before rotation/blacklisting so a
+        # revoked refresh token is never exchanged for a new pair. The 'sv' claim is carried
+        # forward by rotation and copied into the new access token.
+        if user is not None and not session_version_matches(user, refresh.payload):
+            raise AuthenticationFailed(SESSION_REVOKED_MESSAGE, "session_revoked")
+
+        # USER_AUTHENTICATION_RULE blocks inactive, SUSPENDED and DEACTIVATED accounts. PENDING is not
+        # rejected here (decision U6/D4): login already requires ACTIVE, and per-request authentication
+        # applies the same rule, so refresh stays consistent with access-token use.
+        if not user or not user.is_active or not api_settings.USER_AUTHENTICATION_RULE(user):
             raise AuthenticationFailed(
                 self.error_messages["no_active_account"],
                 "no_active_account",
@@ -360,11 +373,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
         ]
 
     def get_active_role(self, obj) -> str:
+        # request.auth is a SimpleJWT token object (not a dict); read the claim through .get().
+        # The claim is reported only while the user still holds that role. Superusers get no
+        # shortcut: has_role() grants them ADMIN only; operational roles must be assigned.
         request = self.context.get('request')
-        if request and hasattr(request, 'auth') and request.auth:
-            active_role = getattr(request.auth, 'get', None) and request.auth.get('active_role')
-            if active_role:
-                return active_role
+        token = getattr(request, 'auth', None) if request else None
+        claimed = token.get('active_role') if token is not None and hasattr(token, 'get') else None
+        if claimed and obj.has_role(claimed):
+            return RoleChoices.normalize_role(claimed)
         return obj.get_default_role()
 
     def get_staff_role(self, obj):
@@ -378,13 +394,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return None
 
     def get_permissions(self, obj) -> list[str]:
-        if obj.is_superuser or obj.has_role(RoleChoices.ADMIN):
-            from apps.identity.models import Permission
-            return list(Permission.objects.values_list('code', flat=True))
-        profile = getattr(obj, 'staff_profile', None)
-        if profile and profile.staff_role:
-            return list(profile.staff_role.role_permissions.values_list('permission__code', flat=True))
-        return []
+        # Same rules the backend enforces via User.has_permission().
+        return obj.get_effective_permissions()
 
     def get_organisations(self, obj):
         memberships = obj.organisation_memberships.filter(is_active=True).select_related('organisation')

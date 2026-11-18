@@ -65,9 +65,14 @@ def _has_permission(user, perm_code: str) -> bool:
     return False
 
 
-def _is_seller_authorized_for_order(user, order: Order) -> bool:
-    """Checks if user is the direct seller or organisation admin for any item in the order."""
-    if _is_staff_or_admin(user):
+def _is_seller_authorized_for_order(user, order: Order, allow_staff: bool = True) -> bool:
+    """Checks if user is the direct seller or organisation admin for any item in the order.
+
+    allow_staff=True (default) keeps the historic staff/admin shortcut for existing callers.
+    Dispute and refund-summary paths pass allow_staff=False so that staff access there is
+    governed only by explicit permissions ('dispute.manage' / 'order.refund').
+    """
+    if allow_staff and _is_staff_or_admin(user):
         return True
     if not user or not user.is_authenticated:
         return False
@@ -2076,7 +2081,7 @@ class DisputeService:
         """
         Allows buyer to raise a commercial dispute for an order.
         """
-        if order.buyer_id != buyer.id and not _is_staff_or_admin(buyer):
+        if order.buyer_id != buyer.id and not _has_permission(buyer, 'dispute.manage'):
             raise DjangoValidationError("Permission denied: You can only raise disputes on your own orders.")
 
         cat = category.strip().upper()
@@ -2227,7 +2232,8 @@ class DisputeService:
         Restricted to the buyer, seller, or authorized operations staff.
         """
         is_buyer = dispute.buyer_id == actor.id
-        is_seller = dispute.seller_id == actor.id or _is_seller_authorized_for_order(actor, dispute.order)
+        is_seller = dispute.seller_id == actor.id or _is_seller_authorized_for_order(actor, dispute.order, allow_staff=False)
+        # Posting to a dispute thread is mediation: requires 'dispute.manage' for non-parties.
         is_staff = _has_permission(actor, 'dispute.manage')
 
         if not (is_buyer or is_seller or is_staff):

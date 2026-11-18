@@ -100,6 +100,12 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
     )
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    # Session revocation counter. JWTs carry it as the 'sv' claim and are rejected when it differs.
+    # Maintained by the database trigger created in migration 0011 (PostgreSQL and SQLite): it is
+    # incremented whenever the account becomes unusable (is_active=False, SUSPENDED or DEACTIVATED)
+    # by ANY path (save, QuerySet.update, bulk_update, raw SQL) and can never be lowered.
+    # Renaming this column, status, is_active or the identity_user table requires updating the trigger.
+    session_version = models.PositiveIntegerField(default=0, editable=False)
     date_joined = models.DateTimeField(default=timezone.now)
     email_verified_at = models.DateTimeField(
         null=True,
@@ -210,22 +216,45 @@ class User(AbstractBaseUser, PermissionsMixin, BaseUUIDModel):
                 return r
         return RoleChoices.BUYER
 
+    def _get_effective_staff_role(self):
+        """Staff sub-role whose permissions apply to this user, or None.
+
+        Uses the explicitly assigned StaffProfile sub-role only. Staff without an assigned
+        sub-role hold no operational permissions (fail closed); there is no implicit fallback.
+        Existing unassigned staff were given an explicit VERIFICATION_OFFICER profile by
+        migration identity.0012. Shared by has_permission() and get_effective_permissions() so
+        that enforced and reported permissions always agree.
+        """
+        profile = getattr(self, 'staff_profile', None)
+        if profile and profile.staff_role:
+            return profile.staff_role
+        return None
+
     def has_permission(self, perm_code: str) -> bool:
         """Checks if user has a platform permission. Platform admins have all permissions."""
         if self.is_superuser or self.has_role(RoleChoices.ADMIN):
             return True
         try:
-            profile = getattr(self, 'staff_profile', None)
-            if profile and profile.staff_role:
-                return profile.staff_role.role_permissions.filter(permission__code=perm_code).exists()
-            elif self.is_staff or self.has_role(RoleChoices.STAFF):
-                from apps.identity.models import StaffRole
-                default_role = StaffRole.objects.filter(code='VERIFICATION_OFFICER').first()
-                if default_role:
-                    return default_role.role_permissions.filter(permission__code=perm_code).exists()
+            role = self._get_effective_staff_role()
+            if role:
+                return role.role_permissions.filter(permission__code=perm_code).exists()
         except Exception:
             pass
         return False
+
+    def get_effective_permissions(self) -> list[str]:
+        """Permission codes this user effectively holds (same rules as has_permission)."""
+        if self.is_superuser or self.has_role(RoleChoices.ADMIN):
+            return list(Permission.objects.order_by('code').values_list('code', flat=True))
+        try:
+            role = self._get_effective_staff_role()
+            if role:
+                return list(
+                    role.role_permissions.order_by('permission__code').values_list('permission__code', flat=True)
+                )
+        except Exception:
+            pass
+        return []
 
     @property
     def has_mfa_enabled(self) -> bool:
@@ -363,9 +392,11 @@ class StaffProfile(BaseUUIDModel):
         on_delete=models.CASCADE,
         related_name='staff_profile',
     )
+    # PROTECT: a sub-role that still has members cannot be deleted; members must be reassigned
+    # first, so deleting a role can never silently change anyone's permissions.
     staff_role = models.ForeignKey(
         StaffRole,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name='staff_members',
