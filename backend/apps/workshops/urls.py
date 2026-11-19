@@ -6,6 +6,7 @@ from apps.workshops.views import (
     BuyerBookingListCreateView,
     BuyerBookingDetailView,
     BuyerBookingCancelView,
+    WorkshopRefundReconcileView,
     BuyerQuotationAcceptView,
     BuyerQuotationRejectView,
     QuotationDepositSessionCreateView,
@@ -34,6 +35,13 @@ from apps.workshops.views import (
     WorkOrderPartUsageDetailView,
     WorkshopTechnicianListView,
     BuyerWorkOrderDetailView,
+    WorkOrderSettlementDetailView,
+    WorkOrderSettlementSessionCreateView,
+    WorkOrderSettlementVerifyView,
+    WorkOrderInvoiceDetailView,
+    WorkOrderSettlementWebhookView,
+    WorkshopSettlementManageListView,
+    WorkshopInvoiceManageListView,
     WorkOrderChangeOrderListCreateView,
     ChangeOrderDetailView,
     ChangeOrderSubmitView,
@@ -68,6 +76,8 @@ urlpatterns = [
     path('bookings/my/', BuyerBookingListCreateView.as_view(), name='workshop-booking-my-list'),
     path('bookings/my/<uuid:id>/', BuyerBookingDetailView.as_view(), name='workshop-booking-my-detail'),
     path('bookings/my/<uuid:id>/cancel/', BuyerBookingCancelView.as_view(), name='workshop-booking-my-cancel'),
+    path('bookings/<uuid:id>/cancel/', BuyerBookingCancelView.as_view(), name='workshop-booking-cancel'),
+    path('refunds/<uuid:id>/reconcile/', WorkshopRefundReconcileView.as_view(), name='workshop-refund-reconcile'),
 
     # Quotation viewing & responses
     path('quotations/<uuid:id>/', WorkshopQuotationDetailView.as_view(), name='workshop-quotation-detail'),
@@ -100,6 +110,8 @@ urlpatterns = [
     path('manage/work-orders/<uuid:id>/parts/', WorkOrderPartUsageListCreateView.as_view(), name='workshop-work-order-parts'),
     path('manage/work-orders/<uuid:id>/parts/<uuid:part_id>/', WorkOrderPartUsageDetailView.as_view(), name='workshop-work-order-part-detail'),
     path('manage/technicians/', WorkshopTechnicianListView.as_view(), name='workshop-technicians-list'),
+    path('manage/settlements/', WorkshopSettlementManageListView.as_view(), name='workshop-manage-settlements'),
+    path('manage/invoices/', WorkshopInvoiceManageListView.as_view(), name='workshop-manage-invoices'),
 
     # Technician Mobile Workflow
     path('technician/work-orders/', TechnicianWorkOrderListView.as_view(), name='workshop-technician-work-orders-list'),
@@ -108,8 +120,13 @@ urlpatterns = [
     path('technician/work-orders/<uuid:id>/tasks/<uuid:task_id>/', TechnicianWorkOrderTaskUpdateView.as_view(), name='workshop-technician-work-order-task-update'),
     path('technician/work-orders/<uuid:id>/parts/', TechnicianWorkOrderPartUsageView.as_view(), name='workshop-technician-work-order-parts'),
 
-    # Buyer Work Order inspection
+    # Buyer Work Order inspection & Settlement
     path('bookings/my/<uuid:id>/work-order/', BuyerWorkOrderDetailView.as_view(), name='workshop-buyer-work-order'),
+    path('work-orders/<uuid:id>/settle/', WorkOrderSettlementDetailView.as_view(), name='workshop-work-order-settle-detail'),
+    path('work-orders/<uuid:id>/settle/session/', WorkOrderSettlementSessionCreateView.as_view(), name='workshop-work-order-settle-session'),
+    path('work-orders/<uuid:id>/settle/verify/', WorkOrderSettlementVerifyView.as_view(), name='workshop-work-order-settle-verify'),
+    path('work-orders/<uuid:id>/invoice/', WorkOrderInvoiceDetailView.as_view(), name='workshop-work-order-invoice-detail'),
+    path('settle/webhook/<str:provider>/', WorkOrderSettlementWebhookView.as_view(), name='workshop-work-order-settle-webhook'),
 
     # Change Orders (Workshop Management)
     path('manage/work-orders/<uuid:id>/change-orders/', WorkOrderChangeOrderListCreateView.as_view(), name='workshop-work-order-change-orders'),

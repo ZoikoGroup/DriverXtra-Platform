@@ -21,6 +21,7 @@ import {
   LayoutDashboard,
   Store,
   Users,
+  Receipt,
 } from "lucide-react";
 import { PrototypeUser } from "@/lib/prototype-auth/types";
 
@@ -56,6 +57,7 @@ export const SELLER_NAV_ITEMS: NavItem[] = [
 
 export const WORKSHOP_NAV_ITEMS: NavItem[] = [
   { id: "workshop_landing", label: "Workshop Operations Hub", icon: Wrench, badge: "Workshop" },
+  { id: "workshop_settlements", label: "Settlements & Invoices", icon: Receipt, badge: "Finance" },
   { id: "workshops_browse", label: "Workshops Directory", icon: Wrench, badge: "Directory" },
   { id: "seller_onboarding", label: "Workshop Partner Status", icon: FileCheck2, badge: "Partner" },
   { id: "organisations", label: "Workshop & Teams", icon: Building2, badge: "Organisation" },
@@ -227,6 +229,7 @@ export const TAB_LABELS: Record<string, string> = {
   seller_onboarding: "Apply to sell / Apply as workshop",
   seller_reviews: "Seller Applications Compliance Queue",
   workshop_landing: "Workshop Services — Workshop Partner Hub",
+  workshop_settlements: "Workshop Settlements & Invoices",
   workshops_browse: "Workshop Services & Bookings",
 };
 

@@ -239,6 +239,8 @@ export default function PlatformDashboardPage() {
             />
           ) : currentTab === "workshop_landing" ? (
             <WorkshopLandingView />
+          ) : currentTab === "workshop_settlements" ? (
+            <WorkshopLandingView initialTab="settlements" />
           ) : currentTab === "workshops_browse" ? (
             <BuyerWorkshopsView
               onNavigateToGarage={() => setSelectedTab({ role: activeRole, tab: "garage" })}

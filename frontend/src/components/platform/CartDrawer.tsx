@@ -390,6 +390,15 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       }
     }
 
+    if (activeSession && activeSession.expires_in_seconds !== undefined && activeSession.expires_in_seconds <= 15) {
+      setIsVerifyingPayment(false);
+      setIsSubmitting(false);
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError("Payment session has expired. The 30-minute stock reservation window has elapsed. Please restart checkout to re-reserve items.");
+      return;
+    }
+
     const loaded = await loadRazorpayScript();
     if (!loaded || !window.Razorpay) {
       setIsVerifyingPayment(false);
@@ -546,6 +555,15 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       } catch (err: unknown) {
         console.warn("Could not retrieve fresh Stripe payment session:", err);
       }
+    }
+
+    if (activeSession && activeSession.expires_in_seconds !== undefined && activeSession.expires_in_seconds <= 15) {
+      setIsVerifyingPayment(false);
+      setIsSubmitting(false);
+      setConfirmedOrder(order);
+      setStep("confirmed");
+      setCheckoutError("Payment session has expired. The 30-minute stock reservation window has elapsed. Please restart checkout to re-reserve items.");
+      return;
     }
 
     // In automated testing or test mode environment: verify with server sandbox

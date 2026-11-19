@@ -284,47 +284,12 @@ class BookingService:
 
     @classmethod
     def cancel_booking(cls, booking: WorkshopBooking, reason: str, actor: User) -> WorkshopBooking:
-        if not reason or not reason.strip():
-            raise DjangoValidationError("A cancellation reason is required.")
-
-        with transaction.atomic():
-            booking = WorkshopBooking.objects.select_for_update().get(id=booking.id)
-            if booking.status == BookingStatusChoices.CANCELLED:
-                raise DjangoValidationError("Booking is already cancelled.")
-
-            booking.status = BookingStatusChoices.CANCELLED
-            booking.cancellation_reason = reason.strip()
-            booking.cancelled_by = actor
-            booking.cancelled_at = timezone.now()
-            booking.save(update_fields=['status', 'cancellation_reason', 'cancelled_by', 'cancelled_at', 'updated_at'])
-
-            audit = record_audit_entry(
-                event_type="workshop.booking.cancelled",
-                action="workshop:booking.cancel",
-                resource_type="WorkshopBooking",
-                resource_id=str(booking.id),
-                actor_id=actor.id,
-                metadata={"booking_number": booking.booking_number, "reason": reason},
-            )
-
-            # Notify the opposite party
-            try:
-                recipient = booking.workshop.organisation.created_by if actor == booking.buyer else booking.buyer
-                if recipient and audit:
-                    create_notification(
-                        recipient=recipient,
-                        audit_entry=audit,
-                        title=f"Booking Cancelled #{booking.booking_number}",
-                        message=f"Booking #{booking.booking_number} was cancelled by {actor.full_name or actor.email}. Reason: {reason}",
-                        link="/platform",
-                        resource_type="WorkshopBooking",
-                        resource_id=str(booking.id),
-                        event_type="workshop.booking.cancelled",
-                    )
-            except Exception as e:
-                logger.warning("Failed to dispatch cancellation notification: %s", e)
-
-            return booking
+        from apps.workshops.refund_service import WorkshopRefundService
+        return WorkshopRefundService.process_booking_cancellation_refunds(
+            booking=booking,
+            reason=reason,
+            actor=actor,
+        )
 
 
 class QuotationService:
@@ -534,6 +499,8 @@ class QuotationService:
 
             if booking.buyer_id != buyer.id:
                 raise DjangoValidationError("Only the customer who placed this booking can accept this quotation.")
+            if booking.status == BookingStatusChoices.CANCELLED:
+                raise DjangoValidationError("Cannot accept quotation for a cancelled booking.")
             if quotation.status != QuotationStatusChoices.ISSUED:
                 raise DjangoValidationError(f"Cannot accept quotation in '{quotation.status}' status (must be ISSUED).")
 
