@@ -11,17 +11,41 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
-@database_sync_to_async
-def get_user_from_token(token_string: str):
+def _authenticate_token(token_string: str):
+    """Returns (user, session_version) for a valid access token, else (AnonymousUser(), None).
+
+    Applies the same account rules as HTTP authentication: the account must be usable
+    (is_active and not SUSPENDED/DEACTIVATED) and the token's session version ('sv', missing = 0)
+    must equal the user's current session version.
+    """
+    from apps.identity.authentication import (
+        claimed_session_version,
+        is_account_usable,
+        session_version_matches,
+    )
     try:
         access_token = AccessToken(token_string)
         user_id = access_token.get("user_id")
         if not user_id:
-            return AnonymousUser()
-        return User.objects.get(pk=user_id, is_active=True)
+            return AnonymousUser(), None
+        user = User.objects.get(pk=user_id, is_active=True)
+        if not is_account_usable(user) or not session_version_matches(user, access_token):
+            logger.info("WebSocket JWT rejected: account unusable or session revoked (user %s).", user_id)
+            return AnonymousUser(), None
+        return user, claimed_session_version(access_token)
     except (InvalidToken, TokenError, User.DoesNotExist, Exception) as exc:
         logger.debug("WebSocket JWT authentication failed: %s", exc)
-        return AnonymousUser()
+        return AnonymousUser(), None
+
+
+@database_sync_to_async
+def get_user_and_session_version_from_token(token_string: str):
+    return _authenticate_token(token_string)
+
+
+@database_sync_to_async
+def get_user_from_token(token_string: str):
+    return _authenticate_token(token_string)[0]
 
 
 class JWTAuthMiddleware:
@@ -47,7 +71,11 @@ class JWTAuthMiddleware:
                 token = auth_header.split(" ", 1)[1].strip()
 
         if token:
-            scope["user"] = await get_user_from_token(token)
+            user, session_version = await get_user_and_session_version_from_token(token)
+            scope["user"] = user
+            # Session version the connection was authenticated with; the consumer re-checks it
+            # against the database on every incoming message and outgoing broadcast.
+            scope["jwt_session_version"] = session_version
         else:
             scope["user"] = AnonymousUser()
 

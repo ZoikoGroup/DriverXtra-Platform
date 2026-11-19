@@ -1878,8 +1878,8 @@ class WorkshopReviewService:
         """
         Allows platform staff/admin to moderate review status (APPROVED, REJECTED, FLAGGED).
         """
-        from apps.workshops.permissions import is_platform_admin_or_staff
-        if not is_platform_admin_or_staff(user):
+        from apps.workshops.permissions import can_moderate_reviews
+        if not can_moderate_reviews(user):
             raise PermissionDenied("Only authorized platform administrators and staff can moderate reviews.")
 
         target_status = status.strip().upper()

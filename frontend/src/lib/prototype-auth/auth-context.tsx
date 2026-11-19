@@ -222,6 +222,22 @@ function parseJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
+// Prefer the backend's own message; strip the "non_field_errors:" prefix added for serializer-level errors.
+function getAuthErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) {
+    const details = err.details;
+    if (details && typeof details === "object" && !Array.isArray(details)) {
+      const nonField = details.non_field_errors;
+      const first = Array.isArray(nonField) ? nonField[0] : nonField;
+      if (typeof first === "string" && first.trim()) {
+        return first;
+      }
+    }
+    return err.message || fallback;
+  }
+  return fallback;
+}
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -349,10 +365,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAuthError(null);
 
     if (!password) {
+      const msg = "Password is required for platform authentication.";
       setIsLoading(false);
-      const err = "Password is required for platform authentication.";
-      setAuthError(err);
-      return { success: false, error: err };
+      setAuthError(msg);
+      return { success: false, error: msg };
     }
 
     try {
@@ -396,14 +412,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return { success: true, mfaRequired: false, activeRole: mappedUser.activeRole || response.active_role, user: mappedUser };
     } catch (err: unknown) {
       setIsLoading(false);
-      const msg = err instanceof ApiError ? err.message : "Authentication failed. Please verify credentials.";
+      const msg = getAuthErrorMessage(err, "Authentication failed. Please verify credentials.");
       setAuthError(msg);
       return { success: false, error: msg };
     }
   };
 
   const verifyMfaLogin = async (code: string): Promise<{ success: boolean; activeRole?: string; user?: PrototypeUser; error?: string }> => {
-    if (!mfaChallenge) return { success: false, error: "No active MFA challenge." };
+    if (!mfaChallenge) {
+      return { success: false, error: "Your sign-in session has expired. Please log in again." };
+    }
     setIsLoading(true);
     setAuthError(null);
     try {
@@ -414,7 +432,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setMfaChallenge(null);
       return { success: true, activeRole: mappedUser.activeRole || response.active_role, user: mappedUser };
     } catch (err: unknown) {
-      const msg = err instanceof ApiError ? err.message : "Invalid MFA code. Please try again.";
+      const msg = getAuthErrorMessage(err, "Invalid MFA code. Please try again.");
       setAuthError(msg);
       return { success: false, error: msg };
     } finally {

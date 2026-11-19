@@ -15,6 +15,19 @@ def is_platform_admin_or_staff(user) -> bool:
     )
 
 
+def can_moderate_reviews(user) -> bool:
+    """Workshop review moderation requires the 'review.moderate' permission.
+
+    Platform ADMIN / superusers hold every permission. Other workshop staff checks
+    (is_platform_admin_or_staff) are unchanged.
+    """
+    if not (user and user.is_authenticated):
+        return False
+    if user.is_superuser or user.has_role('ADMIN') or user.has_role('MARKETPLACE_ADMIN'):
+        return True
+    return bool(hasattr(user, 'has_permission') and user.has_permission('review.moderate'))
+
+
 def is_workshop_staff_or_admin(user, workshop) -> bool:
     if not (user and user.is_authenticated and workshop):
         return False
