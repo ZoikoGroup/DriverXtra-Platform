@@ -11,6 +11,10 @@ import {
   ChangeOrder,
   PlatformWorkshopReview,
   WorkshopReputationSummary,
+  WorkOrderSettlementDetail,
+  WorkOrderSettlementSessionResponse,
+  WorkOrderInvoice,
+  WorkshopBookingCancellationResponse,
 } from "@/lib/api/client";
 import {
   Wrench,
@@ -29,6 +33,8 @@ import {
   X,
   CreditCard,
   Lock,
+  FileText,
+  Printer,
 } from "lucide-react";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import { WorkshopChatModal } from "./WorkshopChatModal";
@@ -201,9 +207,37 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
   const [depositError, setDepositError] = useState<string | null>(null);
   const [depositSuccess, setDepositSuccess] = useState<string | null>(null);
 
+  // Authoritative Work Order Settlement Modal & UI State
+  const [settlementModalOpen, setSettlementModalOpen] = useState(false);
+  const [targetBookingForSettlement, setTargetBookingForSettlement] = useState<WorkshopBooking | null>(null);
+  const [settlementDetail, setSettlementDetail] = useState<WorkOrderSettlementDetail | null>(null);
+  const [settlementSession, setSettlementSession] = useState<WorkOrderSettlementSessionResponse | null>(null);
+  const [settlementUIState, setSettlementUIState] = useState<WorkshopDepositUIState>("required");
+  const [settlementError, setSettlementError] = useState<string | null>(null);
+  const [settlementSuccess, setSettlementSuccess] = useState<string | null>(null);
+  const [settlementCustomAmount, setSettlementCustomAmount] = useState<string>("");
+  const [loadingSettlement, setLoadingSettlement] = useState(false);
+
+  // Authoritative Invoice Viewer State
+  const [invoiceModalOpen, setInvoiceModalOpen] = useState(false);
+  const [currentInvoice, setCurrentInvoice] = useState<WorkOrderInvoice | null>(null);
+  const [loadingInvoice, setLoadingInvoice] = useState(false);
+  const [invoiceError, setInvoiceError] = useState<string | null>(null);
+
+  // Settlement details cache per work order ID
+  const [workOrderSettlements, setWorkOrderSettlements] = useState<Record<string, WorkOrderSettlementDetail>>({});
+
   // Workshop Messaging State
   const [chatModalOpen, setChatModalOpen] = useState(false);
   const [targetBookingForChat, setTargetBookingForChat] = useState<WorkshopBooking | null>(null);
+
+  // Cancellation Modal & Processing State (Phase 3)
+  const [cancelModalOpen, setCancelModalOpen] = useState(false);
+  const [targetBookingForCancel, setTargetBookingForCancel] = useState<WorkshopBooking | null>(null);
+  const [cancelReasonInput, setCancelReasonInput] = useState("");
+  const [isSubmittingCancellation, setIsSubmittingCancellation] = useState(false);
+  const [cancellationError, setCancellationError] = useState<string | null>(null);
+  const [cancellationResult, setCancellationResult] = useState<WorkshopBookingCancellationResponse | null>(null);
 
   const openChatModal = (bk: WorkshopBooking) => {
     setTargetBookingForChat(bk);
@@ -249,6 +283,7 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
       const bookings = res.results || [];
       setMyBookings(bookings);
       const coMap: Record<string, ChangeOrder[]> = {};
+      const stMap: Record<string, WorkOrderSettlementDetail> = {};
       await Promise.all(
         bookings.map(async (b) => {
           try {
@@ -259,9 +294,18 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
           } catch {
             // ignore
           }
+          if (b.work_order_id) {
+            try {
+              const stRes = await api.workshops.getWorkOrderSettlement(b.work_order_id);
+              stMap[b.work_order_id] = stRes;
+            } catch {
+              // ignore
+            }
+          }
         })
       );
       setBookingChangeOrders(coMap);
+      setWorkOrderSettlements(stMap);
     } catch (err) {
       console.error("Failed to load my bookings:", err);
     } finally {
@@ -498,13 +542,235 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
     }
   };
 
+  // =========================================================================
+  // WORK ORDER DUAL-PHASE SETTLEMENT & FINAL BALANCE PAYMENT ORCHESTRATION
+  // =========================================================================
+
+  const openSettlementModal = async (bk: WorkshopBooking, workOrderId: string) => {
+    if (settlementUIState === "initiated" || settlementUIState === "processing") {
+      return;
+    }
+    setTargetBookingForSettlement(bk);
+    setSettlementModalOpen(true);
+    setSettlementUIState("required");
+    setSettlementError(null);
+    setSettlementSuccess(null);
+    setSettlementSession(null);
+    setLoadingSettlement(true);
+
+    try {
+      const detail = await api.workshops.getWorkOrderSettlement(workOrderId);
+      setSettlementDetail(detail);
+      setSettlementCustomAmount(detail.outstanding_balance);
+      setWorkOrderSettlements((prev) => ({ ...prev, [workOrderId]: detail }));
+    } catch (err: unknown) {
+      setSettlementError(err instanceof Error ? err.message : "Failed to load settlement details.");
+    } finally {
+      setLoadingSettlement(false);
+    }
+  };
+
+  const handleInitiateSettlementPayment = async () => {
+    if (!targetBookingForSettlement || !targetBookingForSettlement.work_order_id || !settlementDetail) return;
+    if (settlementUIState === "initiated" || settlementUIState === "processing") return;
+
+    const workOrderId = targetBookingForSettlement.work_order_id;
+    const payAmount = settlementCustomAmount
+      ? parseFloat(settlementCustomAmount)
+      : parseFloat(settlementDetail.outstanding_balance);
+
+    if (isNaN(payAmount) || payAmount <= 0) {
+      setSettlementError("Please enter a valid payment amount greater than zero.");
+      return;
+    }
+    if (payAmount > parseFloat(settlementDetail.outstanding_balance)) {
+      setSettlementError(
+        `Payment amount cannot exceed the outstanding balance of ${settlementDetail.currency} ${settlementDetail.outstanding_balance}.`
+      );
+      return;
+    }
+
+    setSettlementUIState("initiated");
+    setSettlementError(null);
+    setSettlementSuccess(null);
+
+    try {
+      const returnUrl =
+        typeof window !== "undefined"
+          ? `${window.location.origin}/platform?tab=workshops&settle_work_order_id=${workOrderId}`
+          : undefined;
+      const cancelUrl =
+        typeof window !== "undefined"
+          ? `${window.location.origin}/platform?tab=workshops&settle_cancelled=true`
+          : undefined;
+
+      const session = await api.workshops.createWorkOrderSettlementSession(workOrderId, {
+        amount: payAmount.toFixed(2),
+        return_url: returnUrl,
+        cancel_url: cancelUrl,
+      });
+      setSettlementSession(session);
+
+      const provider = (
+        session.payment_session?.provider ||
+        (settlementDetail.currency === "GBP" ? "STRIPE" : "RAZORPAY")
+      ).toUpperCase();
+
+      if (provider === "RAZORPAY") {
+        const loaded = await loadRazorpayScript();
+        if (!loaded || !window.Razorpay) {
+          setSettlementUIState("failed");
+          setSettlementError("Unable to load Razorpay Checkout SDK. Please check your network connection.");
+          return;
+        }
+
+        const RazorpayClass = window.Razorpay;
+        const options: RazorpayOptions = {
+          key:
+            session.payment_session.key_id ||
+            process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID ||
+            "rzp_test_placeholder_key",
+          amount:
+            session.payment_session.amount_minor || Math.round(payAmount * 100),
+          currency: session.currency || settlementDetail.currency || "INR",
+          name: "DriverXtra Platform",
+          description: `Work Order Balance #${settlementDetail.work_order_number} (${settlementDetail.workshop_name})`,
+          order_id: session.payment_session.provider_order_id,
+          prefill: {
+            name: user?.fullName || "",
+            email: user?.email || "",
+          },
+          notes: {
+            work_order_id: workOrderId,
+            work_order_number: settlementDetail.work_order_number,
+            payment_number: session.payment_number,
+          },
+          theme: { color: "#10b981" },
+          handler: async function (response: RazorpaySuccessResponse) {
+            setSettlementUIState("processing");
+            try {
+              const verifyRes = await api.workshops.verifyWorkOrderSettlement(workOrderId, {
+                payment_number: session.payment_number,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                amount: payAmount.toFixed(2),
+                currency: settlementDetail.currency,
+              });
+
+              if (verifyRes.status === "verified" || verifyRes.payment?.status === "VERIFIED") {
+                setSettlementUIState("paid_and_verified");
+                setSettlementSuccess(
+                  `Payment of ${settlementDetail.currency} ${payAmount.toFixed(2)} verified successfully!`
+                );
+                setActionSuccessMessage("Workshop balance payment processed successfully!");
+                await fetchMyBookings();
+              } else {
+                setSettlementUIState("failed");
+                setSettlementError("Payment verification failed.");
+              }
+            } catch (vErr: unknown) {
+              setSettlementUIState("failed");
+              setSettlementError(vErr instanceof Error ? vErr.message : "Payment verification failed.");
+            }
+          },
+          modal: {
+            confirm_close: true,
+            ondismiss: function () {
+              setSettlementUIState("cancelled");
+              setSettlementError("Payment checkout was dismissed. You can retry at any time.");
+            },
+          },
+        };
+
+        const rzp = new RazorpayClass(options);
+        rzp.on("payment.failed", function (resp: RazorpayErrorResponse) {
+          setSettlementUIState("failed");
+          const desc = resp?.error?.description || "Payment failed or was declined.";
+          setSettlementError(`Payment failed: ${desc}. Please retry.`);
+        });
+        rzp.open();
+      } else if (provider === "STRIPE") {
+        if (session.payment_session?.checkout_url) {
+          setSettlementUIState("processing");
+          window.location.assign(session.payment_session.checkout_url);
+        }
+      }
+    } catch (err: unknown) {
+      setSettlementUIState("failed");
+      setSettlementError(err instanceof Error ? err.message : "Failed to initiate settlement payment session.");
+    }
+  };
+
+  const handleConfirmStripeSettlementPayment = async () => {
+    if (
+      !targetBookingForSettlement ||
+      !targetBookingForSettlement.work_order_id ||
+      !settlementSession ||
+      !settlementDetail
+    )
+      return;
+    if (settlementUIState === "processing") return;
+
+    setSettlementUIState("processing");
+    setSettlementError(null);
+
+    const workOrderId = targetBookingForSettlement.work_order_id;
+    const pSession = settlementSession.payment_session;
+
+    try {
+      const verifyPayload = {
+        payment_number: settlementSession.payment_number,
+        payment_intent_id: pSession.provider_order_id,
+        stripe_payment_intent_id: pSession.provider_order_id,
+        client_secret: pSession.client_secret,
+        amount: settlementSession.amount,
+        currency: settlementSession.currency,
+        preferred_provider: "stripe",
+      };
+
+      const res = await api.workshops.verifyWorkOrderSettlement(workOrderId, verifyPayload);
+      if (res.status === "verified" || res.payment?.status === "VERIFIED") {
+        setSettlementUIState("paid_and_verified");
+        setSettlementSuccess(
+          `Stripe balance payment of ${settlementDetail.currency} ${settlementSession.amount} verified!`
+        );
+        setActionSuccessMessage("Workshop balance payment confirmed!");
+        await fetchMyBookings();
+      } else {
+        setSettlementUIState("failed");
+        setSettlementError("Stripe settlement verification failed.");
+      }
+    } catch (err: unknown) {
+      setSettlementUIState("failed");
+      setSettlementError(err instanceof Error ? err.message : "Stripe settlement verification failed.");
+    }
+  };
+
+  const openInvoiceModal = async (workOrderId: string) => {
+    setInvoiceModalOpen(true);
+    setLoadingInvoice(true);
+    setInvoiceError(null);
+    setCurrentInvoice(null);
+    try {
+      const inv = await api.workshops.getWorkOrderInvoice(workOrderId);
+      setCurrentInvoice(inv);
+    } catch (err: unknown) {
+      setInvoiceError(err instanceof Error ? err.message : "Failed to load tax invoice.");
+    } finally {
+      setLoadingInvoice(false);
+    }
+  };
+
   // Authoritative URL Return Handler (Stripe Return / Callback / Cancelled)
   useEffect(() => {
     if (typeof window === "undefined") return;
     const searchParams = new URLSearchParams(window.location.search);
     const depositQuoteId = searchParams.get("deposit_quote_id");
+    const settleWorkOrderId = searchParams.get("settle_work_order_id");
     const paymentIntent = searchParams.get("payment_intent") || searchParams.get("payment_intent_id");
     const depositCancelled = searchParams.get("deposit_cancelled");
+    const settleCancelled = searchParams.get("settle_cancelled");
 
     if (depositCancelled === "true") {
       const cleanUrl = window.location.pathname + (window.location.hash || "");
@@ -513,6 +779,49 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
         setDepositUIState("cancelled");
         setDepositError("Stripe checkout was cancelled. You can retry payment whenever you are ready.");
       });
+      return;
+    }
+
+    if (settleCancelled === "true") {
+      const cleanUrl = window.location.pathname + (window.location.hash || "");
+      window.history.replaceState({}, document.title, cleanUrl);
+      queueMicrotask(() => {
+        setSettlementUIState("cancelled");
+        setSettlementError("Stripe balance payment checkout was cancelled. You can retry whenever you are ready.");
+      });
+      return;
+    }
+
+    if (settleWorkOrderId) {
+      queueMicrotask(() => {
+        setSettlementUIState("processing");
+        setSettlementModalOpen(true);
+      });
+
+      api.workshops
+        .verifyWorkOrderSettlement(settleWorkOrderId, {
+          payment_intent_id: paymentIntent || undefined,
+          preferred_provider: "stripe",
+        })
+        .then((res) => {
+          if (res.status === "verified" || res.payment?.status === "VERIFIED") {
+            setSettlementUIState("paid_and_verified");
+            setSettlementSuccess("Stripe balance payment confirmed & verified!");
+            setActionSuccessMessage("Workshop balance payment verified successfully!");
+            fetchMyBookings();
+          } else {
+            setSettlementUIState("failed");
+            setSettlementError("Failed to confirm settlement payment with Stripe.");
+          }
+        })
+        .catch((err) => {
+          setSettlementUIState("failed");
+          setSettlementError(err instanceof Error ? err.message : "Authoritative balance payment verification failed.");
+        })
+        .finally(() => {
+          const cleanUrl = window.location.pathname + (window.location.hash || "");
+          window.history.replaceState({}, document.title, cleanUrl);
+        });
       return;
     }
 
@@ -770,17 +1079,49 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
     }
   };
 
-  const handleCancelBooking = async (bookingId: string) => {
-    const reason = prompt("Please provide a reason for cancelling this booking:");
-    if (!reason || !reason.trim()) return;
+  const openCancelBookingModal = (bk: WorkshopBooking) => {
+    setTargetBookingForCancel(bk);
+    setCancelReasonInput("");
+    setCancellationError(null);
+    setCancellationResult(null);
+    setCancelModalOpen(true);
+  };
+
+  const closeCancelBookingModal = () => {
+    if (isSubmittingCancellation) return;
+    setCancelModalOpen(false);
+    setTargetBookingForCancel(null);
+    setCancelReasonInput("");
+    setCancellationError(null);
+    setCancellationResult(null);
+  };
+
+  const handleConfirmCancellation = async () => {
+    if (!targetBookingForCancel) return;
+    const reason = cancelReasonInput.trim();
+    if (!reason || reason.length < 5) {
+      setCancellationError("Please provide a valid cancellation reason (minimum 5 characters).");
+      return;
+    }
+
+    setIsSubmittingCancellation(true);
+    setCancellationError(null);
 
     try {
-      await api.workshops.cancelMyBooking(bookingId, reason);
-      setActionSuccessMessage("Booking cancelled successfully.");
+      const res = await api.workshops.cancelMyBooking(targetBookingForCancel.id, reason);
+      setCancellationResult(res);
+      setActionSuccessMessage(
+        res.refund_status === "SUCCEEDED"
+          ? `Booking cancelled. Refund of ${res.currency || "GBP"} ${res.refunded_amount} issued successfully.`
+          : res.refund_status === "PROCESSING_UNKNOWN" || res.refund_status === "PROCESSING"
+          ? `Booking cancelled. Refund is PROCESSING / awaiting gateway confirmation.`
+          : `Booking cancelled successfully.`
+      );
       fetchMyBookings();
-      setTimeout(() => setActionSuccessMessage(null), 4000);
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Failed to cancel booking.");
+      setCancellationError(err instanceof Error ? err.message : "Failed to cancel booking.");
+    } finally {
+      setIsSubmittingCancellation(false);
     }
   };
 
@@ -1482,6 +1823,143 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                     </div>
                   )}
 
+                  {/* Work Order Execution & Dual-Phase Financial Settlement Section */}
+                  {(bk.work_order_id || bk.work_order_number || (bk.status === "CONFIRMED" && bk.active_quotation?.status === "ACCEPTED")) && (() => {
+                    const woId = bk.work_order_id || bk.work_order?.id;
+                    const st = woId ? workOrderSettlements[woId] : null;
+                    const woNumber = bk.work_order_number || st?.work_order_number || bk.work_order?.work_order_number || (woId ? woId.slice(0, 8) : "WO-PENDING");
+                    const woStatus = bk.work_order_status || st?.status || bk.work_order?.status || "IN_PROGRESS";
+                    const stStatus = st?.settlement_status || bk.work_order?.settlement_status || "UNSETTLED";
+                    const currency = st?.currency || bk.active_quotation?.currency || "INR";
+                    const origQuote = st?.original_quotation_amount || bk.active_quotation?.total_amount || "0.00";
+                    const approvedCO = st?.approved_change_orders_amount || bk.work_order?.approved_change_orders_amount || "0.00";
+                    const authTotal = st?.authorized_total_amount || bk.work_order?.authorized_total_amount || origQuote;
+                    const depositPaid = st?.verified_deposit_amount || (bk.active_quotation?.deposit_status === "PAID" ? bk.active_quotation?.deposit_amount : "0.00") || "0.00";
+                    const balancePaid = st?.verified_balance_paid_amount || "0.00";
+                    const totalPaid = st?.total_amount_paid || (parseFloat(depositPaid) + parseFloat(balancePaid)).toFixed(2);
+                    const outstandingBal = st?.outstanding_balance !== undefined ? st.outstanding_balance : Math.max(0, parseFloat(authTotal) - parseFloat(totalPaid)).toFixed(2);
+                    const isFullySettled = st?.is_fully_settled || stStatus === "SETTLED" || parseFloat(outstandingBal) <= 0;
+                    const pctPaid = Math.min(100, Math.max(0, Math.round((parseFloat(totalPaid) / Math.max(1, parseFloat(authTotal))) * 100)));
+
+                    return (
+                      <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950 text-white space-y-4 shadow-sm border border-emerald-900/50">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-white/10">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20 flex items-center gap-1.5">
+                                <Wrench className="w-3 h-3" />
+                                Work Order #{woNumber}
+                              </span>
+                              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-white/10 text-slate-300">
+                                Service: {woStatus.replace(/_/g, " ")}
+                              </span>
+                              <span
+                                className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
+                                  isFullySettled
+                                    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                                    : stStatus === "PARTIALLY_SETTLED"
+                                    ? "bg-sky-500/20 text-sky-300 border-sky-500/40"
+                                    : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                                }`}
+                              >
+                                {isFullySettled
+                                  ? "Paid in Full / Settled"
+                                  : stStatus === "PARTIALLY_SETTLED"
+                                  ? "Partially Settled"
+                                  : "Balance Payment Due"}
+                              </span>
+                            </div>
+                            <h4 className="text-base font-black mt-1">Dual-Phase Financial Settlement & Execution</h4>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-xs text-slate-400 block">Remaining Balance Due</span>
+                            <span className={`text-xl font-black ${isFullySettled ? "text-emerald-400" : "text-amber-400"}`}>
+                              {currency} {parseFloat(outstandingBal).toFixed(2)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Financial Settlement Breakdown Grid */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-white/5 p-3.5 rounded-xl border border-white/10 text-xs">
+                          <div>
+                            <span className="text-slate-400 block text-[10px] uppercase font-bold">1. Original Quotation</span>
+                            <span className="font-bold text-white text-sm font-mono">{currency} {parseFloat(origQuote).toFixed(2)}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 block text-[10px] uppercase font-bold">2. Approved Changes</span>
+                            <span className="font-bold text-amber-300 text-sm font-mono">+{currency} {parseFloat(approvedCO).toFixed(2)}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 block text-[10px] uppercase font-bold">3. Total Authorized</span>
+                            <span className="font-bold text-white text-sm font-mono">{currency} {parseFloat(authTotal).toFixed(2)}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 block text-[10px] uppercase font-bold">4. Total Paid to Date</span>
+                            <span className="font-bold text-emerald-400 text-sm font-mono">{currency} {parseFloat(totalPaid).toFixed(2)}</span>
+                          </div>
+                        </div>
+
+                        {/* Progress & Milestone Track */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-[11px] text-slate-300">
+                            <span>Settlement Progress: {pctPaid}% settled</span>
+                            <span>Verified Deposit: {currency} {parseFloat(depositPaid).toFixed(2)} | Balance Paid: {currency} {parseFloat(balancePaid).toFixed(2)}</span>
+                          </div>
+                          <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full transition-all duration-500 ${isFullySettled ? "bg-emerald-500" : "bg-gradient-to-r from-amber-400 to-emerald-500"}`}
+                              style={{ width: `${pctPaid}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Action Buttons */}
+                        <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-white/10">
+                          <div className="flex items-center gap-2">
+                            {st?.has_pending_change_orders && (
+                              <span className="text-[11px] text-amber-300 bg-amber-400/10 px-2.5 py-1 rounded-lg border border-amber-400/20 flex items-center gap-1.5">
+                                <AlertTriangle className="w-3.5 h-3.5" />
+                                Pending change order under review
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {woId && (
+                              <button
+                                type="button"
+                                onClick={() => openInvoiceModal(woId)}
+                                className="inline-flex items-center gap-1.5 px-4 py-2 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition"
+                              >
+                                <FileText className="w-4 h-4 text-emerald-400" />
+                                <span>View Final Tax Invoice</span>
+                              </button>
+                            )}
+
+                            {!isFullySettled && parseFloat(outstandingBal) > 0 && woId && bk.status !== "CANCELLED" && (
+                              <button
+                                type="button"
+                                onClick={() => openSettlementModal(bk, woId)}
+                                disabled={settlementUIState === "initiated" || settlementUIState === "processing"}
+                                className="inline-flex items-center gap-1.5 px-5 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl transition shadow-md"
+                              >
+                                <CreditCard className="w-4 h-4" />
+                                <span>Pay Outstanding Balance ({currency} {parseFloat(outstandingBal).toFixed(2)})</span>
+                              </button>
+                            )}
+
+                            {isFullySettled && (
+                              <div className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-xl text-xs font-bold">
+                                <CheckCircle2 className="w-4 h-4" />
+                                <span>Fully Settled &amp; Paid</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Service Review & Booking Actions */}
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100">
                     <div className="flex items-center gap-2">
@@ -1516,13 +1994,45 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
                       ) : null}
                     </div>
 
-                    {bk.status !== "CANCELLED" && bk.status !== "REJECTED" && (
+                    {bk.status !== "CANCELLED" && bk.status !== "REJECTED" && bk.work_order_status !== "COMPLETED" && (
                       <button
-                        onClick={() => handleCancelBooking(bk.id)}
-                        className="text-xs text-rose-600 hover:text-rose-800 font-semibold"
+                        onClick={() => openCancelBookingModal(bk)}
+                        className="text-xs text-rose-600 hover:text-rose-800 font-semibold cursor-pointer transition-colors"
                       >
-                        Cancel Booking Request
+                        Cancel Booking
                       </button>
+                    )}
+
+                    {bk.status === "CANCELLED" && (
+                      <div className="mt-2 text-xs flex flex-wrap items-center gap-2">
+                        <span className="text-rose-700 font-semibold bg-rose-50 border border-rose-200 px-2.5 py-0.5 rounded-md">
+                          Cancelled
+                        </span>
+                        {bk.cancellation_reason && (
+                          <span className="text-slate-500 italic">
+                            Reason: {bk.cancellation_reason}
+                          </span>
+                        )}
+                        {bk.refunds && bk.refunds.length > 0 && bk.refunds.map((rfnd) => (
+                          <span
+                            key={rfnd.id || rfnd.refund_number}
+                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md font-medium text-xs ${
+                              rfnd.status === "SUCCEEDED"
+                                ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                                : rfnd.status === "PROCESSING_UNKNOWN" || rfnd.status === "PROCESSING"
+                                ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                : "bg-slate-100 text-slate-800 border border-slate-200"
+                            }`}
+                          >
+                            {rfnd.status === "SUCCEEDED" ? (
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                            ) : (
+                              <Clock className="w-3 h-3 text-amber-600" />
+                            )}
+                            Refund {rfnd.status === "SUCCEEDED" ? "Issued" : rfnd.status}: {rfnd.currency} {rfnd.amount} ({rfnd.refund_number})
+                          </span>
+                        ))}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -2582,6 +3092,418 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
         </div>
       )}
       {/* ========================================================================= */}
+      {/* MODAL: WORK ORDER FINAL BALANCE SETTLEMENT PAYMENT */}
+      {/* ========================================================================= */}
+      {settlementModalOpen && targetBookingForSettlement && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl border border-slate-200 space-y-5 my-8">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-black">
+                  <CreditCard className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-950">Workshop Final Balance Payment</h3>
+                  <p className="text-xs text-slate-500">
+                    Work Order #{settlementDetail?.work_order_number || targetBookingForSettlement.work_order_number || "Settlement"}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSettlementModalOpen(false);
+                  setSettlementUIState("required");
+                }}
+                disabled={settlementUIState === "processing"}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {loadingSettlement ? (
+              <div className="py-12 text-center space-y-3">
+                <RefreshCw className="w-8 h-8 text-emerald-500 animate-spin mx-auto" />
+                <p className="text-sm font-bold text-slate-700">Loading Authoritative Balance Calculation...</p>
+              </div>
+            ) : settlementUIState === "paid_and_verified" ? (
+              <div className="py-8 text-center space-y-4">
+                <div className="w-14 h-14 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center mx-auto shadow-inner">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
+                <div>
+                  <h4 className="text-lg font-black text-slate-950">Payment Verified Successfully!</h4>
+                  <p className="text-xs text-slate-600 max-w-md mx-auto mt-1">
+                    {settlementSuccess || "Your workshop work order payment has been verified by the payment gateway."}
+                  </p>
+                </div>
+                <div className="pt-2 flex justify-center gap-3">
+                  {targetBookingForSettlement.work_order_id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettlementModalOpen(false);
+                        openInvoiceModal(targetBookingForSettlement.work_order_id!);
+                      }}
+                      className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs rounded-xl transition flex items-center gap-2"
+                    >
+                      <FileText className="w-4 h-4" />
+                      <span>View Final Invoice</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettlementModalOpen(false);
+                      setSettlementUIState("required");
+                    }}
+                    className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            ) : settlementUIState === "processing" ? (
+              <div className="py-10 text-center space-y-4">
+                <RefreshCw className="w-10 h-10 text-emerald-500 animate-spin mx-auto" />
+                <div>
+                  <h4 className="text-base font-black text-slate-950">Verifying Settlement Payment</h4>
+                  <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                    Awaiting cryptographic signature verification from gateway. Please do not close this window.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {settlementError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span>{settlementError}</span>
+                  </div>
+                )}
+
+                {/* Financial Summary Card */}
+                {settlementDetail && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2.5">
+                    <div className="flex justify-between text-xs text-slate-600">
+                      <span>Workshop Partner:</span>
+                      <span className="font-bold text-slate-900">{settlementDetail.workshop_name}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-slate-600">
+                      <span>Original Quotation:</span>
+                      <span className="font-mono text-slate-800">{settlementDetail.currency} {settlementDetail.original_quotation_amount}</span>
+                    </div>
+                    {parseFloat(settlementDetail.approved_change_orders_amount) > 0 && (
+                      <div className="flex justify-between text-xs text-amber-700">
+                        <span>Approved Scope Changes:</span>
+                        <span className="font-mono font-bold">+{settlementDetail.currency} {settlementDetail.approved_change_orders_amount}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-xs text-slate-800 font-bold pt-1 border-t border-slate-200">
+                      <span>Total Authorized:</span>
+                      <span className="font-mono">{settlementDetail.currency} {settlementDetail.authorized_total_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-emerald-700">
+                      <span>Verified Deposits Paid:</span>
+                      <span className="font-mono">-{settlementDetail.currency} {settlementDetail.verified_deposit_amount}</span>
+                    </div>
+                    {parseFloat(settlementDetail.verified_balance_paid_amount) > 0 && (
+                      <div className="flex justify-between text-xs text-emerald-700">
+                        <span>Previous Balance Payments:</span>
+                        <span className="font-mono">-{settlementDetail.currency} {settlementDetail.verified_balance_paid_amount}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-sm font-black text-slate-950 pt-1.5 border-t border-slate-300">
+                      <span>Outstanding Balance Due:</span>
+                      <span className="font-mono text-emerald-700">{settlementDetail.currency} {settlementDetail.outstanding_balance}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Payment Amount Input */}
+                {settlementDetail && (
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-bold text-slate-700">
+                      Payment Amount ({settlementDetail.currency})
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-2.5 font-bold text-slate-400 text-xs">
+                        {settlementDetail.currency}
+                      </span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="1"
+                        max={settlementDetail.outstanding_balance}
+                        value={settlementCustomAmount}
+                        onChange={(e) => setSettlementCustomAmount(e.target.value)}
+                        className="w-full pl-12 pr-4 py-2 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        placeholder={settlementDetail.outstanding_balance}
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      You can pay the full remaining balance or make a partial settlement payment.
+                    </p>
+                  </div>
+                )}
+
+                {/* Gateway Provider & Security Notice */}
+                {settlementDetail && (
+                  <div className="p-3 bg-slate-100 rounded-xl space-y-1.5 text-xs text-slate-600">
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 font-bold text-slate-800">
+                        <Lock className="w-3.5 h-3.5 text-emerald-600" />
+                        Gateway:
+                      </span>
+                      <span className="font-mono text-[11px] font-bold text-slate-700 uppercase">
+                        {settlementDetail.currency === "GBP" ? "STRIPE UK (TEST GATEWAY)" : "RAZORPAY INDIA"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-[11px] text-slate-500 pt-1 border-t border-slate-200">
+                      <Shield className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span>Zero-overcharge guarantee: Any concurrent or excess payment is automatically reconciled and refunded.</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="flex justify-end items-center gap-2.5 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettlementModalOpen(false);
+                      setSettlementUIState("required");
+                    }}
+                    className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition"
+                  >
+                    Cancel
+                  </button>
+                  {settlementSession?.payment_session?.provider === "stripe" && (
+                    <button
+                      type="button"
+                      onClick={handleConfirmStripeSettlementPayment}
+                      className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs rounded-xl transition shadow-md flex items-center gap-2"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Confirm Stripe Payment</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleInitiateSettlementPayment}
+                    disabled={settlementUIState === "initiated"}
+                    className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-slate-950 font-black text-xs rounded-xl transition shadow-md flex items-center gap-2"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>
+                      Pay Balance ({settlementDetail?.currency || "INR"}{" "}
+                      {settlementCustomAmount || settlementDetail?.outstanding_balance || "0.00"})
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: WORK ORDER FINAL TAX INVOICE VIEWER */}
+      {/* ========================================================================= */}
+      {invoiceModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-3xl w-full p-8 shadow-2xl border border-slate-200 space-y-6 my-8 text-slate-900">
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-black">
+                  <FileText className="w-7 h-7" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">
+                      Official Tax Invoice
+                    </span>
+                    {currentInvoice && (
+                      <span
+                        className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded ${
+                          currentInvoice.status === "PAID"
+                            ? "bg-emerald-500 text-white"
+                            : "bg-amber-100 text-amber-800"
+                        }`}
+                      >
+                        {currentInvoice.status}
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="text-xl font-black text-slate-950 mt-0.5 font-mono">
+                    {currentInvoice?.invoice_number || "Tax Invoice"}
+                  </h3>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition flex items-center gap-1.5"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print Invoice</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInvoiceModalOpen(false);
+                    setCurrentInvoice(null);
+                  }}
+                  className="text-slate-400 hover:text-slate-600 p-2 rounded-xl hover:bg-slate-100 transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {loadingInvoice ? (
+              <div className="py-16 text-center space-y-3">
+                <RefreshCw className="w-8 h-8 text-emerald-500 animate-spin mx-auto" />
+                <p className="text-sm font-bold text-slate-600">Generating Official Tax Invoice...</p>
+              </div>
+            ) : invoiceError ? (
+              <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs space-y-2">
+                <div className="flex items-center gap-2 font-bold">
+                  <AlertCircle className="w-4 h-4 text-rose-600" />
+                  <span>Unable to load invoice</span>
+                </div>
+                <p>{invoiceError}</p>
+              </div>
+            ) : currentInvoice ? (
+              <div className="space-y-6 text-xs">
+                {/* Workshop & Customer Details */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                      Service Provider
+                    </span>
+                    <h4 className="text-sm font-black text-slate-950">{currentInvoice.workshop_name}</h4>
+                    {currentInvoice.workshop_address && <p className="text-slate-600">{currentInvoice.workshop_address}</p>}
+                    {currentInvoice.workshop_city && <p className="text-slate-600">{currentInvoice.workshop_city}</p>}
+                    {currentInvoice.workshop_tax_number && (
+                      <p className="font-mono text-slate-500 text-[11px]">
+                        VAT / Tax ID: {currentInvoice.workshop_tax_number}
+                      </p>
+                    )}
+                    {currentInvoice.workshop_phone && <p className="text-slate-500">Tel: {currentInvoice.workshop_phone}</p>}
+                  </div>
+
+                  <div className="space-y-1 sm:text-right">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                      Billed To
+                    </span>
+                    <h4 className="text-sm font-black text-slate-950">{currentInvoice.customer_name}</h4>
+                    <p className="text-slate-600">{currentInvoice.customer_email}</p>
+                    {currentInvoice.customer_phone && <p className="text-slate-500">Tel: {currentInvoice.customer_phone}</p>}
+                    <div className="pt-2 text-slate-500 text-[11px] font-mono">
+                      <div>Booking: #{currentInvoice.booking_number}</div>
+                      <div>Work Order: #{currentInvoice.work_order_number}</div>
+                      <div>Date: {currentInvoice.issued_at?.split("T")[0]}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Line Items Table */}
+                <div className="border border-slate-200 rounded-2xl overflow-hidden">
+                  <table className="w-full text-left">
+                    <thead className="bg-slate-100 text-[10px] font-bold uppercase text-slate-500 border-b border-slate-200">
+                      <tr>
+                        <th className="p-3">Type</th>
+                        <th className="p-3">Description</th>
+                        <th className="p-3 text-center">Qty</th>
+                        <th className="p-3 text-right">Unit Price</th>
+                        <th className="p-3 text-right">Line Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-slate-800">
+                      {currentInvoice.line_items_snapshot && currentInvoice.line_items_snapshot.map((item, idx) => (
+                        <tr key={idx} className="hover:bg-slate-50/50">
+                          <td className="p-3">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700">
+                              {item.type || "SERVICE"}
+                            </span>
+                          </td>
+                          <td className="p-3">
+                            <span className="font-bold text-slate-900">{item.description}</span>
+                            {item.part_number && (
+                              <span className="block text-[10px] text-slate-400 font-mono">PN: {item.part_number}</span>
+                            )}
+                          </td>
+                          <td className="p-3 text-center">{item.quantity}</td>
+                          <td className="p-3 text-right font-mono">
+                            {currentInvoice.currency} {item.unit_price}
+                          </td>
+                          <td className="p-3 text-right font-bold font-mono text-slate-950">
+                            {currentInvoice.currency} {item.line_total}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Totals & Tax Calculation Breakdown */}
+                <div className="flex flex-col sm:flex-row justify-between gap-4 pt-2">
+                  <div className="text-slate-400 text-[11px] space-y-1 sm:max-w-xs">
+                    <p>Thank you for choosing {currentInvoice.workshop_name} via the DriverXtra Automotive Platform.</p>
+                    <p>For questions or disputes regarding this invoice, contact DriverXtra Support or the workshop directly.</p>
+                  </div>
+
+                  <div className="w-full sm:w-72 space-y-1.5 text-slate-700 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                    <div className="flex justify-between">
+                      <span>Subtotal:</span>
+                      <span className="font-mono">{currentInvoice.currency} {currentInvoice.subtotal_amount}</span>
+                    </div>
+                    {parseFloat(currentInvoice.discount_amount) > 0 && (
+                      <div className="flex justify-between text-emerald-600">
+                        <span>Discounts:</span>
+                        <span className="font-mono">-{currentInvoice.currency} {currentInvoice.discount_amount}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between">
+                      <span>Tax / VAT ({currentInvoice.tax_rate_percent}%):</span>
+                      <span className="font-mono">{currentInvoice.currency} {currentInvoice.tax_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-black text-slate-950 pt-1 border-t border-slate-200">
+                      <span>Total Invoice Amount:</span>
+                      <span className="font-mono">{currentInvoice.currency} {currentInvoice.total_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-emerald-700 pt-1">
+                      <span>Less: Deposit Paid:</span>
+                      <span className="font-mono font-bold">-{currentInvoice.currency} {currentInvoice.deposit_paid_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-emerald-700">
+                      <span>Less: Balance Paid:</span>
+                      <span className="font-mono font-bold">-{currentInvoice.currency} {currentInvoice.balance_paid_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-black text-slate-950 pt-1.5 border-t border-slate-300">
+                      <span>Amount Due:</span>
+                      <span className="font-mono text-emerald-700">{currentInvoice.currency} {currentInvoice.amount_due}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Footer status */}
+                <div className="pt-2 text-center text-slate-400 text-[11px] border-t border-slate-100 flex items-center justify-between">
+                  <span>Invoice ID: {currentInvoice.id}</span>
+                  <span>Status: {currentInvoice.status}</span>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
       {/* MODAL: WORKSHOP MESSAGING / REAL-TIME CHAT */}
       {/* ========================================================================= */}
       {chatModalOpen && targetBookingForChat && (
@@ -2593,6 +3515,171 @@ export default function BuyerWorkshopsView({ onNavigateToGarage }: { onNavigateT
           }}
           currentUserId={user?.id}
         />
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: CANCEL BOOKING & AUTOMATIC REFUND (Phase 3) */}
+      {/* ========================================================================= */}
+      {cancelModalOpen && targetBookingForCancel && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 flex flex-col gap-5 overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-950">
+                    Cancel Booking #{targetBookingForCancel.booking_number}
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    {targetBookingForCancel.workshop_name} • {targetBookingForCancel.vehicle_make} {targetBookingForCancel.vehicle_model}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closeCancelBookingModal}
+                disabled={isSubmittingCancellation}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-slate-500 transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* If cancellation result is present, show completion state */}
+            {cancellationResult ? (
+              <div className="space-y-4">
+                {cancellationResult.refund_status === "SUCCEEDED" ? (
+                  <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-start gap-3">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-emerald-950 space-y-1">
+                      <p className="font-bold text-sm">Booking Cancelled &amp; Refund Issued</p>
+                      <p>
+                        Your booking has been cancelled. A refund of{" "}
+                        <span className="font-mono font-bold">
+                          {cancellationResult.currency || "GBP"} {cancellationResult.refunded_amount}
+                        </span>{" "}
+                        has been successfully processed to your original payment method.
+                      </p>
+                    </div>
+                  </div>
+                ) : cancellationResult.refund_status === "PROCESSING_UNKNOWN" || cancellationResult.refund_status === "PROCESSING" ? (
+                  <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-3">
+                    <Clock className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-amber-950 space-y-1">
+                      <p className="font-bold text-sm">Booking Cancelled • Refund Processing</p>
+                      <p>
+                        Your booking has been cancelled. Your refund of{" "}
+                        <span className="font-mono font-bold">
+                          {cancellationResult.currency || "GBP"} {cancellationResult.refundable_amount}
+                        </span>{" "}
+                        is currently <span className="font-bold uppercase">{cancellationResult.refund_status}</span> awaiting gateway confirmation. It will be reconciled automatically.
+                      </p>
+                    </div>
+                  </div>
+                ) : cancellationResult.refund_status === "FAILED" ? (
+                  <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-rose-950 space-y-1">
+                      <p className="font-bold text-sm">Booking Cancelled • Refund Requires Attention</p>
+                      <p>
+                        Your booking has been cancelled, but automated refund dispatch failed. Our support team has been notified to assist you.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex items-start gap-3">
+                    <CheckCircle2 className="w-5 h-5 text-slate-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-slate-800 space-y-1">
+                      <p className="font-bold text-sm">Booking Cancelled</p>
+                      <p>Your booking has been cancelled. No payments were collected for this booking.</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Refund breakdown details if any */}
+                {cancellationResult.refund_details && cancellationResult.refund_details.length > 0 && (
+                  <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 text-xs space-y-1.5">
+                    <p className="font-bold text-slate-700 uppercase tracking-wider text-[10px]">Refund Transactions</p>
+                    {cancellationResult.refund_details.map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-center text-slate-600 font-mono text-[11px]">
+                        <span>{item.refund_number}</span>
+                        <span className="font-bold">{item.currency} {item.amount} ({item.status})</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={closeCancelBookingModal}
+                    className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Confirmation & Reason form */
+              <div className="space-y-4">
+                <p className="text-xs text-slate-600">
+                  Are you sure you want to cancel this booking? Any collected deposits or payments will be automatically calculated and refunded to your payment method.
+                </p>
+
+                {cancellationError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center gap-2 text-xs text-rose-700">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                    <span>{cancellationError}</span>
+                  </div>
+                )}
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 block">
+                    Reason for Cancellation <span className="text-rose-500">*</span>
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={cancelReasonInput}
+                    onChange={(e) => setCancelReasonInput(e.target.value)}
+                    placeholder="Please let the workshop know why you are cancelling..."
+                    disabled={isSubmittingCancellation}
+                    className="w-full text-xs p-3 border border-slate-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 disabled:opacity-50 transition-all resize-none"
+                  />
+                  <p className="text-[11px] text-slate-400">Minimum 5 characters required.</p>
+                </div>
+
+                <div className="pt-2 flex items-center justify-end gap-2.5 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={closeCancelBookingModal}
+                    disabled={isSubmittingCancellation}
+                    className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    Keep Booking
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmCancellation}
+                    disabled={isSubmittingCancellation || cancelReasonInput.trim().length < 5}
+                    className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-all shadow-xs flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                  >
+                    {isSubmittingCancellation ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Processing Cancellation...</span>
+                      </>
+                    ) : (
+                      <span>Confirm Cancellation</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

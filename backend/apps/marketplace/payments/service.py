@@ -1,10 +1,11 @@
 import logging
+import uuid
 from decimal import Decimal
 from typing import Dict, Any, List, Tuple, Optional
 from django.conf import settings
 from django.utils import timezone
 import datetime
-from django.db import models, transaction
+from django.db import models, transaction, IntegrityError
 from apps.marketplace.models import (
     Order,
     OrderStatusChoices,
@@ -16,6 +17,7 @@ from apps.marketplace.models import (
     StockMovementReasonChoices,
     Refund,
     RefundStatusChoices,
+    RefundMethodChoices,
 )
 from apps.marketplace.services import adjust_stock
 from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
@@ -412,11 +414,15 @@ class PaymentService:
             raise ValueError(f"Cannot initialize payment session for cancelled order '{order.order_number}'.")
 
         expiry_minutes = getattr(settings, 'PAYMENT_EXPIRY_MINUTES', 30)
+        now = timezone.now()
+        created_time = order.created_at or now
+        expires_at = created_time + datetime.timedelta(minutes=expiry_minutes)
+        remaining_seconds = max(0, int((expires_at - now).total_seconds()))
+
         if (
             order.payment_method == PaymentMethodChoices.ONLINE
             and order.payment_status == PaymentStatusChoices.PENDING
-            and order.created_at
-            and order.created_at < timezone.now() - datetime.timedelta(minutes=expiry_minutes)
+            and (expires_at <= now or remaining_seconds <= 15)
         ):
             cls.cancel_unpaid_order(order, reason=f"Order payment window ({expiry_minutes} mins) expired.")
             raise ValueError(f"Order '{order.order_number}' payment window has expired. Please create a new order.")
@@ -433,6 +439,9 @@ class PaymentService:
 
         provider = cls.get_provider_for_order(order)
         session_data = provider.create_payment_session(order)
+        session_data["expires_at"] = expires_at.isoformat()
+        session_data["expires_in_seconds"] = remaining_seconds
+        session_data["is_expired"] = False
 
         # Record PaymentTransaction in PENDING state
         with transaction.atomic():
@@ -469,6 +478,94 @@ class PaymentService:
             return False, "Cannot verify online payment for a Cash on Delivery order.", {}
 
         if order.status == OrderStatusChoices.CANCELLED:
+            # Check whether the gateway actually captured payment despite the order being cancelled
+            provider = cls.get_provider_for_order(order)
+            is_valid, payment_id_or_error, extra = provider.verify_payment(order, payload)
+            if is_valid:
+                # Late payment captured on cancelled/expired order:
+                # Prevent duplicate inventory deduction or reviving order.
+                # Record transaction and initiate automated refund/reconciliation.
+                with transaction.atomic():
+                    locked_order = Order.objects.select_for_update().get(id=order.id)
+                    payment_id = payment_id_or_error
+                    clean_pid = payment_id.replace('-', '_').replace(' ', '_')[:35]
+                    rfnd_num = f"REF-LATE-{clean_pid}"
+                    idemp_key = f"late_refund_{clean_pid}"
+
+                    existing_rfnd = Refund.objects.filter(
+                        order=locked_order
+                    ).filter(
+                        models.Q(refund_number=rfnd_num) | models.Q(idempotency_key=idemp_key) | models.Q(notes__icontains=payment_id)
+                    ).first()
+
+                    rfnd_status = existing_rfnd.status if existing_rfnd else RefundStatusChoices.PROCESSING_UNKNOWN
+                    if not existing_rfnd:
+                        PaymentTransaction.objects.create(
+                            order=locked_order,
+                            transaction_type=PaymentTransaction.TransactionTypeChoices.PAYMENT,
+                            provider=provider.provider_name,
+                            amount=locked_order.total_amount,
+                            currency=locked_order.currency,
+                            status=PaymentTransaction.StatusChoices.FAILED,
+                            provider_transaction_id=payment_id,
+                            provider_order_id=locked_order.payment_reference or extra.get('razorpay_order_id', ''),
+                            error_message="Payment captured after order cancellation/expiry. Automatic refund initiated.",
+                            raw_response=extra,
+                        )
+
+                        refund_ok, rfnd_ref, _ = provider.issue_refund(
+                            payment_reference=payment_id,
+                            amount=locked_order.total_amount,
+                            currency=locked_order.currency,
+                            reason="Automatic refund: Order expired/cancelled before payment completion.",
+                            refund_number=rfnd_num,
+                        )
+
+                        rfnd_status = RefundStatusChoices.SUCCEEDED if refund_ok else RefundStatusChoices.PROCESSING_UNKNOWN
+                        try:
+                            Refund.objects.create(
+                                refund_number=rfnd_num,
+                                order=locked_order,
+                                amount=locked_order.total_amount,
+                                currency=locked_order.currency,
+                                status=rfnd_status,
+                                refund_method=RefundMethodChoices.ORIGINAL_PAYMENT,
+                                gateway_provider=provider.provider_name,
+                                gateway_refund_id=rfnd_ref if refund_ok else '',
+                                idempotency_key=idemp_key,
+                                reason="Automatic refund: Payment captured after order cancellation/expiry.",
+                                failure_reason='' if refund_ok else rfnd_ref,
+                                notes=f"Auto-refund for late payment {payment_id}. Provider reference: {rfnd_ref}",
+                                created_by=locked_order.buyer,
+                                processed_at=timezone.now() if refund_ok else None,
+                            )
+                        except IntegrityError:
+                            existing_rfnd = Refund.objects.filter(refund_number=rfnd_num).first()
+                            rfnd_status = existing_rfnd.status if existing_rfnd else RefundStatusChoices.SUCCEEDED
+
+                        record_audit_entry(
+                            event_type="marketplace.order.late_payment_refunded",
+                            action="marketplace:order.late_payment_refund",
+                            resource_type="Order",
+                            resource_id=str(locked_order.id),
+                            actor_id=actor.id if actor else locked_order.buyer_id,
+                            metadata={
+                                "order_number": locked_order.order_number,
+                                "payment_id": payment_id,
+                                "amount": str(locked_order.total_amount),
+                                "currency": locked_order.currency,
+                                "refund_success": refund_ok,
+                                "refund_reference": rfnd_ref,
+                            },
+                        )
+
+                return False, f"Cannot verify payment for cancelled order '{order.order_number}'. Payment {payment_id_or_error} was received after cancellation and has been automatically queued for refund ({rfnd_num}).", {
+                    "order_number": order.order_number,
+                    "order_status": OrderStatusChoices.CANCELLED,
+                    "late_payment_captured": True,
+                    "payment_id": payment_id_or_error,
+                }
+
             return False, f"Cannot verify payment for cancelled order '{order.order_number}'.", {}
 
         if order.payment_status == PaymentStatusChoices.PAID:
@@ -745,6 +842,70 @@ class PaymentService:
                         "Payment success webhook %s received for cancelled order %s. Payment confirmation rejected.",
                         event_id, locked_order.order_number
                     )
+                    # Extract captured payment ID if present in webhook
+                    captured_payment_id = None
+                    if p_name == 'RAZORPAY':
+                        payment_entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
+                        captured_payment_id = payment_entity.get('id')
+                    elif p_name == 'STRIPE':
+                        data_obj = payload.get('data', {}).get('object', {})
+                        captured_payment_id = data_obj.get('id')
+
+                    # If payment was captured by gateway, initiate automatic refund/reconciliation
+                    if captured_payment_id:
+                        clean_pid = captured_payment_id.replace('-', '_').replace(' ', '_')[:35]
+                        rfnd_num = f"REF-LATE-{clean_pid}"
+                        idemp_key = f"late_refund_{clean_pid}"
+                        existing_rfnd = Refund.objects.filter(
+                            order=locked_order
+                        ).filter(
+                            models.Q(refund_number=rfnd_num) | models.Q(idempotency_key=idemp_key) | models.Q(notes__icontains=captured_payment_id)
+                        ).first()
+                        if not existing_rfnd:
+                            provider_inst = RazorpayPaymentProvider() if p_name == 'RAZORPAY' else StripePaymentProvider()
+                            rfnd_ok, rfnd_ref, _ = provider_inst.issue_refund(
+                                payment_reference=captured_payment_id,
+                                amount=locked_order.total_amount,
+                                currency=locked_order.currency,
+                                reason="Automatic refund: Webhook captured payment on cancelled/expired order.",
+                                refund_number=rfnd_num,
+                            )
+                            rfnd_status = RefundStatusChoices.SUCCEEDED if rfnd_ok else RefundStatusChoices.PROCESSING_UNKNOWN
+                            try:
+                                Refund.objects.create(
+                                    refund_number=rfnd_num,
+                                    order=locked_order,
+                                    amount=locked_order.total_amount,
+                                    currency=locked_order.currency,
+                                    status=rfnd_status,
+                                    refund_method=RefundMethodChoices.ORIGINAL_PAYMENT,
+                                    gateway_provider=p_name,
+                                    gateway_refund_id=rfnd_ref if rfnd_ok else '',
+                                    idempotency_key=idemp_key,
+                                    reason="Automatic refund: Webhook captured payment on cancelled/expired order.",
+                                    failure_reason='' if rfnd_ok else rfnd_ref,
+                                    notes=f"Auto-refund for late webhook payment {captured_payment_id}. Ref: {rfnd_ref}",
+                                    created_by=locked_order.buyer,
+                                    processed_at=timezone.now() if rfnd_ok else None,
+                                )
+                            except IntegrityError:
+                                pass
+                            record_audit_entry(
+                                event_type="marketplace.order.late_webhook_refunded",
+                                action="marketplace:order.late_webhook_refund",
+                                resource_type="Order",
+                                resource_id=str(locked_order.id),
+                                actor_id=locked_order.buyer_id,
+                                metadata={
+                                    "order_number": locked_order.order_number,
+                                    "payment_id": captured_payment_id,
+                                    "amount": str(locked_order.total_amount),
+                                    "currency": locked_order.currency,
+                                    "refund_success": rfnd_ok,
+                                    "refund_reference": rfnd_ref,
+                                },
+                            )
+
                     webhook_record.processed = True
                     webhook_record.processed_at = timezone.now()
                     webhook_record.save(update_fields=['processed', 'processed_at'])

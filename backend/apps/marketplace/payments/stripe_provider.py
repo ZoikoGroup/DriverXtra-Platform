@@ -384,8 +384,9 @@ class StripePaymentProvider(BasePaymentProvider):
                 logger.warning("Falling back to deterministic test refund in IS_TESTING environment.")
 
         # Test mode fallback for isolated test suites or development
-        if self.test_mode:
-            re_id = f"re_test_{uuid.uuid4().hex[:18]}"
+        if self.test_mode or getattr(settings, 'IS_TESTING', False):
+            id_hash = hashlib.sha256(str(refund_number or uuid.uuid4().hex).encode('utf-8')).hexdigest()[:18]
+            re_id = f"re_test_{id_hash}"
             metadata = {
                 "refund_number": refund_number,
                 "reason": reason,

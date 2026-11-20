@@ -1,4 +1,5 @@
-from decimal import Decimal
+import logging
+from decimal import Decimal, ROUND_HALF_UP
 from apps.identity.models import User
 from apps.catalogue.models import Part
 from django.shortcuts import get_object_or_404
@@ -7,6 +8,8 @@ from django.db.models import Q
 from rest_framework import generics, status, views, permissions
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError as DRFValidationError
+
+logger = logging.getLogger(__name__)
 
 from apps.workshops.models import (
     WorkshopProfile,
@@ -24,6 +27,9 @@ from apps.workshops.models import (
     WorkOrderPartUsage,
     WorkOrderStatusChoices,
     WorkOrderTaskStatusChoices,
+    WorkOrderSettlementStatusChoices,
+    WorkOrderInvoice,
+    WorkOrderInvoiceStatusChoices,
     ChangeOrder,
     ChangeOrderLineItem,
     ChangeOrderStatusChoices,
@@ -57,6 +63,9 @@ from apps.workshops.serializers import (
     WorkOrderPartUsageCreateSerializer,
     WorkshopTechnicianMemberSerializer,
     BuyerWorkOrderSerializer,
+    WorkOrderPaymentSerializer,
+    WorkOrderInvoiceSerializer,
+    WorkOrderSettlementDetailSerializer,
     ChangeOrderSerializer,
     BuyerChangeOrderSerializer,
     ChangeOrderCreateSerializer,
@@ -80,6 +89,7 @@ from apps.workshops.services import (
     WorkshopReviewService,
 )
 from apps.workshops.deposit_service import WorkshopDepositPaymentService
+from apps.workshops.settlement_service import WorkOrderSettlementService
 from apps.workshops.permissions import (
     IsWorkshopOwnerOrAdmin,
     IsWorkshopStaffOrMember,
@@ -294,23 +304,67 @@ class BuyerBookingDetailView(views.APIView):
 
 class BuyerBookingCancelView(views.APIView):
     """
-    Buyer cancels their booking request.
+    Buyer cancels their booking request and triggers automatic refund processing.
+    POST /api/v1/workshops/bookings/<id>/cancel/
     POST /api/v1/workshops/bookings/my/<id>/cancel/
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, id):
-        booking = get_object_or_404(WorkshopBooking, id=id, buyer=request.user)
+        booking = get_object_or_404(
+            WorkshopBooking.objects.select_related('buyer', 'workshop', 'workshop__organisation'),
+            id=id,
+        )
+        if booking.buyer_id != request.user.id and not request.user.is_staff and not request.user.is_superuser:
+            raise PermissionDenied("You can only cancel your own bookings.")
+
         serializer = BookingCancellationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data.get('reason', '').strip() or 'Cancelled by customer'
 
         try:
             updated = BookingService.cancel_booking(
                 booking=booking,
-                reason=serializer.validated_data['reason'],
+                reason=reason,
                 actor=request.user,
             )
-            return Response(WorkshopBookingDetailSerializer(updated).data)
+            data = WorkshopBookingDetailSerializer(updated).data
+            refund_summary = getattr(updated, 'refund_summary', {})
+            data.update({
+                "cancellation_status": "CANCELLED",
+                "refundable_amount": str(refund_summary.get("refundable_amount", Decimal('0.00'))),
+                "refunded_amount": str(refund_summary.get("refunded_amount", Decimal('0.00'))),
+                "refund_status": refund_summary.get("refund_status", "NOT_APPLICABLE"),
+                "refund_details": refund_summary.get("refund_details", []),
+            })
+            return Response(data, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.message if hasattr(exc, 'message') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkshopRefundReconcileView(views.APIView):
+    """
+    Inquires the external gateway to reconcile an ambiguous (PROCESSING_UNKNOWN) workshop refund.
+    POST /api/v1/workshops/refunds/<id>/reconcile/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        from apps.workshops.refund_service import WorkshopRefundService
+        from apps.workshops.models import WorkshopRefund
+        from apps.workshops.serializers import WorkshopRefundSerializer
+
+        rfnd = get_object_or_404(WorkshopRefund.objects.select_related('booking', 'booking__buyer'), id=id)
+        if rfnd.booking.buyer_id != request.user.id and not request.user.is_staff and not request.user.is_superuser:
+            raise PermissionDenied("You do not have permission to reconcile this refund.")
+
+        try:
+            reconciled_rfnd, outcome = WorkshopRefundService.reconcile_refund(refund_id=id, actor=request.user)
+            return Response({
+                "refund": WorkshopRefundSerializer(reconciled_rfnd).data,
+                "outcome": outcome,
+            }, status=status.HTTP_200_OK)
         except DjangoValidationError as exc:
             msg = exc.message if hasattr(exc, 'message') else str(exc)
             return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
@@ -495,6 +549,7 @@ class QuotationDepositWebhookView(views.APIView):
         if success:
             return Response({'status': 'success', 'message': message}, status=status.HTTP_200_OK)
         return Response({'status': 'error', 'message': message}, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 
@@ -1255,6 +1310,418 @@ class BuyerWorkOrderDetailView(views.APIView):
 
         serializer = BuyerWorkOrderSerializer(booking.work_order)
         return Response(serializer.data)
+
+
+# ==========================================
+# Work Order Balance Settlement & Invoicing Views
+# ==========================================
+
+class WorkOrderSettlementDetailView(views.APIView):
+    """
+    Inspect financial standing, authorized total, deposits, change orders,
+    previous balance payments, and outstanding balance for a WorkOrder.
+    GET /api/v1/workshops/work-orders/<id>/settle/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        work_order = get_object_or_404(
+            WorkOrder.objects.select_related('quotation', 'workshop', 'booking', 'buyer'),
+            id=id,
+        )
+        is_buyer = work_order.buyer_id == request.user.id
+        from apps.workshops.permissions import is_platform_admin_or_staff, is_workshop_staff_or_admin
+        is_staff = is_platform_admin_or_staff(request.user) or is_workshop_staff_or_admin(request.user, work_order.workshop)
+        if not (is_buyer or is_staff):
+            raise PermissionDenied("You do not have permission to view settlement details for this work order.")
+
+        balance_info = WorkOrderSettlementService.calculate_outstanding_balance(work_order)
+        balance_info["work_order_id"] = str(work_order.id)
+        balance_info["work_order_number"] = work_order.work_order_number
+        balance_info["status"] = work_order.status
+        balance_info["payments"] = WorkOrderPaymentSerializer(work_order.payments.all(), many=True).data
+        balance_info["invoice"] = WorkOrderInvoiceSerializer(work_order.invoice).data if hasattr(work_order, 'invoice') and work_order.invoice else None
+
+        return Response(balance_info, status=status.HTTP_200_OK)
+
+
+class WorkOrderSettlementSessionCreateView(views.APIView):
+    """
+    Buyer creates an authoritative payment session to pay the outstanding balance (or partial balance)
+    of a WorkOrder via Razorpay (INR) or Stripe (GBP).
+    POST /api/v1/workshops/work-orders/<id>/settle/session/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        work_order = get_object_or_404(
+            WorkOrder.objects.select_related('quotation', 'workshop', 'booking', 'buyer'),
+            id=id,
+        )
+        if work_order.buyer_id != request.user.id:
+            raise PermissionDenied("You can only pay for work orders assigned to you.")
+
+        partial_amount = request.data.get('partial_amount')
+        preferred_provider = request.data.get('preferred_provider')
+        return_url = request.data.get('return_url')
+        cancel_url = request.data.get('cancel_url')
+
+        try:
+            session_data = WorkOrderSettlementService.create_settlement_session(
+                work_order=work_order,
+                buyer=request.user,
+                partial_amount=Decimal(str(partial_amount)) if partial_amount else None,
+                preferred_provider=preferred_provider,
+                return_url=return_url,
+                cancel_url=cancel_url,
+            )
+            return Response(session_data, status=status.HTTP_201_CREATED)
+        except (DjangoValidationError, ValueError) as exc:
+            msg = exc.messages[0] if hasattr(exc, 'messages') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Error initiating work order settlement session: %s", exc)
+            return Response(
+                {'status': 'error', 'message': f"Failed to initiate payment session: {str(exc)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class WorkOrderSettlementVerifyView(views.APIView):
+    """
+    Buyer verifies payment gateway confirmation payload for WorkOrder balance settlement.
+    POST /api/v1/workshops/work-orders/<id>/settle/verify/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        work_order = get_object_or_404(
+            WorkOrder.objects.select_related('quotation', 'workshop', 'booking', 'buyer'),
+            id=id,
+        )
+        if work_order.buyer_id != request.user.id and not (request.user.is_staff or request.user.is_superuser):
+            raise PermissionDenied("You can only verify payments for your own work orders.")
+
+        preferred_provider = request.data.get('preferred_provider')
+        try:
+            wo, payment = WorkOrderSettlementService.verify_settlement_payment(
+                work_order_id=work_order.id,
+                payload=request.data,
+                actor=request.user,
+                preferred_provider=preferred_provider,
+            )
+            balance_info = WorkOrderSettlementService.calculate_outstanding_balance(wo)
+            invoice_data = WorkOrderInvoiceSerializer(wo.invoice).data if hasattr(wo, 'invoice') and wo.invoice else None
+
+            return Response({
+                'status': 'success',
+                'work_order_id': str(wo.id),
+                'work_order_number': wo.work_order_number,
+                'payment_number': payment.payment_number,
+                'payment_status': payment.status,
+                'amount_paid': str(payment.amount),
+                'currency': payment.currency,
+                'settlement_status': wo.settlement_status,
+                'is_fully_settled': wo.is_fully_settled,
+                'outstanding_balance': balance_info["outstanding_balance"],
+                'invoice': invoice_data,
+            }, status=status.HTTP_200_OK)
+        except DjangoValidationError as exc:
+            msg = exc.messages[0] if hasattr(exc, 'messages') else str(exc)
+            return Response({'status': 'error', 'message': msg}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Error verifying work order settlement payment: %s", exc)
+            return Response(
+                {'status': 'error', 'message': f"Payment verification failed: {str(exc)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class WorkOrderInvoiceDetailView(views.APIView):
+    """
+    Retrieve final commercial/tax invoice for a WorkOrder.
+    GET /api/v1/workshops/work-orders/<id>/invoice/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        work_order = get_object_or_404(
+            WorkOrder.objects.select_related('invoice', 'workshop', 'buyer'),
+            id=id,
+        )
+        is_buyer = work_order.buyer_id == request.user.id
+        from apps.workshops.permissions import is_platform_admin_or_staff, is_workshop_staff_or_admin
+        is_staff = is_platform_admin_or_staff(request.user) or is_workshop_staff_or_admin(request.user, work_order.workshop)
+        if not (is_buyer or is_staff):
+            raise PermissionDenied("You do not have permission to view the invoice for this work order.")
+
+        invoice = getattr(work_order, 'invoice', None)
+        if not invoice:
+            invoice = WorkOrderSettlementService.generate_or_update_invoice(work_order)
+
+        serializer = WorkOrderInvoiceSerializer(invoice)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class WorkOrderSettlementWebhookView(views.APIView):
+    """
+    Public webhook receiver for payment gateway callbacks (Razorpay/Stripe) for WorkOrder settlements.
+    POST /api/v1/workshops/settle/webhook/<str:provider>/
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request, provider):
+        headers = {k: v for k, v in request.headers.items()}
+        success, message = WorkOrderSettlementService.process_settlement_webhook(
+            provider_name=provider,
+            request_body=request.body,
+            headers=headers,
+        )
+        if success:
+            return Response({'status': 'success', 'message': message}, status=status.HTTP_200_OK)
+        return Response({'status': 'error', 'message': message}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WorkshopSettlementManageListView(views.APIView):
+    """
+    List work order settlement records and financial overview metrics
+    for the authenticated user's workshop.
+    GET /api/v1/workshops/manage/settlements/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        profile = get_user_workshop_profile(request.user)
+
+        # Base queryset for this workshop
+        base_queryset = WorkOrder.objects.filter(workshop=profile).select_related(
+            'booking', 'quotation', 'buyer', 'workshop', 'invoice'
+        ).prefetch_related('change_orders', 'payments')
+
+        # Filtered queryset for results table
+        filtered_queryset = base_queryset
+
+        # Search filter
+        search_query = request.query_params.get('q', '').strip()
+        if search_query:
+            filtered_queryset = filtered_queryset.filter(
+                Q(work_order_number__icontains=search_query)
+                | Q(booking__booking_number__icontains=search_query)
+                | Q(vehicle_registration_plate__icontains=search_query)
+                | Q(vehicle_vin__icontains=search_query)
+                | Q(buyer__first_name__icontains=search_query)
+                | Q(buyer__last_name__icontains=search_query)
+                | Q(buyer__email__icontains=search_query)
+            )
+
+        # Status filter
+        status_param = request.query_params.get('status', 'ALL').strip().upper()
+        if status_param and status_param != 'ALL':
+            if status_param in ('SETTLED', 'FULLY_PAID'):
+                filtered_queryset = filtered_queryset.filter(
+                    settlement_status=WorkOrderSettlementStatusChoices.FULLY_PAID
+                )
+            elif status_param == 'PARTIALLY_PAID':
+                filtered_queryset = filtered_queryset.filter(
+                    settlement_status=WorkOrderSettlementStatusChoices.PARTIALLY_PAID
+                )
+            elif status_param == 'UNPAID':
+                filtered_queryset = filtered_queryset.filter(
+                    settlement_status=WorkOrderSettlementStatusChoices.UNPAID
+                )
+
+        filtered_queryset = filtered_queryset.order_by('-created_at')
+
+        # Overview summary metrics across active work orders
+        active_wo_list = list(
+            base_queryset.exclude(status=WorkOrderStatusChoices.CANCELLED)
+        )
+
+        total_value = Decimal('0.00')
+        advance_deposits = Decimal('0.00')
+        final_payments = Decimal('0.00')
+        total_collected = Decimal('0.00')
+        outstanding_balance = Decimal('0.00')
+        fully_paid_count = 0
+        partially_paid_count = 0
+        unpaid_count = 0
+
+        for wo in active_wo_list:
+            b_info = WorkOrderSettlementService.calculate_outstanding_balance(wo)
+            total_value += Decimal(b_info["authorized_total_amount"])
+            advance_deposits += Decimal(b_info["deposit_paid_amount"])
+            final_payments += Decimal(b_info["balance_paid_amount"])
+            total_collected += Decimal(b_info["total_paid_amount"])
+            outstanding_balance += Decimal(b_info["outstanding_balance"])
+
+            st = b_info["settlement_status"]
+            if st == WorkOrderSettlementStatusChoices.FULLY_PAID:
+                fully_paid_count += 1
+            elif st == WorkOrderSettlementStatusChoices.PARTIALLY_PAID:
+                partially_paid_count += 1
+            else:
+                unpaid_count += 1
+
+        currency = (getattr(profile, 'currency', 'GBP') or 'GBP').upper()
+        summary = {
+            "total_work_order_value": str(total_value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+            "advance_deposits_received": str(advance_deposits.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+            "final_payments_received": str(final_payments.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+            "total_amount_collected": str(total_collected.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+            "outstanding_customer_balance": str(outstanding_balance.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+            "currency": currency,
+            "total_work_orders": len(active_wo_list),
+            "fully_paid_count": fully_paid_count,
+            "partially_paid_count": partially_paid_count,
+            "unpaid_count": unpaid_count,
+        }
+
+        # Pagination
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+        except ValueError:
+            page = 1
+        try:
+            page_size = min(100, max(1, int(request.query_params.get('page_size', 20))))
+        except ValueError:
+            page_size = 20
+
+        total_count = filtered_queryset.count()
+        import math
+        total_pages = max(1, math.ceil(total_count / page_size))
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_items = filtered_queryset[start_idx:end_idx]
+
+        results = []
+        for wo in page_items:
+            b_info = WorkOrderSettlementService.calculate_outstanding_balance(wo)
+            cust = wo.buyer
+            cust_name = ""
+            if cust:
+                cust_name = cust.full_name if hasattr(cust, 'full_name') and cust.full_name else (cust.get_full_name() if hasattr(cust, 'get_full_name') else '') or cust.email
+
+            booking_date = None
+            if wo.booking:
+                if wo.booking.scheduled_appointment_start:
+                    booking_date = wo.booking.scheduled_appointment_start.isoformat()
+                elif wo.booking.preferred_date:
+                    booking_date = wo.booking.preferred_date.isoformat()
+
+            inv_data = None
+            if hasattr(wo, 'invoice') and wo.invoice:
+                inv_data = {
+                    "id": str(wo.invoice.id),
+                    "invoice_number": wo.invoice.invoice_number,
+                    "status": wo.invoice.status,
+                    "issued_at": wo.invoice.issued_at.isoformat() if wo.invoice.issued_at else None,
+                }
+
+            results.append({
+                "id": str(wo.id),
+                "work_order_number": wo.work_order_number,
+                "booking_id": str(wo.booking.id) if wo.booking else None,
+                "booking_number": wo.booking.booking_number if wo.booking else "",
+                "booking_date": booking_date,
+                "customer": {
+                    "id": str(cust.id) if cust else None,
+                    "name": cust_name or "Valued Customer",
+                    "email": cust.email if cust else "",
+                    "phone": getattr(cust, 'phone_number', '') if cust else "",
+                },
+                "vehicle": {
+                    "make": wo.vehicle_make,
+                    "model": wo.vehicle_model,
+                    "year": wo.vehicle_year,
+                    "registration_plate": wo.vehicle_registration_plate,
+                    "vin": wo.vehicle_vin,
+                },
+                "quotation_amount": b_info["original_quotation_amount"],
+                "approved_change_orders_amount": b_info["approved_change_orders_amount"],
+                "total_amount": b_info["authorized_total_amount"],
+                "deposit_paid": b_info["deposit_paid_amount"],
+                "final_payment": b_info["balance_paid_amount"],
+                "total_paid": b_info["total_paid_amount"],
+                "outstanding": b_info["outstanding_balance"],
+                "currency": b_info["currency"],
+                "settlement_status": b_info["settlement_status"],
+                "is_fully_settled": b_info["is_fully_settled"],
+                "work_order_status": wo.status,
+                "invoice": inv_data,
+                "created_at": wo.created_at.isoformat() if wo.created_at else None,
+            })
+
+        return Response({
+            "status": "success",
+            "summary": summary,
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "results": results,
+        }, status=status.HTTP_200_OK)
+
+
+class WorkshopInvoiceManageListView(views.APIView):
+    """
+    List final commercial/tax invoices for the authenticated user's workshop.
+    GET /api/v1/workshops/manage/invoices/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        profile = get_user_workshop_profile(request.user)
+        queryset = WorkOrderInvoice.objects.filter(
+            work_order__workshop=profile
+        ).select_related(
+            'work_order', 'work_order__buyer', 'work_order__workshop', 'work_order__quotation'
+        )
+
+        search_query = request.query_params.get('q', '').strip()
+        if search_query:
+            queryset = queryset.filter(
+                Q(invoice_number__icontains=search_query)
+                | Q(work_order__work_order_number__icontains=search_query)
+                | Q(work_order__booking__booking_number__icontains=search_query)
+                | Q(work_order__buyer__first_name__icontains=search_query)
+                | Q(work_order__buyer__last_name__icontains=search_query)
+                | Q(work_order__buyer__email__icontains=search_query)
+                | Q(work_order__vehicle_registration_plate__icontains=search_query)
+            )
+
+        status_param = request.query_params.get('status', 'ALL').strip().upper()
+        if status_param and status_param != 'ALL':
+            queryset = queryset.filter(status=status_param)
+
+        queryset = queryset.order_by('-created_at')
+
+        try:
+            page = max(1, int(request.query_params.get('page', 1)))
+        except ValueError:
+            page = 1
+        try:
+            page_size = min(100, max(1, int(request.query_params.get('page_size', 20))))
+        except ValueError:
+            page_size = 20
+
+        total_count = queryset.count()
+        import math
+        total_pages = max(1, math.ceil(total_count / page_size))
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_items = queryset[start_idx:end_idx]
+
+        serializer = WorkOrderInvoiceSerializer(page_items, many=True)
+        return Response({
+            "status": "success",
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "results": serializer.data,
+        }, status=status.HTTP_200_OK)
+
 
 # ==========================================
 # Change Orders Views (Workshop & Buyer)
