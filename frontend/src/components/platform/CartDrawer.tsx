@@ -43,6 +43,35 @@ import {
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 
+// ENG-01 / ENG-03: the buyer must choose a delivery country explicitly. There is no implicit default country.
+const DELIVERY_COUNTRY_REQUIRED_MESSAGE = "Please select a delivery country to continue.";
+
+// User-facing text for the backend's payment-availability reason codes (ENG-01). These only explain the
+// backend's decision; they never imply that any method or country is available.
+const PAYMENT_REASON_MESSAGES: Record<string, string> = {
+  MARKET_NOT_SPECIFIED: "Select a delivery country to see which payment methods are available.",
+  MARKET_NOT_ENABLED: "Online payment is not available for deliveries to the selected country.",
+  CURRENCY_NOT_SUPPORTED: "Online payment is not available in this currency for the selected delivery country.",
+  PROVIDER_NOT_CONFIGURED: "Online payment is temporarily unavailable. Please try again later.",
+  COD_NOT_ELIGIBLE: "Cash on Delivery is not available for this order.",
+};
+
+function paymentUnavailableMessage(reasonCode?: string | null, backendReason?: string | null): string {
+  const known = reasonCode ? PAYMENT_REASON_MESSAGES[reasonCode] : undefined;
+  if (known && reasonCode === "COD_NOT_ELIGIBLE" && backendReason) {
+    return `${known} ${backendReason}`; // keep the backend's specific eligibility detail (e.g. order limits)
+  }
+  return known || backendReason || "This payment method is not available for this order.";
+}
+
+// The API client keeps the backend error body in ApiError.details; read its machine-readable fields.
+function getApiErrorBody(err: unknown): Record<string, unknown> | null {
+  if (err instanceof ApiError && err.details && typeof err.details === "object" && !Array.isArray(err.details)) {
+    return err.details as Record<string, unknown>;
+  }
+  return null;
+}
+
 interface RazorpaySuccessResponse {
   razorpay_payment_id: string;
   razorpay_order_id: string;
@@ -308,9 +337,9 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
     shipping_address_line1: "",
     shipping_address_line2: "",
     shipping_city: "",
-    shipping_state: "MH",
+    shipping_state: "",
     shipping_postal_code: "",
-    shipping_country: "India",
+    shipping_country: "", // ENG-01/ENG-03: no implicit default; the buyer must select a delivery country
   }));
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
@@ -339,7 +368,36 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
     }
   };
 
+  const hasDeliveryCountry = shippingForm.shipping_country.trim() !== "";
+
+  // Show the "select a delivery country" validation on the country field and in the checkout banner.
+  const flagDeliveryCountryRequired = () => {
+    setFieldErrors((prev) => ({ ...prev, shipping_country: DELIVERY_COUNTRY_REQUIRED_MESSAGE }));
+    setCheckoutError(DELIVERY_COUNTRY_REQUIRED_MESSAGE);
+  };
+
+  // Handles the backend's DELIVERY_COUNTRY_REQUIRED and PAYMENT_METHOD_UNAVAILABLE responses with clear
+  // messages instead of the raw response fields. Returns true when the error was one of these codes.
+  const handleCheckoutCodeError = (err: unknown): boolean => {
+    const body = getApiErrorBody(err);
+    if (body?.code === "DELIVERY_COUNTRY_REQUIRED") {
+      flagDeliveryCountryRequired();
+      setStep("shipping");
+      return true;
+    }
+    if (body?.code === "PAYMENT_METHOD_UNAVAILABLE") {
+      if (Array.isArray(body.available_payment_methods)) {
+        setAvailableMethods(body.available_payment_methods as PaymentMethodOption[]);
+      }
+      const reasonCode = typeof body.reason_code === "string" ? body.reason_code : null;
+      setCheckoutError(paymentUnavailableMessage(reasonCode, null));
+      return true;
+    }
+    return false;
+  };
+
   const handleCountryChange = (newCountry: string) => {
+    if (!newCountry.trim()) return; // the placeholder is not a country
     const validRegion = getValidRegionForCountry(newCountry, shippingForm.shipping_state);
     const newCurrency = getCurrencyForCountry(newCountry);
     setShippingForm((prev) => ({
@@ -779,6 +837,12 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       return;
     }
 
+    // ENG-01/ENG-03: prices, taxes and payment options depend on the destination; never assume one.
+    if (!hasDeliveryCountry) {
+      flagDeliveryCountryRequired();
+      return;
+    }
+
     // Verify stock and fetch authoritative totals for selected destination
     const destCurrency = getCurrencyForCountry(shippingForm.shipping_country);
     const valResult = await validateInventory({
@@ -821,10 +885,17 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
     if (!shippingForm.shipping_postal_code.trim()) {
       errors.shipping_postal_code = "Postal / PIN code is required.";
     }
+    if (!hasDeliveryCountry) {
+      errors.shipping_country = DELIVERY_COUNTRY_REQUIRED_MESSAGE;
+    }
 
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) {
-      setCheckoutError("Please fill in all required shipping and contact details.");
+      setCheckoutError(
+        errors.shipping_country && Object.keys(errors).length === 1
+          ? DELIVERY_COUNTRY_REQUIRED_MESSAGE
+          : "Please fill in all required shipping and contact details."
+      );
       return;
     }
 
@@ -845,7 +916,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         shipping_city: shippingForm.shipping_city.trim(),
         shipping_state: shippingForm.shipping_state.trim(),
         shipping_postal_code: shippingForm.shipping_postal_code.trim(),
-        shipping_country: shippingForm.shipping_country.trim() || "India",
+        shipping_country: shippingForm.shipping_country.trim(), // validated above; no fallback country
         currency: destCurrency,
       };
 
@@ -887,6 +958,9 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
       }
       setStep("review");
     } catch (err: unknown) {
+      if (handleCheckoutCodeError(err)) {
+        return;
+      }
       let msg = "Failed to calculate order taxes. Please check your delivery address and try again.";
       if (err instanceof ApiError) {
         msg = err.message;
@@ -902,6 +976,11 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
   // Step 3 -> Step 4: Final Submit Order
   const handleSubmitOrder = async () => {
     if (!calculation || isSubmitting) return;
+    if (!hasDeliveryCountry) {
+      flagDeliveryCountryRequired();
+      setStep("shipping");
+      return;
+    }
 
     const destCurrency = getCurrencyForCountry(shippingForm.shipping_country);
     if (calculation.currency !== destCurrency) {
@@ -933,7 +1012,7 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         shipping_city: shippingForm.shipping_city.trim(),
         shipping_state: shippingForm.shipping_state.trim(),
         shipping_postal_code: shippingForm.shipping_postal_code.trim(),
-        shipping_country: shippingForm.shipping_country.trim() || "India",
+        shipping_country: shippingForm.shipping_country.trim(), // guarded above; no fallback country
         currency: destCurrency,
         payment_method: paymentMethod,
         expected_total_amount: calculation.total_amount,
@@ -993,6 +1072,11 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         }
         setCheckoutError(err.message);
         // Cart is NOT cleared!
+        return;
+      }
+
+      // ENG-01/ENG-03 backend codes: clear messages, refreshed payment options, cart kept
+      if (handleCheckoutCodeError(err)) {
         return;
       }
 
@@ -1224,8 +1308,13 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
             <div className="flex items-center gap-1.5 min-w-0">
               <MapPin className="w-3.5 h-3.5 text-amber-600 shrink-0" />
               <span className="text-slate-600 font-medium">Deliver to:</span>
-              <span className="font-black text-slate-900 truncate">
-                {shippingForm.shipping_country === "United Kingdom"
+              <span
+                id="cart-delivery-country-label"
+                className={`font-black truncate ${hasDeliveryCountry ? "text-slate-900" : "text-rose-600"}`}
+              >
+                {!hasDeliveryCountry
+                  ? "Select a country"
+                  : shippingForm.shipping_country === "United Kingdom"
                   ? "United Kingdom (GBP £)"
                   : "India (INR ₹)"}
               </span>
@@ -1500,33 +1589,61 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                     <label className="font-bold text-slate-700 flex items-center justify-between">
                       <span>Destination Country *</span>
                       <span className="text-[10px] text-amber-600 font-semibold">
-                        {shippingForm.shipping_country === "United Kingdom" ? "UK (GBP £)" : "India (INR ₹)"}
+                        {!hasDeliveryCountry
+                          ? ""
+                          : shippingForm.shipping_country === "United Kingdom"
+                          ? "UK (GBP £)"
+                          : "India (INR ₹)"}
                       </span>
                     </label>
                     <select
                       id="shipping-country-select"
                       value={shippingForm.shipping_country}
                       onChange={(e) => handleCountryChange(e.target.value)}
-                      className="w-full px-3 py-2 bg-slate-50 rounded-xl border border-slate-200 focus:outline-hidden focus:border-amber-500 text-slate-900 font-medium"
+                      aria-invalid={Boolean(fieldErrors.shipping_country)}
+                      className={`w-full px-3 py-2 bg-slate-50 rounded-xl border focus:outline-hidden focus:border-amber-500 text-slate-900 font-medium ${
+                        fieldErrors.shipping_country ? "border-rose-400" : "border-slate-200"
+                      }`}
                     >
+                      <option value="" disabled>
+                        Select delivery country…
+                      </option>
                       <option value="India">🇮🇳 India (INR - ₹)</option>
                       <option value="United Kingdom">🇬🇧 United Kingdom (GBP - £)</option>
                     </select>
+                    {fieldErrors.shipping_country && (
+                      <p className="text-[10px] text-rose-600 font-medium">{fieldErrors.shipping_country}</p>
+                    )}
                   </div>
 
                   {/* State / Place of Supply / Region */}
                   <div className="space-y-1">
                     <label className="font-bold text-slate-700 flex items-center justify-between">
                       <span>
-                        {shippingForm.shipping_country === "United Kingdom"
+                        {!hasDeliveryCountry
+                          ? "State / Region *"
+                          : shippingForm.shipping_country === "United Kingdom"
                           ? "County / Region *"
                           : "State (Place of Supply) *"}
                       </span>
                       <span className="text-[10px] text-amber-600 font-semibold">
-                        {shippingForm.shipping_country === "United Kingdom" ? "UK Delivery" : "Statutory GST"}
+                        {!hasDeliveryCountry
+                          ? ""
+                          : shippingForm.shipping_country === "United Kingdom"
+                          ? "UK Delivery"
+                          : "Statutory GST"}
                       </span>
                     </label>
-                    {shippingForm.shipping_country === "United Kingdom" ? (
+                    {!hasDeliveryCountry ? (
+                      <select
+                        id="shipping-state-select"
+                        value=""
+                        disabled
+                        className="w-full px-3 py-2 bg-slate-100 rounded-xl border border-slate-200 text-slate-400 font-medium cursor-not-allowed"
+                      >
+                        <option value="">Select a delivery country first</option>
+                      </select>
+                    ) : shippingForm.shipping_country === "United Kingdom" ? (
                       <select
                         id="shipping-state-select"
                         value={shippingForm.shipping_state}
@@ -1730,7 +1847,9 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                   {(() => {
                     const onlineOption = availableMethods.find((m) => m.code === "ONLINE");
                     const isOnlineAvailable = onlineOption ? onlineOption.is_available : true;
-                    const onlineReason = onlineOption?.reason;
+                    const onlineReason = onlineOption
+                      ? paymentUnavailableMessage(onlineOption.reason_code, onlineOption.reason)
+                      : null;
 
                     return (
                       <label
@@ -1786,7 +1905,9 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                   {(() => {
                     const codOption = availableMethods.find((m) => m.code === "COD");
                     const isAvailable = codOption ? codOption.is_available : true;
-                    const reason = codOption?.reason;
+                    const reason = codOption
+                      ? paymentUnavailableMessage(codOption.reason_code, codOption.reason)
+                      : null;
 
                     return (
                       <label
@@ -2126,13 +2247,17 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                   <div>
                     <span className="text-xs text-slate-500 font-medium block">Cart Subtotal</span>
                     <span className="text-[10px] text-slate-400">
-                      {getCurrencyForCountry(shippingForm.shipping_country) === "GBP"
+                      {!hasDeliveryCountry
+                        ? "Select a delivery country to calculate taxes and payment options"
+                        : getCurrencyForCountry(shippingForm.shipping_country) === "GBP"
                         ? "Exclusive of applicable UK VAT (calculated at next step)"
                         : "Exclusive of statutory GST (calculated at next step)"}
                     </span>
                   </div>
                   <span className="text-xl font-black text-slate-950 font-mono">
-                    {lastValidationResult?.calculatedSummary?.currency === getCurrencyForCountry(shippingForm.shipping_country)
+                    {!hasDeliveryCountry
+                      ? `${currency} ${displayedSubtotal.toFixed(2)}` // listing prices as added; no destination assumed
+                      : lastValidationResult?.calculatedSummary?.currency === getCurrencyForCountry(shippingForm.shipping_country)
                       ? `${lastValidationResult.calculatedSummary.currency} ${Number(lastValidationResult.calculatedSummary.subtotal_taxable_amount || lastValidationResult.calculatedSummary.total_amount).toFixed(2)}`
                       : calculation && calculation.currency === getCurrencyForCountry(shippingForm.shipping_country)
                       ? `${calculation.currency} ${Number(calculation.subtotal_taxable_amount).toFixed(2)}`
@@ -2143,13 +2268,17 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={() =>
+                    onClick={() => {
+                      if (!hasDeliveryCountry) {
+                        flagDeliveryCountryRequired();
+                        return;
+                      }
                       validateInventory({
                         country: shippingForm.shipping_country,
                         currency: getCurrencyForCountry(shippingForm.shipping_country),
                         place_of_supply: shippingForm.shipping_state,
-                      })
-                    }
+                      });
+                    }}
                     disabled={isValidating}
                     className="px-3.5 py-3 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
                     title="Verify stock availability and calculate tax"

@@ -7,6 +7,18 @@ class BasePaymentProvider(ABC):
     Abstract interface for international and country-specific online payment gateways.
     """
     provider_name: str
+    # ISO 4217 codes this provider integration can actually charge. Single source of truth used both by
+    # checkout availability (PaymentService) and by the provider's own currency guards.
+    supported_currencies: frozenset = frozenset()
+
+    def supports_currency(self, currency: Optional[str]) -> bool:
+        """True only if this integration can charge the given ISO 4217 currency."""
+        return (currency or '').strip().upper() in self.supported_currencies
+
+    @property
+    def is_ready(self) -> bool:
+        """True when the provider can create real or permitted test sessions in this environment."""
+        return bool(getattr(self, 'is_configured', False) or getattr(self, 'test_mode', False))
 
     @abstractmethod
     def create_payment_session(

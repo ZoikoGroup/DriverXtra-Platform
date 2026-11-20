@@ -238,3 +238,197 @@ def test_rate_and_role_profile_api_round_trip(maker, checker):
     }, format='json')
     assert profile.status_code == 201, profile.data
     assert (profile.data['code'], profile.data['status']) == ('GB-VEH-ADS', 'DRAFT')
+
+
+# =================================================================================================
+# ENG-02 — D02 role-profile approval rules exercised through the admin API.
+# Uses the existing PartyRoleProfile workflow; no rule is changed. References such as
+# 'LEGAL-MEMO-TEST' / 'GC-REF-1' are test fixtures, not real legal approvals.
+# =================================================================================================
+
+def _commercial_staff(email, *permission_codes):
+    """Staff user whose only permissions come from an explicit test staff role (no superuser/admin)."""
+    import uuid
+    from apps.identity.models import RoleChoices, StaffProfile, StaffRole, StaffRolePermission, User
+
+    user = User.objects.create_user(email=email, password='Str0ng-Passw0rd!x', is_staff=True,
+                                    is_email_verified=True)
+    user.add_role(RoleChoices.STAFF)
+    role = StaffRole.objects.create(code=f'COMMERCIAL_TEST_{uuid.uuid4().hex[:8].upper()}',
+                                    name='Commercial test role')
+    for code in permission_codes:
+        StaffRolePermission.objects.create(staff_role=role, permission=Permission.objects.get(code=code))
+    StaffProfile.objects.create(user=user, staff_role=role, department='Commercial')
+    return user
+
+
+def _transition(user, profile_id, to_status, reason='Test transition', approval_reference=''):
+    payload = {'to_status': to_status, 'reason': reason}
+    if approval_reference is not None:
+        payload['approval_reference'] = approval_reference
+    return client_for(user).post(f'{API}/admin/role-profiles/{profile_id}/status/', payload, format='json')
+
+
+def _profile_state(profile_id):
+    from apps.commercial.models import PartyRoleProfile
+    return PartyRoleProfile.objects.get(id=profile_id)
+
+
+@pytest.mark.django_db
+def test_role_profile_approval_requires_commercial_approve_permission(maker):
+    profile = make_profile(maker)
+    manager = _commercial_staff('commercial.manager@driverxtra.test', 'commercial.manage')
+
+    # Commercial staff without commercial.approve can read the profile but cannot approve or retire it.
+    assert client_for(manager).get(f'{API}/admin/role-profiles/{profile.id}/').status_code == 200
+    denied = _transition(manager, profile.id, 'APPROVED', approval_reference='GC-REF-1')
+    assert denied.status_code == 403
+    assert _transition(manager, profile.id, 'RETIRED').status_code == 403
+    state = _profile_state(profile.id)
+    assert (state.status, state.approved_by_id, state.approval_reference) == ('DRAFT', None, '')
+
+    # Control: a non-superuser staff member granted commercial.approve through a staff role may approve.
+    approver = _commercial_staff('commercial.approver@driverxtra.test', 'commercial.approve')
+    allowed = _transition(approver, profile.id, 'APPROVED', approval_reference='GC-REF-1')
+    assert allowed.status_code == 200, allowed.data
+    assert allowed.data['status'] == 'APPROVED'
+
+
+@pytest.mark.django_db
+def test_role_profile_author_cannot_approve_own_profile(maker):
+    created = client_for(maker).post(f'{API}/admin/role-profiles/', {
+        'code': 'gb-veh-sod', 'name': 'Software-only', 'profile_type': 'SOFTWARE_ONLY', 'country_code': 'GB',
+        'vertical': 'VEHICLES', 'seller_of_record': 'PLATFORM', 'service_performer': 'PLATFORM',
+        'platform_role': 'SOFTWARE_PROVIDER', 'payment_role': 'SUBSCRIPTION_BILLING', 'tax_party': 'PLATFORM',
+        'invoice_issuer': 'PLATFORM', 'legal_memo_reference': 'LEGAL-MEMO-TEST',
+        'effective_from': '2026-01-01T00:00:00Z',
+    }, format='json')
+    assert created.status_code == 201, created.data
+
+    # The author holds commercial.approve (superuser) but separation of duties still blocks self-approval.
+    response = _transition(maker, created.data['id'], 'APPROVED', approval_reference='GC-REF-1')
+    assert response.status_code == 409
+    assert response.data['details']['rule'] == 'SEPARATION_OF_DUTIES'
+    state = _profile_state(created.data['id'])
+    assert (state.status, state.approved_by_id) == ('DRAFT', None)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('overrides', [
+    {'profile_type': 'REGULATED_INTRODUCER'},
+    {'profile_type': 'CROSS_BORDER_ORCHESTRATOR'},
+    {'profile_type': 'PRINCIPAL_SELLER'},
+    {'payment_role': 'PSP_CONDITIONAL_PAYOUT'},
+    {'payment_role': 'PARTNER_REGULATED'},
+    {'vertical': 'FINANCE_INSURANCE'},
+], ids=['regulated-introducer', 'cross-border', 'principal-seller', 'mode-E-conditional-payout',
+        'mode-F-partner-regulated', 'finance-insurance-vertical'])
+def test_gated_role_profiles_cannot_be_approved(maker, checker, overrides):
+    profile = make_profile(maker, code='GB-GATED-TEST', **overrides)
+    detail = client_for(checker).get(f'{API}/admin/role-profiles/{profile.id}/')
+    assert detail.data['is_gated'] is True
+
+    response = _transition(checker, profile.id, 'APPROVED', approval_reference='GC-REF-1')
+    assert response.status_code == 409
+    assert response.data['details']['rule'] == 'GATED_ROLE_PROFILE'
+    state = _profile_state(profile.id)
+    assert (state.status, state.approved_by_id, state.approval_reference) == ('DRAFT', None, '')
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('memo', ['', '   '], ids=['empty', 'whitespace'])
+def test_role_profile_approval_requires_legal_memo_reference(maker, checker, memo):
+    profile = make_profile(maker, legal_memo_reference=memo)
+    response = _transition(checker, profile.id, 'APPROVED', approval_reference='GC-REF-1')
+    assert response.status_code == 400
+    assert response.data['details']['rule'] == 'LEGAL_MEMO_REQUIRED'
+    assert _profile_state(profile.id).status == 'DRAFT'
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('approval_reference', [None, '', '   '], ids=['missing', 'empty', 'whitespace'])
+def test_role_profile_approval_requires_approval_reference(maker, checker, approval_reference):
+    profile = make_profile(maker)
+    response = _transition(checker, profile.id, 'APPROVED', approval_reference=approval_reference)
+    assert response.status_code == 400
+    assert response.data['details']['rule'] == 'APPROVAL_REFERENCE_REQUIRED'
+    state = _profile_state(profile.id)
+    assert (state.status, state.approved_by_id, state.approval_reference) == ('DRAFT', None, '')
+
+
+@pytest.mark.django_db
+def test_role_profile_transition_requires_reason(maker, checker):
+    profile = make_profile(maker)
+    response = _transition(checker, profile.id, 'APPROVED', reason='', approval_reference='GC-REF-1')
+    assert response.status_code == 400
+    assert response.data['details']['rule'] == 'REASON_REQUIRED'
+    assert _profile_state(profile.id).status == 'DRAFT'
+
+
+@pytest.mark.django_db
+def test_valid_role_profile_approval_succeeds_and_is_audited(maker, checker):
+    from platform_core.audit.models import AuditLog
+
+    profile = make_profile(maker)
+    response = _transition(checker, profile.id, 'APPROVED', reason='GC and CFO sign-off (test)',
+                           approval_reference='  GC-REF-1  ')
+    assert response.status_code == 200, response.data
+    data = response.data
+    assert (data['status'], data['version'], data['approval_reference']) == ('APPROVED', 1, 'GC-REF-1')
+    assert data['approved_by_email'] == checker.email
+    assert data['created_by_email'] == maker.email
+    assert data['approved_at'] is not None
+    assert data['status_reason'] == 'GC and CFO sign-off (test)'
+    assert AuditLog.objects.filter(event_type='commercial.role_profile.approved', resource_id=str(profile.id),
+                                   actor_id=checker.id).count() == 1
+
+    # Approval is one-way: approving again is not a valid transition.
+    again = _transition(checker, profile.id, 'APPROVED', approval_reference='GC-REF-2')
+    assert again.status_code == 409
+    assert again.data['details']['rule'] == 'INVALID_TRANSITION'
+    assert _profile_state(profile.id).approval_reference == 'GC-REF-1'
+
+
+@pytest.mark.django_db
+def test_role_profile_versioning_supersedes_and_retirement_is_terminal(maker, checker):
+    v1 = make_profile(maker)
+    assert _transition(checker, v1.id, 'APPROVED', approval_reference='GC-REF-1').status_code == 200
+
+    # An approved version is frozen.
+    frozen = client_for(maker).patch(f'{API}/admin/role-profiles/{v1.id}/', {'name': 'Renamed'}, format='json')
+    assert frozen.status_code == 409
+    assert frozen.data['details']['rule'] == 'ROLE_PROFILE_FROZEN'
+
+    # A commercial manager (no approve permission) creates v2 as a DRAFT copy.
+    manager = _commercial_staff('commercial.versioner@driverxtra.test', 'commercial.manage')
+    v2 = client_for(manager).post(f'{API}/admin/role-profiles/{v1.id}/new-version/', {}, format='json')
+    assert v2.status_code == 201, v2.data
+    assert (v2.data['code'], v2.data['version'], v2.data['status']) == (v1.code, 2, 'DRAFT')
+    assert v2.data['legal_memo_reference'] == v1.legal_memo_reference
+    assert v2.data['created_by_email'] == manager.email
+    assert _profile_state(v1.id).status == 'APPROVED'  # still the live version until v2 is approved
+
+    # Approving v2 (by someone other than its author) supersedes v1.
+    approved_v2 = _transition(checker, v2.data['id'], 'APPROVED', approval_reference='GC-REF-2')
+    assert approved_v2.status_code == 200, approved_v2.data
+    old = _profile_state(v1.id)
+    assert (old.status, old.status_reason) == ('RETIRED', 'Superseded by v2.')
+
+    # Retirement requires commercial.approve, is allowed for an approved version and is terminal.
+    assert _transition(manager, v2.data['id'], 'RETIRED').status_code == 403
+    retired = _transition(checker, v2.data['id'], 'RETIRED', reason='Withdrawn (test)')
+    assert retired.status_code == 200 and retired.data['status'] == 'RETIRED'
+    for target in ('APPROVED', 'DRAFT'):
+        response = _transition(checker, v2.data['id'], target, approval_reference='GC-REF-3')
+        assert response.status_code in (400, 409)
+        assert response.data['details']['rule'] in ('INVALID_TRANSITION', 'INVALID_STATUS')
+    assert _profile_state(v2.data['id']).status == 'RETIRED'
+
+
+@pytest.mark.django_db
+def test_draft_role_profile_can_be_retired_without_approval(maker, checker):
+    profile = make_profile(maker)
+    response = _transition(checker, profile.id, 'RETIRED', reason='Not pursued (test)')
+    assert response.status_code == 200
+    state = _profile_state(profile.id)
+    assert (state.status, state.approved_by_id) == ('RETIRED', None)

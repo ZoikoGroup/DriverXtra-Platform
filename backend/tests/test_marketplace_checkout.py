@@ -295,10 +295,13 @@ class TestMarketplaceCheckout:
             "shipping_address_line1": "Street 1",
             "shipping_city": "Mumbai",
             "shipping_postal_code": "400001",
+            # ENG-03: explicit country so the 400 comes from the stock check, not the missing country.
+            "shipping_country": "India",
         }
 
         res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
         assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Insufficient stock" in res.json()["error"]
 
         # Atomic rollback verification
         approved_part.refresh_from_db()

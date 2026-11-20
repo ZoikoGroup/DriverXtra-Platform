@@ -342,3 +342,83 @@ class TestCountryAndCurrencyCheckoutFlow:
         assert res.status_code == status.HTTP_409_CONFLICT
         assert "The order total has changed from" in res.data["error"]
         assert Decimal(res.data["updated_total_amount"]) == Decimal("4720.00")
+
+
+# =============================================================================
+# ENG-03: EXPLICIT DELIVERY COUNTRY REQUIRED (no implicit India/UK fallback)
+# =============================================================================
+
+@pytest.mark.django_db
+class TestEng03DeliveryCountryRequired:
+    CHECKOUT_URL = "/api/v1/marketplace/orders/checkout/"
+    CALCULATE_URL = "/api/v1/marketplace/orders/calculate/"
+
+    @staticmethod
+    def _payload(listing, *, currency, country, payment_method="ONLINE"):
+        payload = {
+            "items": [{"listing_id": str(listing.id), "quantity": 1}],
+            "payment_method": payment_method,
+            "shipping_name": "Country Test Buyer",
+            "shipping_phone": "+44 7911 123456",
+            "shipping_address_line1": "1 Test Street",
+            "shipping_city": "London",
+            "shipping_postal_code": "NW1 6XE",
+        }
+        if currency is not None:
+            payload["currency"] = currency
+        if country is not None:
+            payload["shipping_country"] = country
+        return payload
+
+    @pytest.mark.parametrize("url", [CHECKOUT_URL, CALCULATE_URL], ids=["checkout", "preview"])
+    @pytest.mark.parametrize("country", [None, "", "   "], ids=["omitted", "empty", "whitespace"])
+    @pytest.mark.parametrize("currency", ["INR", "GBP", None], ids=["INR", "GBP", "no-currency"])
+    def test_missing_country_rejected_without_side_effects(self, buyer_client, inr_part, gbp_part,
+                                                           url, country, currency):
+        from apps.marketplace.models import PaymentTransaction
+
+        listing = gbp_part if currency == "GBP" else inr_part
+        res = buyer_client.post(url, self._payload(listing, currency=currency, country=country), format="json")
+
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.content
+        body = res.json()
+        assert body["code"] == "DELIVERY_COUNTRY_REQUIRED"
+        assert body["error"] == "A delivery country is required."
+        assert "shipping_country" in body["field_errors"]
+        assert Order.objects.count() == 0
+        assert PaymentTransaction.objects.count() == 0
+        inr_part.refresh_from_db()
+        gbp_part.refresh_from_db()
+        assert (inr_part.stock_quantity, gbp_part.stock_quantity) == (10, 10)
+
+    def test_missing_country_rejected_for_cash_on_delivery(self, buyer_client, gbp_part):
+        res = buyer_client.post(self.CHECKOUT_URL,
+                                self._payload(gbp_part, currency="GBP", country=None, payment_method="COD"),
+                                format="json")
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert res.json()["code"] == "DELIVERY_COUNTRY_REQUIRED"
+        assert Order.objects.count() == 0
+        gbp_part.refresh_from_db()
+        assert gbp_part.stock_quantity == 10
+
+    @pytest.mark.parametrize("payment_method", ["ONLINE", "COD"])
+    def test_explicit_india_checkout_unchanged(self, buyer_client, inr_part, payment_method):
+        payload = self._payload(inr_part, currency="INR", country="India", payment_method=payment_method)
+        payload.update({"shipping_city": "Mumbai", "shipping_state": "MH", "shipping_postal_code": "400020",
+                        "shipping_phone": "+919123456789", "place_of_supply": "MH"})
+        res = buyer_client.post(self.CHECKOUT_URL, payload, format="json")
+        assert res.status_code == status.HTTP_201_CREATED, res.content
+        order = res.json()["order"]
+        assert (order["currency"], order["payment_method"]) == ("INR", payment_method)
+        if payment_method == "ONLINE":
+            assert res.json()["payment_session"]["provider"] == "RAZORPAY"
+
+    @pytest.mark.parametrize("payment_method", ["ONLINE", "COD"])
+    def test_explicit_uk_checkout_unchanged(self, buyer_client, gbp_part, payment_method):
+        payload = self._payload(gbp_part, currency="GBP", country="United Kingdom", payment_method=payment_method)
+        res = buyer_client.post(self.CHECKOUT_URL, payload, format="json")
+        assert res.status_code == status.HTTP_201_CREATED, res.content
+        order = res.json()["order"]
+        assert (order["currency"], order["payment_method"]) == ("GBP", payment_method)
+        if payment_method == "ONLINE":
+            assert res.json()["payment_session"]["provider"] == "STRIPE"
