@@ -15,6 +15,11 @@ import {
   WorkOrderTaskItem,
   WorkshopTechnicianMember,
   ChangeOrder,
+  WorkshopSettlementSummaryMetrics,
+  WorkshopWorkOrderSettlementItem,
+  WorkshopInvoiceItem,
+  WorkOrderSettlementDetail,
+  WorkOrderInvoice,
 } from "@/lib/api/client";
 import {
   Wrench,
@@ -46,6 +51,11 @@ import {
   PlayCircle,
   PauseCircle,
   ChevronRight,
+  Receipt,
+  Eye,
+  Printer,
+  CreditCard,
+  ArrowDownRight,
 } from "lucide-react";
 
 
@@ -67,11 +77,57 @@ const DAY_NAMES = [
   "Sunday",
 ];
 
-export default function WorkshopLandingView() {
+interface WorkshopLandingViewProps {
+  initialTab?: "bookings" | "work_orders" | "services" | "hours" | "profile" | "settlements";
+}
+
+export default function WorkshopLandingView({ initialTab }: WorkshopLandingViewProps = {}) {
   const { user } = useAuth();
 
   // Active sub-tab in console
-  const [activeTab, setActiveTab] = useState<"bookings" | "work_orders" | "services" | "hours" | "profile">("bookings");
+  const [activeTab, setActiveTab] = useState<"bookings" | "work_orders" | "services" | "hours" | "profile" | "settlements">(initialTab || "bookings");
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
+
+  // Settlements & Invoices State
+  const [settlementSubTab, setSettlementSubTab] = useState<"settlements" | "invoices">("settlements");
+  const [settlementsLoading, setSettlementsLoading] = useState(false);
+  const [settlementsError, setSettlementsError] = useState<string | null>(null);
+  const [settlementsList, setSettlementsList] = useState<WorkshopWorkOrderSettlementItem[]>([]);
+  const [settlementsSummary, setSettlementsSummary] = useState<WorkshopSettlementSummaryMetrics | null>(null);
+  const [settlementsFilter, setSettlementsFilter] = useState<string>("ALL");
+  const [settlementsSearchInput, setSettlementsSearchInput] = useState<string>("");
+  const [settlementsSearch, setSettlementsSearch] = useState<string>("");
+  const [settlementsPage, setSettlementsPage] = useState<number>(1);
+  const [settlementsTotalPages, setSettlementsTotalPages] = useState<number>(1);
+  const [settlementsTotalCount, setSettlementsTotalCount] = useState<number>(0);
+
+  // Invoices State
+  const [invoicesLoading, setInvoicesLoading] = useState(false);
+  const [invoicesError, setInvoicesError] = useState<string | null>(null);
+  const [invoicesList, setInvoicesList] = useState<WorkshopInvoiceItem[]>([]);
+  const [invoicesFilter, setInvoicesFilter] = useState<string>("ALL");
+  const [invoicesSearchInput, setInvoicesSearchInput] = useState<string>("");
+  const [invoicesSearch, setInvoicesSearch] = useState<string>("");
+  const [invoicesPage, setInvoicesPage] = useState<number>(1);
+  const [invoicesTotalPages, setInvoicesTotalPages] = useState<number>(1);
+  const [invoicesTotalCount, setInvoicesTotalCount] = useState<number>(0);
+
+  // Settlement Details Modal
+  const [selectedSettlementWorkOrderId, setSelectedSettlementWorkOrderId] = useState<string | null>(null);
+  const [settlementDetail, setSettlementDetail] = useState<WorkOrderSettlementDetail | null>(null);
+  const [loadingSettlementDetail, setLoadingSettlementDetail] = useState(false);
+  const [settlementDetailError, setSettlementDetailError] = useState<string | null>(null);
+
+  // Invoice Viewer Modal
+  const [selectedInvoiceWorkOrderId, setSelectedInvoiceWorkOrderId] = useState<string | null>(null);
+  const [invoiceDetail, setInvoiceDetail] = useState<WorkOrderInvoice | null>(null);
+  const [loadingInvoiceDetail, setLoadingInvoiceDetail] = useState(false);
+  const [invoiceDetailError, setInvoiceDetailError] = useState<string | null>(null);
 
   // Core Data
   const [profile, setProfile] = useState<WorkshopProfilePublic | null>(null);
@@ -376,6 +432,86 @@ export default function WorkshopLandingView() {
       ignore = true;
     };
   }, [user?.email]);
+
+  // Settlements & Invoices Data Fetchers
+  const loadSettlements = async () => {
+    setSettlementsLoading(true);
+    setSettlementsError(null);
+    try {
+      const data = await api.workshops.manageSettlements.list({
+        page: settlementsPage,
+        status: settlementsFilter,
+        q: settlementsSearch.trim() || undefined,
+      });
+      setSettlementsSummary(data.summary);
+      setSettlementsList(data.results || []);
+      setSettlementsTotalPages(data.total_pages || 1);
+      setSettlementsTotalCount(data.count || 0);
+    } catch (err: unknown) {
+      setSettlementsError(getErrorMessage(err, "Failed to load settlement records"));
+    } finally {
+      setSettlementsLoading(false);
+    }
+  };
+
+  const loadInvoices = async () => {
+    setInvoicesLoading(true);
+    setInvoicesError(null);
+    try {
+      const data = await api.workshops.manageSettlements.listInvoices({
+        page: invoicesPage,
+        status: invoicesFilter,
+        q: invoicesSearch.trim() || undefined,
+      });
+      setInvoicesList(data.results || []);
+      setInvoicesTotalPages(data.total_pages || 1);
+      setInvoicesTotalCount(data.count || 0);
+    } catch (err: unknown) {
+      setInvoicesError(getErrorMessage(err, "Failed to load invoice records"));
+    } finally {
+      setInvoicesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "settlements") {
+      if (settlementSubTab === "settlements") {
+        loadSettlements();
+      } else {
+        loadInvoices();
+      }
+    }
+  }, [activeTab, settlementSubTab, settlementsFilter, settlementsSearch, settlementsPage, invoicesFilter, invoicesSearch, invoicesPage]);
+
+  const openSettlementDetail = async (workOrderId: string) => {
+    setSelectedSettlementWorkOrderId(workOrderId);
+    setSettlementDetail(null);
+    setSettlementDetailError(null);
+    setLoadingSettlementDetail(true);
+    try {
+      const detail = await api.workshops.manageSettlements.getWorkOrderDetail(workOrderId);
+      setSettlementDetail(detail);
+    } catch (err: unknown) {
+      setSettlementDetailError(getErrorMessage(err, "Failed to load work order settlement breakdown."));
+    } finally {
+      setLoadingSettlementDetail(false);
+    }
+  };
+
+  const openInvoiceModal = async (workOrderId: string) => {
+    setSelectedInvoiceWorkOrderId(workOrderId);
+    setInvoiceDetail(null);
+    setInvoiceDetailError(null);
+    setLoadingInvoiceDetail(true);
+    try {
+      const inv = await api.workshops.manageSettlements.getWorkOrderInvoice(workOrderId);
+      setInvoiceDetail(inv);
+    } catch (err: unknown) {
+      setInvoiceDetailError(getErrorMessage(err, "Failed to load tax invoice."));
+    } finally {
+      setLoadingInvoiceDetail(false);
+    }
+  };
 
   // Filtered Bookings
   const filteredBookings = useMemo(() => {
@@ -1272,6 +1408,25 @@ export default function WorkshopLandingView() {
         </button>
 
         <button
+          onClick={() => setActiveTab("settlements")}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+            activeTab === "settlements"
+              ? "bg-purple-600 text-white shadow-sm"
+              : "bg-white text-slate-600 hover:bg-slate-100 border border-slate-200"
+          }`}
+        >
+          <Receipt className="w-4 h-4" />
+          <span>Settlements & Invoices</span>
+          {settlementsSummary && (
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+              activeTab === "settlements" ? "bg-purple-700 text-purple-100" : "bg-slate-200 text-slate-700"
+            }`}>
+              {settlementsSummary.total_work_orders_count}
+            </span>
+          )}
+        </button>
+
+        <button
           onClick={() => setActiveTab("profile")}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
             activeTab === "profile"
@@ -2139,6 +2294,564 @@ export default function WorkshopLandingView() {
             </div>
           </div>
         </form>
+      )}
+
+      {/* ========================================================================= */}
+      {/* TAB: SETTLEMENTS & INVOICES */}
+      {/* ========================================================================= */}
+      {activeTab === "settlements" && (
+        <div className="space-y-6">
+          {/* Section Header & Sub-Tab Switcher */}
+          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-5">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-lg font-black text-slate-900 tracking-tight">Settlements & Invoices</h2>
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
+                    Workshop Finance
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Track customer payments, advance deposits, final balance settlements, and official tax invoices.
+                </p>
+              </div>
+
+              {/* Sub-tab pills */}
+              <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-xl self-start md:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setSettlementSubTab("settlements")}
+                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
+                    settlementSubTab === "settlements"
+                      ? "bg-white text-purple-700 shadow-xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <Receipt className="w-3.5 h-3.5" />
+                  <span>Work Order Settlements</span>
+                  <span className="text-[10px] bg-slate-200/80 px-1.5 py-0.5 rounded-md font-mono">
+                    {settlementsTotalCount}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettlementSubTab("invoices")}
+                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
+                    settlementSubTab === "invoices"
+                      ? "bg-white text-purple-700 shadow-xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Tax Invoices</span>
+                  <span className="text-[10px] bg-slate-200/80 px-1.5 py-0.5 rounded-md font-mono">
+                    {invoicesTotalCount}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* 5 Financial Overview Summary Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              {/* Card 1: Total Work Order Value */}
+              <div className="bg-slate-50/70 border border-slate-200 rounded-2xl p-4 space-y-1">
+                <div className="flex items-center justify-between text-slate-500 text-xs font-bold uppercase tracking-wider">
+                  <span>Authorized Value</span>
+                  <Layers className="w-4 h-4 text-slate-400" />
+                </div>
+                <div className="text-xl font-black text-slate-900 font-mono">
+                  {settlementsSummary?.currency || "GBP"} {settlementsSummary?.total_work_order_value || "0.00"}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Gross approved repairs ({settlementsSummary?.total_work_orders_count || 0} jobs)
+                </p>
+              </div>
+
+              {/* Card 2: Advance Deposits Received */}
+              <div className="bg-purple-50/60 border border-purple-200/80 rounded-2xl p-4 space-y-1">
+                <div className="flex items-center justify-between text-purple-900 text-xs font-bold uppercase tracking-wider">
+                  <span>Deposits Received</span>
+                  <ArrowDownRight className="w-4 h-4 text-purple-600" />
+                </div>
+                <div className="text-xl font-black text-purple-950 font-mono">
+                  {settlementsSummary?.currency || "GBP"} {settlementsSummary?.advance_deposits_received || "0.00"}
+                </div>
+                <p className="text-[11px] text-purple-800/80">
+                  Customer booking advances held
+                </p>
+              </div>
+
+              {/* Card 3: Final Payments Received */}
+              <div className="bg-blue-50/60 border border-blue-200/80 rounded-2xl p-4 space-y-1">
+                <div className="flex items-center justify-between text-blue-900 text-xs font-bold uppercase tracking-wider">
+                  <span>Final Payments</span>
+                  <CreditCard className="w-4 h-4 text-blue-600" />
+                </div>
+                <div className="text-xl font-black text-blue-950 font-mono">
+                  {settlementsSummary?.currency || "GBP"} {settlementsSummary?.final_payments_received || "0.00"}
+                </div>
+                <p className="text-[11px] text-blue-800/80">
+                  Post-service balances paid
+                </p>
+              </div>
+
+              {/* Card 4: Outstanding Customer Balance */}
+              <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-4 space-y-1">
+                <div className="flex items-center justify-between text-amber-900 text-xs font-bold uppercase tracking-wider">
+                  <span>Outstanding Balance</span>
+                  <AlertCircle className="w-4 h-4 text-amber-600" />
+                </div>
+                <div className="text-xl font-black text-amber-950 font-mono">
+                  {settlementsSummary?.currency || "GBP"} {settlementsSummary?.outstanding_customer_balance || "0.00"}
+                </div>
+                <p className="text-[11px] text-amber-800/80">
+                  Awaiting buyer settlement
+                </p>
+              </div>
+
+              {/* Card 5: Total Amount Collected */}
+              <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-2xl p-4 space-y-1">
+                <div className="flex items-center justify-between text-emerald-900 text-xs font-bold uppercase tracking-wider">
+                  <span>Total Collected</span>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                </div>
+                <div className="text-xl font-black text-emerald-950 font-mono">
+                  {settlementsSummary?.currency || "GBP"} {settlementsSummary?.total_amount_collected || "0.00"}
+                </div>
+                <p className="text-[11px] text-emerald-800/80">
+                  Total customer cash collected
+                </p>
+              </div>
+            </div>
+
+            {/* Platform Collection Disclosure */}
+            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-[11px] text-slate-600 flex items-start gap-2.5">
+              <ShieldCheck className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
+              <span>
+                <strong>Customer Payments Ledger:</strong> All amounts shown represent customer payments collected via Stripe/Razorpay for your workshop work orders. Payouts and transfers to your designated bank account are processed according to your platform merchant settlement agreement.
+              </span>
+            </div>
+          </div>
+
+          {/* SUB-TAB 1: WORK ORDER SETTLEMENTS */}
+          {settlementSubTab === "settlements" && (
+            <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
+              {/* Filter and Search Bar */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex items-center gap-2 overflow-x-auto">
+                  <span className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                    <Filter className="w-3.5 h-3.5" /> Status:
+                  </span>
+                  {(["ALL", "FULLY_PAID", "PARTIALLY_PAID", "UNPAID"] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => {
+                        setSettlementsFilter(st);
+                        setSettlementsPage(1);
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap ${
+                        settlementsFilter === st
+                          ? "bg-purple-600 text-white shadow-xs"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                      }`}
+                    >
+                      {st === "ALL" ? "All Settlements" : st === "FULLY_PAID" ? "Fully Paid" : st === "PARTIALLY_PAID" ? "Partially Paid" : "Unpaid"}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Search Input & Refresh */}
+                <div className="flex items-center gap-2">
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      placeholder="Search work order, customer, plate..."
+                      value={settlementsSearchInput}
+                      onChange={(e) => setSettlementsSearchInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          setSettlementsSearch(settlementsSearchInput);
+                          setSettlementsPage(1);
+                        }
+                      }}
+                      className="pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-200 w-64 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettlementsSearch(settlementsSearchInput);
+                      setSettlementsPage(1);
+                      loadSettlements();
+                    }}
+                    className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 transition"
+                    title="Search & Refresh"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${settlementsLoading ? "animate-spin text-purple-600" : ""}`} />
+                  </button>
+                </div>
+              </div>
+
+              {settlementsError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{settlementsError}</span>
+                </div>
+              )}
+
+              {/* Settlements Table */}
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                        <th className="py-3 px-4">Work Order</th>
+                        <th className="py-3 px-4">Customer</th>
+                        <th className="py-3 px-4">Vehicle</th>
+                        <th className="py-3 px-4">Booking Date</th>
+                        <th className="py-3 px-4 text-right">Total Amount</th>
+                        <th className="py-3 px-4 text-right">Advance Paid</th>
+                        <th className="py-3 px-4 text-right">Final Payment</th>
+                        <th className="py-3 px-4 text-right">Outstanding</th>
+                        <th className="py-3 px-4 text-center">Status</th>
+                        <th className="py-3 px-4 text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {settlementsLoading && settlementsList.length === 0 ? (
+                        <tr key="settlements-loading">
+                          <td colSpan={10} className="py-8 text-center text-slate-500">
+                            <RefreshCw className="w-5 h-5 animate-spin mx-auto text-purple-600 mb-2" />
+                            Loading settlement records...
+                          </td>
+                        </tr>
+                      ) : settlementsList.length === 0 ? (
+                        <tr key="settlements-empty">
+                          <td colSpan={10} className="py-8 text-center text-slate-500">
+                            No work order settlement records found matching current criteria.
+                          </td>
+                        </tr>
+                      ) : (
+                        settlementsList.map((item) => (
+                          <tr key={item.work_order_id} className="hover:bg-slate-50/70 transition">
+                            <td className="py-3 px-4">
+                              <span className="font-mono font-bold text-slate-900 block">{item.work_order_number}</span>
+                              <span className="text-[10px] text-slate-400 font-mono">Ref: {item.booking_number}</span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="font-bold text-slate-800 block">{item.customer_name}</span>
+                              <span className="text-[10px] text-slate-500 block">{item.customer_email}</span>
+                              {item.customer_phone && (
+                                <span className="text-[10px] text-slate-400">{item.customer_phone}</span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="font-bold text-slate-800 block">{item.vehicle_display}</span>
+                              <span className="inline-block bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded text-[10px] font-mono mt-0.5">
+                                {item.vehicle_registration_plate || "No Plate"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
+                              {item.booking_date || "—"}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                              {item.currency} {item.total_amount}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono text-purple-700 font-bold">
+                              {item.currency} {item.deposit_paid}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono text-blue-700 font-bold">
+                              {item.currency} {item.final_balance_paid}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold">
+                              <span className={parseFloat(item.outstanding) > 0 ? "text-amber-700" : "text-emerald-700"}>
+                                {item.currency} {item.outstanding}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              {item.settlement_status === "FULLY_PAID" ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                  <Check className="w-3 h-3" /> Fully Paid
+                                </span>
+                              ) : item.settlement_status === "PARTIALLY_PAID" ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                                  Partially Paid
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800">
+                                  Unpaid
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-center whitespace-nowrap">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => openSettlementDetail(item.work_order_id)}
+                                  className="px-2.5 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-700 font-bold text-[11px] transition flex items-center gap-1"
+                                  title="View Settlement Breakdown"
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  <span>Details</span>
+                                </button>
+                                {item.has_invoice && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openInvoiceModal(item.work_order_id)}
+                                    className="p-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition"
+                                    title="View Tax Invoice"
+                                  >
+                                    <FileText className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Pagination */}
+              {settlementsTotalPages > 1 && (
+                <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs">
+                  <span className="text-slate-500">
+                    Showing page {settlementsPage} of {settlementsTotalPages} ({settlementsTotalCount} total work orders)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={settlementsPage <= 1}
+                      onClick={() => setSettlementsPage((p) => Math.max(1, p - 1))}
+                      className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-40 transition font-bold"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      disabled={settlementsPage >= settlementsTotalPages}
+                      onClick={() => setSettlementsPage((p) => Math.min(settlementsTotalPages, p + 1))}
+                      className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-40 transition font-bold"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SUB-TAB 2: TAX INVOICES */}
+          {settlementSubTab === "invoices" && (
+            <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-4">
+              {/* Filter and Search Bar */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex items-center gap-2 overflow-x-auto">
+                  <span className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                    <Filter className="w-3.5 h-3.5" /> Status:
+                  </span>
+                  {(["ALL", "PAID", "PARTIALLY_PAID", "UNPAID"] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => {
+                        setInvoicesFilter(st);
+                        setInvoicesPage(1);
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap ${
+                        invoicesFilter === st
+                          ? "bg-purple-600 text-white shadow-xs"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                      }`}
+                    >
+                      {st === "ALL" ? "All Invoices" : st === "PAID" ? "Paid" : st === "PARTIALLY_PAID" ? "Partially Paid" : "Unpaid"}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Search Input & Refresh */}
+                <div className="flex items-center gap-2">
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      placeholder="Search invoice #, customer..."
+                      value={invoicesSearchInput}
+                      onChange={(e) => setInvoicesSearchInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          setInvoicesSearch(invoicesSearchInput);
+                          setInvoicesPage(1);
+                        }
+                      }}
+                      className="pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-200 w-64 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInvoicesSearch(invoicesSearchInput);
+                      setInvoicesPage(1);
+                      loadInvoices();
+                    }}
+                    className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 transition"
+                    title="Search & Refresh"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${invoicesLoading ? "animate-spin text-purple-600" : ""}`} />
+                  </button>
+                </div>
+              </div>
+
+              {invoicesError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{invoicesError}</span>
+                </div>
+              )}
+
+              {/* Invoices Table */}
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                        <th className="py-3 px-4">Invoice #</th>
+                        <th className="py-3 px-4">Work Order</th>
+                        <th className="py-3 px-4">Customer</th>
+                        <th className="py-3 px-4">Vehicle</th>
+                        <th className="py-3 px-4">Invoice Date</th>
+                        <th className="py-3 px-4 text-right">Subtotal</th>
+                        <th className="py-3 px-4 text-right">Tax</th>
+                        <th className="py-3 px-4 text-right">Total</th>
+                        <th className="py-3 px-4 text-right">Paid</th>
+                        <th className="py-3 px-4 text-right">Balance</th>
+                        <th className="py-3 px-4 text-center">Status</th>
+                        <th className="py-3 px-4 text-center">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {invoicesLoading && invoicesList.length === 0 ? (
+                        <tr key="invoices-loading">
+                          <td colSpan={12} className="py-8 text-center text-slate-500">
+                            <RefreshCw className="w-5 h-5 animate-spin mx-auto text-purple-600 mb-2" />
+                            Loading invoices...
+                          </td>
+                        </tr>
+                      ) : invoicesList.length === 0 ? (
+                        <tr key="invoices-empty">
+                          <td colSpan={12} className="py-8 text-center text-slate-500">
+                            No invoice records found.
+                          </td>
+                        </tr>
+                      ) : (
+                        invoicesList.map((inv) => (
+                          <tr key={inv.id} className="hover:bg-slate-50/70 transition">
+                            <td className="py-3 px-4 font-mono font-bold text-slate-900">
+                              {inv.invoice_number}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-700">
+                              {inv.work_order_number}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="font-bold text-slate-800 block">{inv.customer_name}</span>
+                              <span className="text-[10px] text-slate-500">{inv.customer_email}</span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="font-bold text-slate-800 block">{inv.vehicle_display}</span>
+                              <span className="inline-block bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded text-[10px] font-mono">
+                                {inv.vehicle_registration_plate || "—"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
+                              {inv.invoice_date || "—"}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono text-slate-700">
+                              {inv.currency} {inv.subtotal}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono text-slate-700">
+                              {inv.currency} {inv.tax_amount}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                              {inv.currency} {inv.total_amount}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold text-emerald-700">
+                              {inv.currency} {inv.amount_paid}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold">
+                              <span className={parseFloat(inv.outstanding_balance) > 0 ? "text-amber-700" : "text-emerald-700"}>
+                                {inv.currency} {inv.outstanding_balance}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              {inv.status === "PAID" ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                  <Check className="w-3 h-3" /> Paid
+                                </span>
+                              ) : inv.status === "PARTIALLY_PAID" ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                                  Partial
+                                </span>
+                              ) : inv.status === "VOID" ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700">
+                                  Void
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800">
+                                  Unpaid
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-center whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => openInvoiceModal(inv.work_order_id)}
+                                className="px-3 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-700 font-bold text-[11px] transition flex items-center gap-1 mx-auto"
+                              >
+                                <Printer className="w-3 h-3" />
+                                <span>View & Print</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Pagination */}
+              {invoicesTotalPages > 1 && (
+                <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs">
+                  <span className="text-slate-500">
+                    Showing page {invoicesPage} of {invoicesTotalPages} ({invoicesTotalCount} total invoices)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={invoicesPage <= 1}
+                      onClick={() => setInvoicesPage((p) => Math.max(1, p - 1))}
+                      className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-40 transition font-bold"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      disabled={invoicesPage >= invoicesTotalPages}
+                      onClick={() => setInvoicesPage((p) => Math.min(invoicesTotalPages, p + 1))}
+                      className="px-3 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-40 transition font-bold"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {/* ========================================================================= */}
@@ -3753,10 +4466,359 @@ export default function WorkshopLandingView() {
       {/* Work Order Loading Indicator */}
       {workOrderDetailLoading && (
         <div className="fixed inset-0 z-60 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-
-          4 shadow-xl flex items-center gap-3">
+          <div className="bg-white rounded-2xl p-4 shadow-xl flex items-center gap-3">
             <RefreshCw className="w-5 h-5 animate-spin text-purple-600" />
             <span className="text-xs font-bold text-slate-800">Loading work order details...</span>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: WORK ORDER SETTLEMENT BREAKDOWN */}
+      {/* ========================================================================= */}
+      {selectedSettlementWorkOrderId && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 md:p-6 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-3xl w-full p-6 shadow-2xl border border-slate-200 space-y-5 my-8 animate-in fade-in zoom-in-95 max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between pb-4 border-b border-slate-100">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Receipt className="w-5 h-5 text-purple-600" />
+                  <h3 className="text-base font-black text-slate-900">Work Order Settlement Breakdown</h3>
+                </div>
+                <p className="text-xs text-slate-500 font-mono mt-0.5">
+                  Work Order ID: {selectedSettlementWorkOrderId}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedSettlementWorkOrderId(null);
+                  setSettlementDetail(null);
+                  setSettlementDetailError(null);
+                }}
+                className="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {loadingSettlementDetail ? (
+              <div className="py-12 text-center text-slate-500 space-y-2">
+                <RefreshCw className="w-6 h-6 animate-spin text-purple-600 mx-auto" />
+                <p className="text-xs font-bold">Loading settlement ledger & payments...</p>
+              </div>
+            ) : settlementDetailError ? (
+              <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl text-rose-800 text-xs flex items-center gap-3">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                <span>{settlementDetailError}</span>
+              </div>
+            ) : settlementDetail ? (
+              <div className="space-y-5 text-xs">
+                {/* Header Information Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-200/80">
+                  <div>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Job Reference</span>
+                    <span className="font-mono font-bold text-slate-900 text-sm">{settlementDetail.work_order_number}</span>
+                    <span className="text-slate-500 block text-[11px] mt-0.5">Workshop: {settlementDetail.workshop_name}</span>
+                  </div>
+                  <div className="md:text-right">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Settlement Status</span>
+                    <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-black mt-0.5 ${
+                      settlementDetail.settlement_status === "SETTLED"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : settlementDetail.settlement_status === "PARTIALLY_SETTLED"
+                        ? "bg-amber-100 text-amber-800"
+                        : "bg-rose-100 text-rose-800"
+                    }`}>
+                      {settlementDetail.settlement_status}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Financial Summary Calculation Table */}
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Authorized Repair Costs</h4>
+                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden divide-y divide-slate-100">
+                    <div className="flex justify-between p-3">
+                      <span className="text-slate-600">Base Quotation Amount:</span>
+                      <span className="font-mono font-bold text-slate-900">{settlementDetail.currency} {settlementDetail.original_quotation_amount}</span>
+                    </div>
+                    <div className="flex justify-between p-3">
+                      <span className="text-slate-600">Approved Change Orders:</span>
+                      <span className="font-mono font-bold text-slate-900">+{settlementDetail.currency} {settlementDetail.approved_change_orders_amount}</span>
+                    </div>
+                    <div className="flex justify-between p-3 bg-purple-50/50 font-bold">
+                      <span className="text-purple-950 font-bold">Total Authorized Work Order Value:</span>
+                      <span className="font-mono font-black text-purple-950 text-sm">{settlementDetail.currency} {settlementDetail.authorized_total_amount}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Collections Breakdown */}
+                <div className="space-y-2">
+                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Payments Collected vs Outstanding</h4>
+                  <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-2.5">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-slate-600">Advance Deposit Paid:</span>
+                      <span className="font-mono font-bold text-purple-700">-{settlementDetail.currency} {settlementDetail.verified_deposit_amount}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-slate-600">Final Balance Payments Paid:</span>
+                      <span className="font-mono font-bold text-blue-700">-{settlementDetail.currency} {settlementDetail.verified_balance_paid_amount}</span>
+                    </div>
+                    <div className="pt-2 border-t border-slate-200 flex justify-between items-center text-xs font-bold">
+                      <span className="text-slate-800">Total Customer Paid to Date:</span>
+                      <span className="font-mono font-black text-emerald-700 text-sm">{settlementDetail.currency} {settlementDetail.total_amount_paid}</span>
+                    </div>
+                    <div className="pt-2 border-t border-slate-200 flex justify-between items-center text-sm font-black">
+                      <span className="text-slate-950">Outstanding Balance Due:</span>
+                      <span className={`font-mono ${parseFloat(settlementDetail.outstanding_balance) > 0 ? "text-amber-700" : "text-emerald-700"}`}>
+                        {settlementDetail.currency} {settlementDetail.outstanding_balance}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Payment History Ledger */}
+                {settlementDetail.payments && settlementDetail.payments.length > 0 && (
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Payment Transactions</h4>
+                    <div className="border border-slate-200 rounded-2xl overflow-hidden divide-y divide-slate-100 text-[11px]">
+                      {settlementDetail.payments.map((p, idx) => (
+                        <div key={p.id || p.payment_number || p.provider_payment_id || `pmt-${idx}`} className="p-3 flex items-center justify-between hover:bg-slate-50 transition">
+                          <div>
+                            <span className="font-mono font-bold text-slate-900 block">{p.payment_number}</span>
+                            <span className="text-slate-500 text-[10px]">
+                              {p.payment_type} • Provider: {p.payment_provider} • {p.provider_payment_id || "Direct"}
+                            </span>
+                          </div>
+                          <div className="text-right">
+                            <span className="font-mono font-bold text-slate-900 block">{p.currency} {p.amount}</span>
+                            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                              p.status === "VERIFIED"
+                                ? "bg-emerald-100 text-emerald-800"
+                                : "bg-slate-100 text-slate-700"
+                            }`}>
+                              {p.status}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Modal Footer Actions */}
+                <div className="flex items-center justify-between pt-4 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedSettlementWorkOrderId) {
+                        openInvoiceModal(selectedSettlementWorkOrderId);
+                      }
+                    }}
+                    className="px-4 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-700 font-bold transition flex items-center gap-1.5"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>View / Print Invoice</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSettlementWorkOrderId(null);
+                      setSettlementDetail(null);
+                    }}
+                    className="px-5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: INVOICE VIEWER & PRINT */}
+      {/* ========================================================================= */}
+      {selectedInvoiceWorkOrderId && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 md:p-6 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-4xl w-full p-6 md:p-8 shadow-2xl border border-slate-200 space-y-6 my-8 animate-in fade-in zoom-in-95 max-h-[92vh] overflow-y-auto">
+            {/* Top Toolbar (Hidden during print) */}
+            <div className="flex items-center justify-between pb-4 border-b border-slate-200 print:hidden">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-purple-600" />
+                <h3 className="text-base font-black text-slate-900">Tax Invoice Viewer</h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print Invoice</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedInvoiceWorkOrderId(null);
+                    setInvoiceDetail(null);
+                    setInvoiceDetailError(null);
+                  }}
+                  className="p-2 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {loadingInvoiceDetail ? (
+              <div className="py-16 text-center text-slate-500 space-y-2">
+                <RefreshCw className="w-6 h-6 animate-spin text-purple-600 mx-auto" />
+                <p className="text-xs font-bold">Loading invoice data...</p>
+              </div>
+            ) : invoiceDetailError ? (
+              <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl text-rose-800 text-xs flex items-center gap-3">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{invoiceDetailError}</span>
+              </div>
+            ) : invoiceDetail ? (
+              /* Printable Invoice Document */
+              <div id="printable-invoice" className="bg-white space-y-6 text-slate-900">
+                {/* Header: Workshop & Invoice Meta */}
+                <div className="flex flex-col md:flex-row md:items-start justify-between gap-6 pb-6 border-b-2 border-slate-900">
+                  <div className="space-y-1">
+                    <h1 className="text-2xl font-black tracking-tight text-slate-900">
+                      {invoiceDetail.workshop_name || profile?.business_name || profile?.display_name || "Workshop Services"}
+                    </h1>
+                    {invoiceDetail.workshop_address && (
+                      <p className="text-xs text-slate-600">{invoiceDetail.workshop_address}, {invoiceDetail.workshop_city || profile?.city || ""} {profile?.postal_code || ""}</p>
+                    )}
+                    <p className="text-xs text-slate-600">
+                      Email: {invoiceDetail.workshop_email || profile?.contact_email || user?.email} | Phone: {invoiceDetail.workshop_phone || profile?.contact_phone || "—"}
+                    </p>
+                    {invoiceDetail.workshop_tax_number && (
+                      <p className="text-xs text-slate-500 font-mono">Tax / VAT ID: {invoiceDetail.workshop_tax_number}</p>
+                    )}
+                  </div>
+
+                  <div className="md:text-right space-y-1">
+                    <div className="inline-block px-3 py-1 bg-slate-900 text-white text-xs font-black uppercase tracking-widest rounded-lg">
+                      TAX INVOICE
+                    </div>
+                    <div className="text-lg font-black font-mono text-slate-900 mt-1">
+                      #{invoiceDetail.invoice_number}
+                    </div>
+                    <p className="text-xs text-slate-600">
+                      Issue Date: <span className="font-bold">{invoiceDetail.issued_at ? new Date(invoiceDetail.issued_at).toLocaleDateString() : new Date().toLocaleDateString()}</span>
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      Work Order: <span className="font-mono font-bold">{invoiceDetail.work_order_number}</span>
+                    </p>
+                    <div className="mt-2">
+                      <span className={`inline-block px-3 py-0.5 rounded-full text-xs font-black ${
+                        invoiceDetail.status === "PAID"
+                          ? "bg-emerald-100 text-emerald-900 border border-emerald-300"
+                          : invoiceDetail.status === "ISSUED"
+                          ? "bg-blue-100 text-blue-900 border border-blue-300"
+                          : "bg-rose-100 text-rose-900 border border-rose-300"
+                      }`}>
+                        STATUS: {invoiceDetail.status}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Line Items Table */}
+                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-bold uppercase text-[10px] tracking-wider">
+                        <th className="py-2.5 px-3">Description</th>
+                        <th className="py-2.5 px-3">Type</th>
+                        <th className="py-2.5 px-3 text-center">Qty</th>
+                        <th className="py-2.5 px-3 text-right">Unit Price</th>
+                        <th className="py-2.5 px-3 text-right">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {invoiceDetail.line_items_snapshot && invoiceDetail.line_items_snapshot.length > 0 ? (
+                        invoiceDetail.line_items_snapshot.map((item, idx) => (
+                          <tr key={item.id || (item.part_number ? `part-${item.part_number}-${idx}` : `line-${idx}`)} className="hover:bg-slate-50">
+                            <td className="py-2.5 px-3">
+                              <span className="font-bold text-slate-800 block">{item.description}</span>
+                              {item.part_number && (
+                                <span className="text-[10px] text-slate-500 font-mono">Part #: {item.part_number}</span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-slate-600 uppercase text-[10px] font-bold">
+                              {item.type || "SERVICE"}
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-800">
+                              {item.quantity}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono text-slate-700">
+                              {invoiceDetail.currency} {item.unit_price || "0.00"}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">
+                              {invoiceDetail.currency} {item.line_total || "0.00"}
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr key="invoice-line-items-empty">
+                          <td colSpan={5} className="py-4 text-center text-slate-500">
+                            Standard repair & maintenance service package.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Financial Totals Block */}
+                <div className="flex flex-col md:flex-row justify-end pt-2">
+                  <div className="w-full md:w-80 bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-2 text-xs">
+                    <div className="flex justify-between text-slate-600">
+                      <span>Subtotal:</span>
+                      <span className="font-mono font-bold text-slate-900">{invoiceDetail.currency} {invoiceDetail.subtotal_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-600">
+                      <span>Tax / VAT:</span>
+                      <span className="font-mono font-bold text-slate-900">{invoiceDetail.currency} {invoiceDetail.tax_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-black text-slate-950 pt-2 border-t border-slate-200">
+                      <span>Total Invoice Amount:</span>
+                      <span className="font-mono">{invoiceDetail.currency} {invoiceDetail.total_amount}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-purple-700 pt-1">
+                      <span>Less: Advance Deposit:</span>
+                      <span className="font-mono font-bold">-{invoiceDetail.currency} {invoiceDetail.deposit_paid_amount || "0.00"}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-blue-700">
+                      <span>Less: Final Payment:</span>
+                      <span className="font-mono font-bold">-{invoiceDetail.currency} {invoiceDetail.balance_paid_amount || "0.00"}</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-black pt-2 border-t border-slate-300">
+                      <span className="text-slate-900">Outstanding Balance:</span>
+                      <span className={`font-mono ${parseFloat(invoiceDetail.amount_due) > 0 ? "text-amber-700" : "text-emerald-700"}`}>
+                        {invoiceDetail.currency} {invoiceDetail.amount_due}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Invoice Footer Notes */}
+                <div className="pt-6 border-t border-slate-200 text-center text-[11px] text-slate-500 space-y-1">
+                  <p className="font-bold text-slate-700">Thank you for your business!</p>
+                  <p>DriverXtra Automotive Platform — Digital Invoice Record</p>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       )}

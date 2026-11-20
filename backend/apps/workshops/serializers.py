@@ -23,6 +23,11 @@ from apps.workshops.models import (
     WorkOrderPartUsage,
     WorkOrderStatusChoices,
     WorkOrderTaskStatusChoices,
+    WorkOrderSettlementStatusChoices,
+    WorkOrderPaymentStatusChoices,
+    WorkOrderPayment,
+    WorkOrderInvoice,
+    WorkshopRefund,
     ChangeOrder,
     ChangeOrderLineItem,
     ChangeOrderStatusChoices,
@@ -386,8 +391,34 @@ class QuotationDepositVerifySerializer(serializers.Serializer):
 
 
 
+class WorkshopRefundSerializer(serializers.ModelSerializer):
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = WorkshopRefund
+        fields = [
+            'id',
+            'refund_number',
+            'amount',
+            'currency',
+            'status',
+            'status_display',
+            'gateway_provider',
+            'gateway_refund_id',
+            'idempotency_key',
+            'payment_reference',
+            'reason',
+            'failure_reason',
+            'processed_at',
+            'reconciliation_attempts',
+            'created_at',
+            'updated_at',
+        ]
+
+
 class WorkshopBookingDetailSerializer(serializers.ModelSerializer):
     service_items = BookingServiceItemSerializer(many=True, read_only=True)
+    refunds = WorkshopRefundSerializer(many=True, read_only=True)
     quotations = serializers.SerializerMethodField()
     active_quotation = serializers.SerializerMethodField()
     workshop_name = serializers.CharField(source='workshop.display_name', read_only=True)
@@ -433,6 +464,7 @@ class WorkshopBookingDetailSerializer(serializers.ModelSerializer):
             'cancellation_reason',
             'cancelled_at',
             'service_items',
+            'refunds',
             'quotations',
             'active_quotation',
             'work_order_id',
@@ -707,6 +739,10 @@ class WorkOrderListSerializer(serializers.ModelSerializer):
     authorized_total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     approved_change_orders_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     has_pending_change_orders = serializers.BooleanField(read_only=True)
+    settlement_status = serializers.CharField(read_only=True)
+    outstanding_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_amount_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    is_fully_settled = serializers.BooleanField(read_only=True)
     vehicle_odometer_unit = serializers.SerializerMethodField()
     odometer_unit_mismatch = serializers.SerializerMethodField()
 
@@ -751,6 +787,10 @@ class WorkOrderListSerializer(serializers.ModelSerializer):
             'authorized_total_amount',
             'approved_change_orders_amount',
             'has_pending_change_orders',
+            'settlement_status',
+            'outstanding_balance',
+            'total_amount_paid',
+            'is_fully_settled',
             'vehicle_odometer_unit',
             'odometer_unit_mismatch',
             'created_at',
@@ -796,6 +836,10 @@ class WorkOrderSerializer(serializers.ModelSerializer):
     authorized_total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     approved_change_orders_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     has_pending_change_orders = serializers.BooleanField(read_only=True)
+    settlement_status = serializers.CharField(read_only=True)
+    outstanding_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_amount_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    is_fully_settled = serializers.BooleanField(read_only=True)
     vehicle_odometer_unit = serializers.SerializerMethodField()
     odometer_unit_mismatch = serializers.SerializerMethodField()
 
@@ -823,6 +867,10 @@ class WorkOrderSerializer(serializers.ModelSerializer):
             'authorized_total_amount',
             'approved_change_orders_amount',
             'has_pending_change_orders',
+            'settlement_status',
+            'outstanding_balance',
+            'total_amount_paid',
+            'is_fully_settled',
             'workshop',
             'workshop_name',
             'workshop_city',
@@ -979,10 +1027,94 @@ class BuyerWorkOrderPartUsageSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class WorkOrderPaymentSerializer(serializers.ModelSerializer):
+    payment_type_display = serializers.CharField(source='get_payment_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = WorkOrderPayment
+        fields = [
+            'id',
+            'payment_number',
+            'payment_type',
+            'payment_type_display',
+            'amount',
+            'currency',
+            'provider',
+            'status',
+            'status_display',
+            'provider_order_id',
+            'provider_payment_id',
+            'is_late_payment',
+            'error_message',
+            'paid_at',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class WorkOrderInvoiceSerializer(serializers.ModelSerializer):
+    subtotal_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    amount_due = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    discount_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    workshop_name = serializers.CharField(source='work_order.workshop.display_name', read_only=True)
+    customer_name = serializers.CharField(source='work_order.buyer.full_name', read_only=True)
+
+    class Meta:
+        model = WorkOrderInvoice
+        fields = [
+            'id',
+            'invoice_number',
+            'status',
+            'document_type',
+            'issued_at',
+            'quotation_amount',
+            'approved_change_orders_amount',
+            'deposit_paid_amount',
+            'balance_paid_amount',
+            'total_paid_amount',
+            'subtotal_amount',
+            'discount_amount',
+            'tax_amount',
+            'tax_rate_percent',
+            'total_authorized_amount',
+            'total_amount',
+            'outstanding_balance',
+            'amount_due',
+            'currency',
+            'is_fully_settled',
+            'workshop_name',
+            'customer_name',
+            'invoice_data',
+        ]
+        read_only_fields = fields
+
+
+class WorkOrderSettlementDetailSerializer(serializers.Serializer):
+    work_order_id = serializers.UUIDField()
+    work_order_number = serializers.CharField()
+    status = serializers.CharField()
+    settlement_status = serializers.CharField()
+    original_quotation_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    approved_change_orders_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    authorized_total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    deposit_paid_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    balance_paid_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_paid_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    outstanding_balance = serializers.DecimalField(max_digits=12, decimal_places=2)
+    is_fully_settled = serializers.BooleanField()
+    currency = serializers.CharField()
+    payments = WorkOrderPaymentSerializer(many=True)
+    invoice = WorkOrderInvoiceSerializer(allow_null=True)
+
+
 class BuyerWorkOrderSerializer(serializers.ModelSerializer):
     tasks = BuyerWorkOrderTaskSerializer(many=True, read_only=True)
     parts_used = BuyerWorkOrderPartUsageSerializer(many=True, read_only=True)
     change_orders = serializers.SerializerMethodField()
+    payments = WorkOrderPaymentSerializer(many=True, read_only=True)
+    invoice_number = serializers.SerializerMethodField()
     workshop_name = serializers.CharField(source='workshop.display_name', read_only=True)
     workshop_city = serializers.CharField(source='workshop.city', read_only=True)
     booking_number = serializers.CharField(source='booking.booking_number', read_only=True)
@@ -992,6 +1124,13 @@ class BuyerWorkOrderSerializer(serializers.ModelSerializer):
     authorized_total_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     approved_change_orders_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     has_pending_change_orders = serializers.BooleanField(read_only=True)
+    original_quotation_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    verified_deposit_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    verified_balance_paid_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    total_amount_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    outstanding_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    is_fully_settled = serializers.BooleanField(read_only=True)
+    settlement_status_display = serializers.CharField(source='get_settlement_status_display', read_only=True)
     vehicle_odometer_unit = serializers.SerializerMethodField()
     odometer_unit_mismatch = serializers.SerializerMethodField()
 
@@ -1004,6 +1143,12 @@ class BuyerWorkOrderSerializer(serializers.ModelSerializer):
         if obj.vehicle and getattr(obj.vehicle, 'odometer_unit', None) and obj.odometer_unit:
             return obj.vehicle.odometer_unit.strip().lower() != obj.odometer_unit.strip().lower()
         return False
+
+    def get_invoice_number(self, obj):
+        if hasattr(obj, 'invoice') and obj.invoice:
+            return obj.invoice.invoice_number
+        return None
+
     lead_technician_name = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
@@ -1019,6 +1164,16 @@ class BuyerWorkOrderSerializer(serializers.ModelSerializer):
             'authorized_total_amount',
             'approved_change_orders_amount',
             'has_pending_change_orders',
+            'settlement_status',
+            'settlement_status_display',
+            'original_quotation_amount',
+            'verified_deposit_amount',
+            'verified_balance_paid_amount',
+            'total_amount_paid',
+            'outstanding_balance',
+            'is_fully_settled',
+            'payments',
+            'invoice_number',
             'workshop_name',
             'workshop_city',
             'vehicle_make',

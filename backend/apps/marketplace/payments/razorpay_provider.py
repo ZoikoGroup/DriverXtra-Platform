@@ -3,11 +3,12 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 import uuid
 from decimal import Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 from django.conf import settings
 from apps.marketplace.payments.base import BasePaymentProvider
 
@@ -405,6 +406,40 @@ class RazorpayPaymentProvider(BasePaymentProvider):
 
         return True, event_id, event_type, payload
 
+    @classmethod
+    def generate_refund_idempotency_key(cls, refund_number: Optional[str]) -> str:
+        """
+        Generates a deterministic, highly collision-resistant Razorpay refund idempotency key.
+
+        Satisfies Razorpay API constraints:
+        - Header: X-Refund-Idempotency
+        - Length between 10 and 40 characters.
+        - Allowed characters: ASCII alphanumeric (A-Z, a-z, 0-9), hyphens ('-'), and underscores ('_').
+        - Deterministic: Identical refund numbers consistently produce identical keys.
+        - Collision-resistant: Inputs outside allowed bounds (length < 10, length > 40,
+          Unicode/non-ASCII characters, unsupported symbols, or starting with 'h_') are
+          hashed via SHA-256 into a 34-character ASCII hex representation prefixed with 'h_'.
+          Untransformed direct keys and hashed keys occupy disjoint namespaces.
+          Note: Truncated cryptographic digests provide high practical collision resistance
+          rather than mathematical collision-freedom.
+        """
+        if not refund_number or not str(refund_number).strip():
+            raise ValueError("refund_number is required to generate an idempotency key and cannot be empty.")
+
+        raw_str = str(refund_number).strip()
+
+        # Strict ASCII character set check: A-Z, a-z, 0-9, hyphen (-), underscore (_)
+        is_safe_ascii = bool(re.fullmatch(r'^[A-Za-z0-9_-]+$', raw_str, flags=re.ASCII))
+
+        # Direct key domain: length in [10, 40], strict ASCII allowed chars, and does not start with reserved prefix 'h_'
+        if 10 <= len(raw_str) <= 40 and is_safe_ascii and not raw_str.startswith('h_'):
+            return raw_str
+
+        # Hashed key domain: for inputs < 10 chars, > 40 chars, containing Unicode/special chars, or starting with 'h_'.
+        # Truncated SHA-256 hex digest (32 chars / 128 bits) prefixed with 'h_' yields exactly 34 valid ASCII chars.
+        digest = hashlib.sha256(raw_str.encode('utf-8')).hexdigest()[:32]
+        return f"h_{digest}"  # Exactly 34 characters (2 + 32), strictly ASCII [a-z0-9_]
+
     def issue_refund(
         self,
         payment_reference: str,
@@ -434,33 +469,44 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         if not payment_id:
             return False, "Missing payment_reference for Razorpay refund dispatch.", {}
 
+        rfnd_num = (refund_number or '').strip()
+        if not rfnd_num:
+            return False, "Missing required refund_number for Razorpay refund dispatch.", {}
+
+        try:
+            idemp_key = self.generate_refund_idempotency_key(rfnd_num)
+        except ValueError as val_err:
+            return False, f"Invalid refund_number for idempotency key: {str(val_err)}", {}
+
         notes_payload = {str(k): str(v) for k, v in (notes or {}).items()}
-        if refund_number:
-            notes_payload["refund_number"] = str(refund_number)
+        notes_payload["refund_number"] = rfnd_num
         if reason:
             notes_payload["reason"] = str(reason)[:255]
 
         # Live / Sandbox Razorpay API call
-        if self.is_configured and not getattr(settings, 'IS_TESTING', False):
+        if (self.is_configured and not getattr(settings, 'IS_TESTING', False)) or getattr(self, 'force_network_call', False):
             refund_url = f"{self.api_url}/payments/{payment_id}/refund"
             payload_data = {
                 "amount": amount_paise,
                 "speed": "normal",
-                "receipt": refund_number or f"rcpt_{uuid.uuid4().hex[:8]}",
+                "receipt": idemp_key,
                 "notes": notes_payload,
             }
             body_bytes = json.dumps(payload_data).encode('utf-8')
             auth_str = f"{self.key_id}:{self.key_secret}"
             auth_header = base64.b64encode(auth_str.encode('utf-8')).decode('ascii')
 
+            req_headers = {
+                "Authorization": f"Basic {auth_header}",
+                "Content-Type": "application/json",
+                "User-Agent": "DriverXtra-Platform/1.0",
+                "X-Refund-Idempotency": idemp_key,
+            }
+
             req = urllib.request.Request(
                 refund_url,
                 data=body_bytes,
-                headers={
-                    "Authorization": f"Basic {auth_header}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "DriverXtra-Platform/1.0",
-                },
+                headers=req_headers,
                 method="POST",
             )
             try:
@@ -472,18 +518,19 @@ class RazorpayPaymentProvider(BasePaymentProvider):
             except urllib.error.HTTPError as http_err:
                 err_text = http_err.read().decode('utf-8', errors='replace')
                 logger.error("Razorpay Refund API error HTTP %s: %s", http_err.code, err_text)
-                if not getattr(settings, 'IS_TESTING', False):
+                if not getattr(settings, 'IS_TESTING', False) or getattr(self, 'force_network_call', False):
                     return False, f"Razorpay Refund API error (HTTP {http_err.code}): {err_text}", {"http_code": http_err.code}
                 logger.warning("Falling back to deterministic test refund in IS_TESTING environment.")
             except Exception as exc:
                 logger.error("Failed to connect to Razorpay Refund API: %s", str(exc))
-                if not getattr(settings, 'IS_TESTING', False):
+                if not getattr(settings, 'IS_TESTING', False) or getattr(self, 'force_network_call', False):
                     return False, f"Failed to connect to Razorpay Refund API: {str(exc)}", {}
                 logger.warning("Falling back to deterministic test refund in IS_TESTING environment.")
 
         # Test mode fallback for isolated test suites or development
-        if self.test_mode:
-            rfnd_id = f"rfnd_test_{uuid.uuid4().hex[:14]}"
+        if self.test_mode or getattr(settings, 'IS_TESTING', False):
+            id_hash = hashlib.sha256(rfnd_num.encode('utf-8')).hexdigest()[:14]
+            rfnd_id = f"rfnd_test_{id_hash}"
             return True, rfnd_id, {
                 "id": rfnd_id,
                 "entity": "refund",
@@ -491,7 +538,7 @@ class RazorpayPaymentProvider(BasePaymentProvider):
                 "currency": "INR",
                 "payment_id": payment_id,
                 "status": "processed",
-                "receipt": refund_number,
+                "receipt": idemp_key,
                 "notes": notes_payload,
                 "test_mode": True,
             }
@@ -517,6 +564,12 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         payment_id = (payment_reference or '').strip()
         rfnd_num = (refund_number or '').strip()
         gw_id = (gateway_refund_id or '').strip()
+        expected_idemp_key = ''
+        if rfnd_num:
+            try:
+                expected_idemp_key = self.generate_refund_idempotency_key(rfnd_num)
+            except ValueError:
+                expected_idemp_key = ''
 
         # Live / Sandbox call when configured (or when force_network_call is enabled for tests)
         if (self.is_configured and not getattr(settings, 'IS_TESTING', False)) or getattr(self, 'force_network_call', False):
@@ -562,7 +615,12 @@ class RazorpayPaymentProvider(BasePaymentProvider):
                         for item in items:
                             item_notes = item.get('notes', {}) or {}
                             receipt = item.get('receipt', '')
-                            if receipt == rfnd_num or item_notes.get('refund_number') == rfnd_num or (gw_id and item.get('id') == gw_id):
+                            if (
+                                receipt == rfnd_num
+                                or receipt == expected_idemp_key
+                                or item_notes.get('refund_number') == rfnd_num
+                                or (gw_id and item.get('id') == gw_id)
+                            ):
                                 st = item.get('status', '').lower()
                                 if st == 'processed':
                                     return 'SUCCEEDED', item.get('id'), item

@@ -5,7 +5,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
+from django.db import transaction, models
 from django.utils import timezone
 
 from apps.identity.models import User
@@ -16,6 +16,7 @@ from apps.marketplace.payments.service import PaymentService
 from apps.workshops.models import (
     WorkshopQuotation,
     WorkshopBooking,
+    BookingStatusChoices,
     QuotationStatusChoices,
     DepositStatusChoices,
     WorkshopDepositWebhookEvent,
@@ -89,6 +90,9 @@ class WorkshopDepositPaymentService:
         """
         if quotation.booking.buyer_id != buyer.id:
             raise DjangoValidationError("Only the buyer who booked this service can initiate deposit payment.")
+
+        if quotation.booking.status == BookingStatusChoices.CANCELLED:
+            raise DjangoValidationError(f"Cannot pay deposit for cancelled booking #{quotation.booking.booking_number}.")
 
         if quotation.deposit_status == DepositStatusChoices.PAID:
             raise DjangoValidationError(
@@ -190,6 +194,9 @@ class WorkshopDepositPaymentService:
         # Verify buyer ownership
         if quotation.booking.buyer_id != actor.id:
             raise DjangoValidationError("Only the customer who booked this appointment can verify deposit payment.")
+
+        if quotation.booking.status == BookingStatusChoices.CANCELLED:
+            raise DjangoValidationError(f"Cannot verify deposit for cancelled booking #{quotation.booking.booking_number}.")
 
         if quotation.status != QuotationStatusChoices.ISSUED:
             raise DjangoValidationError(
@@ -421,6 +428,24 @@ class WorkshopDepositPaymentService:
                                 "provider": provider.provider_name,
                             },
                         )
+            elif event_type in ('refund.processed', 'charge.refunded', 'refund.created', 'refund.updated'):
+                from apps.workshops.models import WorkshopRefund, WorkshopRefundStatusChoices
+                rfnd = WorkshopRefund.objects.filter(
+                    models.Q(quotation=quotation) | models.Q(payment_reference=payment_id)
+                ).first()
+                if rfnd and rfnd.status != WorkshopRefundStatusChoices.SUCCEEDED:
+                    rfnd.status = WorkshopRefundStatusChoices.SUCCEEDED
+                    rfnd.processed_at = timezone.now()
+                    rfnd.save(update_fields=['status', 'processed_at', 'updated_at'])
+                with transaction.atomic():
+                    locked_q = WorkshopQuotation.objects.select_for_update().get(id=quotation.id)
+                    q_refunded_total = WorkshopRefund.objects.filter(
+                        quotation=locked_q,
+                        status=WorkshopRefundStatusChoices.SUCCEEDED,
+                    ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+                    if q_refunded_total >= (locked_q.deposit_amount or Decimal('0.00')):
+                        locked_q.deposit_status = DepositStatusChoices.REFUNDED
+                        locked_q.save(update_fields=['deposit_status', 'updated_at'])
             elif event_type in ('payment.failed', 'payment_intent.payment_failed'):
                 with transaction.atomic():
                     locked_q = WorkshopQuotation.objects.select_for_update().get(id=quotation.id)

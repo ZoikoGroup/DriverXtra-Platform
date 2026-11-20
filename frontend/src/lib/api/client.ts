@@ -3445,13 +3445,13 @@ export const api = {
       const payload =
         typeof actionOrPayload === "string"
           ? {
-              action: actionOrPayload === "REJECT" ? "HIDE" : actionOrPayload,
-              admin_notes,
-            }
+            action: actionOrPayload === "REJECT" ? "HIDE" : actionOrPayload,
+            admin_notes,
+          }
           : {
-              ...actionOrPayload,
-              action: actionOrPayload.action === "REJECT" ? "HIDE" : actionOrPayload.action,
-            };
+            ...actionOrPayload,
+            action: actionOrPayload.action === "REJECT" ? "HIDE" : actionOrPayload.action,
+          };
       return apiRequest<{ message: string; review: PlatformProductReview }>(
         `/marketplace/admin/reviews/${reviewId}/moderate/`,
         {
@@ -3600,8 +3600,8 @@ export const api = {
       });
     },
 
-    async cancelMyBooking(id: string, reason: string): Promise<WorkshopBooking> {
-      return apiRequest<WorkshopBooking>(`/workshops/bookings/my/${id}/cancel/`, {
+    async cancelMyBooking(id: string, reason: string): Promise<WorkshopBookingCancellationResponse> {
+      return apiRequest<WorkshopBookingCancellationResponse>(`/workshops/bookings/my/${id}/cancel/`, {
         method: "POST",
         requiresAuth: true,
         body: JSON.stringify({ reason }),
@@ -3962,6 +3962,55 @@ export const api = {
       },
     },
 
+    manageSettlements: {
+      async list(params?: {
+        page?: number;
+        page_size?: number;
+        status?: string;
+        q?: string;
+      }): Promise<WorkshopSettlementsResponse> {
+        const query = new URLSearchParams();
+        if (params?.page) query.set("page", String(params.page));
+        if (params?.page_size) query.set("page_size", String(params.page_size));
+        if (params?.status && params.status !== "ALL") query.set("status", params.status);
+        if (params?.q) query.set("q", params.q);
+        const qs = query.toString();
+        return apiRequest<WorkshopSettlementsResponse>(
+          `/workshops/manage/settlements/${qs ? `?${qs}` : ""}`,
+          { method: "GET", requiresAuth: true }
+        );
+      },
+      async listInvoices(params?: {
+        page?: number;
+        page_size?: number;
+        status?: string;
+        q?: string;
+      }): Promise<WorkshopInvoicesResponse> {
+        const query = new URLSearchParams();
+        if (params?.page) query.set("page", String(params.page));
+        if (params?.page_size) query.set("page_size", String(params.page_size));
+        if (params?.status && params.status !== "ALL") query.set("status", params.status);
+        if (params?.q) query.set("q", params.q);
+        const qs = query.toString();
+        return apiRequest<WorkshopInvoicesResponse>(
+          `/workshops/manage/invoices/${qs ? `?${qs}` : ""}`,
+          { method: "GET", requiresAuth: true }
+        );
+      },
+      async getWorkOrderDetail(workOrderId: string): Promise<WorkOrderSettlementDetail> {
+        return apiRequest<WorkOrderSettlementDetail>(
+          `/workshops/work-orders/${workOrderId}/settle/`,
+          { method: "GET", requiresAuth: true }
+        );
+      },
+      async getWorkOrderInvoice(workOrderId: string): Promise<WorkOrderInvoice> {
+        return apiRequest<WorkOrderInvoice>(
+          `/workshops/work-orders/${workOrderId}/invoice/`,
+          { method: "GET", requiresAuth: true }
+        );
+      },
+    },
+
     technician: {
       async listWorkOrders(params?: { status?: string; q?: string; all?: boolean }): Promise<{ results: WorkOrderSummary[]; count: number }> {
         const qs = new URLSearchParams();
@@ -4055,6 +4104,42 @@ export const api = {
         method: "POST",
         requiresAuth: true,
         body: JSON.stringify({ reason }),
+      });
+    },
+
+    async getWorkOrderSettlement(workOrderId: string): Promise<WorkOrderSettlementDetail> {
+      return apiRequest<WorkOrderSettlementDetail>(`/workshops/work-orders/${workOrderId}/settle/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async createWorkOrderSettlementSession(
+      workOrderId: string,
+      payload?: WorkOrderSettlementSessionPayload
+    ): Promise<WorkOrderSettlementSessionResponse> {
+      return apiRequest<WorkOrderSettlementSessionResponse>(`/workshops/work-orders/${workOrderId}/settle/session/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload || {}),
+      });
+    },
+
+    async verifyWorkOrderSettlement(
+      workOrderId: string,
+      payload: WorkOrderSettlementVerifyPayload
+    ): Promise<WorkOrderSettlementVerifyResponse> {
+      return apiRequest<WorkOrderSettlementVerifyResponse>(`/workshops/work-orders/${workOrderId}/settle/verify/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getWorkOrderInvoice(workOrderId: string): Promise<WorkOrderInvoice> {
+      return apiRequest<WorkOrderInvoice>(`/workshops/work-orders/${workOrderId}/invoice/`, {
+        method: "GET",
+        requiresAuth: true,
       });
     },
 
@@ -5250,6 +5335,9 @@ export interface PaymentSessionResponse {
   payment_status?: string;
   cod_collection_status?: string;
   message?: string;
+  expires_at?: string;
+  expires_in_seconds?: number;
+  is_expired?: boolean;
 }
 
 export interface PaymentVerifyPayload {
@@ -5297,7 +5385,7 @@ export interface OrderPaymentDetailResponse {
     provider: string;
     amount: string;
     currency: string;
-  quoted_price?: string;
+    quoted_price?: string;
     status: string;
     provider_transaction_id?: string;
     provider_order_id?: string;
@@ -5564,7 +5652,7 @@ export interface VehicleEnquiry {
     year?: number;
     price: string | number;
     currency: string;
-  quoted_price?: string;
+    quoted_price?: string;
     primary_image_url?: string;
     location_city?: string;
     status?: string;
@@ -6556,6 +6644,247 @@ export interface WorkshopDepositDetailResponse {
   currency: string;
 }
 
+export interface WorkOrderPaymentItem {
+  id: string;
+  payment_number: string;
+  payment_type: "DEPOSIT" | "BALANCE" | "CHANGE_ORDER" | "REFUND";
+  payment_type_display?: string;
+  payment_provider: "RAZORPAY" | "STRIPE" | "OFFLINE" | "WALLET";
+  provider_order_id: string;
+  provider_payment_id: string;
+  amount: string;
+  currency: string;
+  status: "INITIATED" | "PENDING" | "VERIFIED" | "FAILED" | "REFUNDED";
+  status_display?: string;
+  paid_at?: string | null;
+  refund_status?: string | null;
+  refunded_amount?: string;
+  created_at: string;
+}
+
+export interface WorkOrderSettlementDetail {
+  work_order_id: string;
+  work_order_number: string;
+  workshop_id: string;
+  workshop_name: string;
+  currency: string;
+  status: string;
+  settlement_status: "UNSETTLED" | "PARTIALLY_SETTLED" | "SETTLED" | "REFUNDED";
+  original_quotation_amount: string;
+  approved_change_orders_amount: string;
+  authorized_total_amount: string;
+  verified_deposit_amount: string;
+  verified_balance_paid_amount: string;
+  total_amount_paid: string;
+  outstanding_balance: string;
+  is_fully_settled: boolean;
+  payments: WorkOrderPaymentItem[];
+  has_pending_change_orders: boolean;
+}
+
+export interface WorkOrderSettlementSessionPayload {
+  amount?: string | number;
+  preferred_provider?: string;
+  return_url?: string;
+  cancel_url?: string;
+}
+
+export interface WorkOrderSettlementSessionResponse {
+  status: string;
+  work_order_id: string;
+  work_order_number: string;
+  payment_number: string;
+  amount: string;
+  currency: string;
+  provider: string;
+  provider_order_id: string;
+  payment_session: {
+    provider: string;
+    provider_order_id: string;
+    amount: string;
+    amount_minor?: number;
+    currency: string;
+    key_id?: string;
+    receipt?: string;
+    customer_name?: string;
+    customer_email?: string;
+    customer_contact?: string;
+    is_test_mode?: boolean;
+    client_secret?: string;
+    checkout_url?: string;
+    methods_info?: Record<string, unknown>;
+  };
+}
+
+export interface WorkOrderSettlementVerifyPayload {
+  payment_number?: string;
+  razorpay_payment_id?: string;
+  razorpay_order_id?: string;
+  razorpay_signature?: string;
+  payment_intent_id?: string;
+  stripe_payment_intent_id?: string;
+  client_secret?: string;
+  amount?: string | number;
+  currency?: string;
+  preferred_provider?: string;
+}
+
+export interface WorkOrderSettlementVerifyResponse {
+  status: string;
+  work_order_id: string;
+  work_order_number: string;
+  settlement_status: "UNSETTLED" | "PARTIALLY_SETTLED" | "SETTLED" | "REFUNDED";
+  outstanding_balance: string;
+  is_fully_settled: boolean;
+  invoice_number?: string | null;
+  payment: WorkOrderPaymentItem;
+}
+
+export interface WorkOrderInvoiceLineItem {
+  id?: string;
+  type?: string;
+  description: string;
+  part_number?: string;
+  quantity: number;
+  unit_price: string;
+  line_total: string;
+}
+
+export interface WorkOrderInvoice {
+  id: string;
+  invoice_number: string;
+  work_order: string;
+  work_order_number: string;
+  booking_number: string;
+  workshop_name: string;
+  workshop_address?: string;
+  workshop_city?: string;
+  workshop_phone?: string;
+  workshop_email?: string;
+  workshop_tax_number?: string;
+  customer_name: string;
+  customer_email: string;
+  customer_phone?: string;
+  currency: string;
+  subtotal_amount: string;
+  tax_rate_percent: string;
+  tax_amount: string;
+  discount_amount: string;
+  total_amount: string;
+  deposit_paid_amount: string;
+  balance_paid_amount: string;
+  amount_due: string;
+  status: "DRAFT" | "ISSUED" | "PAID" | "VOID" | "REFUNDED";
+  issued_at: string;
+  paid_at?: string | null;
+  line_items_snapshot: WorkOrderInvoiceLineItem[];
+  tax_breakdown?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WorkshopRefundDetail {
+  id?: string;
+  refund_number: string;
+  amount: string;
+  currency: string;
+  status: string;
+  gateway_refund_id?: string;
+  error?: string;
+  gateway_provider?: string;
+  created_at?: string;
+}
+
+export interface WorkshopBookingCancellationResponse extends WorkshopBooking {
+  cancellation_status?: string;
+  refundable_amount?: string;
+  refunded_amount?: string;
+  currency?: string;
+  refund_status?: "SUCCEEDED" | "PROCESSING" | "PROCESSING_UNKNOWN" | "FAILED" | "NOT_APPLICABLE" | string;
+  refund_details?: WorkshopRefundDetail[];
+}
+
+export interface WorkshopSettlementSummaryMetrics {
+  total_work_order_value: string;
+  advance_deposits_received: string;
+  final_payments_received: string;
+  outstanding_customer_balance: string;
+  total_amount_collected: string;
+  currency: string;
+  total_work_orders_count: number;
+  fully_paid_count: number;
+  partially_paid_count: number;
+  unpaid_count: number;
+}
+
+export interface WorkshopWorkOrderSettlementItem {
+  work_order_id: string;
+  work_order_number: string;
+  booking_id: string;
+  booking_number: string;
+  booking_date: string | null;
+  customer_id: string;
+  customer_name: string;
+  customer_email: string;
+  customer_phone: string;
+  vehicle_id: string;
+  vehicle_display: string;
+  vehicle_registration_plate: string;
+  vehicle_vin: string;
+  total_amount: string;
+  quotation_amount: string;
+  approved_change_orders_amount: string;
+  deposit_paid: string;
+  final_balance_paid: string;
+  total_paid: string;
+  outstanding: string;
+  currency: string;
+  settlement_status: "FULLY_PAID" | "PARTIALLY_PAID" | "UNPAID" | string;
+  work_order_status: string;
+  created_at: string;
+  has_invoice: boolean;
+  invoice_number: string | null;
+}
+
+export interface WorkshopSettlementsResponse {
+  summary: WorkshopSettlementSummaryMetrics;
+  results: WorkshopWorkOrderSettlementItem[];
+  count: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface WorkshopInvoiceItem {
+  id: string;
+  invoice_number: string;
+  work_order_id: string;
+  work_order_number: string;
+  booking_id: string;
+  booking_number: string;
+  customer_name: string;
+  customer_email: string;
+  vehicle_display: string;
+  vehicle_registration_plate: string;
+  invoice_date: string;
+  due_date: string | null;
+  subtotal: string;
+  tax_amount: string;
+  total_amount: string;
+  amount_paid: string;
+  outstanding_balance: string;
+  currency: string;
+  status: "PAID" | "PARTIALLY_PAID" | "UNPAID" | "VOID" | string;
+  created_at: string;
+}
+
+export interface WorkshopInvoicesResponse {
+  results: WorkshopInvoiceItem[];
+  count: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 export interface WorkshopBooking {
   id: string;
   booking_number: string;
@@ -6614,6 +6943,7 @@ export interface WorkshopBooking {
     status: string;
     metadata: Record<string, unknown>;
   }>;
+  refunds?: WorkshopRefundDetail[];
   created_at: string;
   updated_at: string;
 }
@@ -6847,6 +7177,16 @@ export interface WorkOrderDetail extends WorkOrderSummary {
   parts_used: WorkOrderPartUsageItem[];
   planned_parts?: QuotationLineItem[];
   change_orders?: ChangeOrder[];
+  settlement_status?: "UNSETTLED" | "PARTIALLY_SETTLED" | "SETTLED" | "REFUNDED";
+  settlement_status_display?: string;
+  outstanding_balance?: string;
+  total_amount_paid?: string;
+  original_quotation_amount?: string;
+  verified_deposit_amount?: string;
+  verified_balance_paid_amount?: string;
+  is_fully_settled?: boolean;
+  payments?: WorkOrderPaymentItem[];
+  invoice_number?: string | null;
 }
 
 export interface WorkshopTechnicianMember {

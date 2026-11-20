@@ -103,6 +103,65 @@ def generate_work_order_number() -> str:
     return f"WO-{date_str}-{suffix}"
 
 
+class WorkOrderSettlementStatusChoices(models.TextChoices):
+    UNPAID = 'UNPAID', 'Unpaid'
+    PARTIALLY_PAID = 'PARTIALLY_PAID', 'Partially Paid'
+    FULLY_PAID = 'FULLY_PAID', 'Fully Paid'
+
+
+class WorkOrderPaymentStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    PROCESSING = 'PROCESSING', 'Processing'
+    SUCCESS = 'SUCCESS', 'Success'
+    FAILED = 'FAILED', 'Failed'
+    REFUNDED = 'REFUNDED', 'Refunded'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class WorkOrderPaymentTypeChoices(models.TextChoices):
+    DEPOSIT = 'DEPOSIT', 'Deposit Payment'
+    BALANCE = 'BALANCE', 'Balance Payment'
+    PARTIAL = 'PARTIAL', 'Partial Balance Payment'
+    FINAL = 'FINAL', 'Final Settlement'
+
+
+class WorkshopRefundStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Approval'
+    PROCESSING = 'PROCESSING', 'Processing Gateway / Payout'
+    PROCESSING_UNKNOWN = 'PROCESSING_UNKNOWN', 'Processing Unknown (Gateway Timeout)'
+    SUCCEEDED = 'SUCCEEDED', 'Succeeded'
+    FAILED = 'FAILED', 'Failed'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+def generate_workshop_refund_number() -> str:
+    """Generates unique refund reference formatted as REF-WB-YYYYMMDD-XXXXXX."""
+    date_str = timezone.now().strftime('%Y%m%d')
+    suffix = uuid.uuid4().hex[:6].upper()
+    return f"REF-WB-{date_str}-{suffix}"
+
+
+def generate_work_order_payment_number() -> str:
+    """Generates unique payment reference formatted as WP-YYYYMMDD-XXXXXX."""
+    date_str = timezone.now().strftime('%Y%m%d')
+    suffix = uuid.uuid4().hex[:6].upper()
+    return f"WP-{date_str}-{suffix}"
+
+
+def generate_work_order_invoice_number() -> str:
+    """Generates unique invoice reference formatted as INV-WO-YYYYMMDD-XXXXXX."""
+    date_str = timezone.now().strftime('%Y%m%d')
+    suffix = uuid.uuid4().hex[:6].upper()
+    return f"INV-WO-{date_str}-{suffix}"
+
+
+class WorkOrderInvoiceStatusChoices(models.TextChoices):
+    DRAFT = 'DRAFT', 'Draft'
+    ISSUED = 'ISSUED', 'Issued'
+    PAID = 'PAID', 'Paid'
+    VOID = 'VOID', 'Void'
+
+
 class ChangeOrderStatusChoices(models.TextChoices):
     DRAFT = 'DRAFT', 'Draft'
     SUBMITTED = 'SUBMITTED', 'Submitted (Awaiting Approval)'
@@ -1131,6 +1190,12 @@ class WorkOrder(BaseUUIDModel):
         default=WorkOrderStatusChoices.ASSIGNED,
         db_index=True,
     )
+    settlement_status = models.CharField(
+        max_length=30,
+        choices=WorkOrderSettlementStatusChoices.choices,
+        default=WorkOrderSettlementStatusChoices.UNPAID,
+        db_index=True,
+    )
 
     # Operational timestamps
     started_at = models.DateTimeField(null=True, blank=True)
@@ -1203,6 +1268,49 @@ class WorkOrder(BaseUUIDModel):
     @property
     def has_pending_change_orders(self) -> bool:
         return self.change_orders.filter(status=ChangeOrderStatusChoices.SUBMITTED).exists()
+
+    @property
+    def original_quotation_amount(self) -> Decimal:
+        if self.quotation_id and self.quotation:
+            return self.quotation.total_amount
+        return Decimal('0.00')
+
+    @property
+    def verified_deposit_amount(self) -> Decimal:
+        wop_deposit = self.payments.filter(
+            payment_type=WorkOrderPaymentTypeChoices.DEPOSIT,
+            status=WorkOrderPaymentStatusChoices.SUCCESS,
+        ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
+        if wop_deposit > Decimal('0.00'):
+            return wop_deposit.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        if self.quotation_id and self.quotation:
+            if getattr(self.quotation, 'requires_deposit', False) and self.quotation.deposit_status == DepositStatusChoices.PAID:
+                return self.quotation.deposit_amount or Decimal('0.00')
+        return Decimal('0.00')
+
+    @property
+    def verified_balance_paid_amount(self) -> Decimal:
+        res = self.payments.filter(
+            status=WorkOrderPaymentStatusChoices.SUCCESS,
+        ).exclude(
+            payment_type=WorkOrderPaymentTypeChoices.DEPOSIT,
+        ).aggregate(total=models.Sum('amount'))
+        return (res['total'] or Decimal('0.00')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    @property
+    def total_amount_paid(self) -> Decimal:
+        return (self.verified_deposit_amount + self.verified_balance_paid_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    @property
+    def outstanding_balance(self) -> Decimal:
+        diff = self.authorized_total_amount - self.total_amount_paid
+        if diff < Decimal('0.00'):
+            return Decimal('0.00')
+        return diff.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    @property
+    def is_fully_settled(self) -> bool:
+        return self.outstanding_balance == Decimal('0.00')
 
     def clean(self):
         super().clean()
@@ -1776,6 +1884,147 @@ class ChangeOrderLineItem(BaseUUIDModel):
         super().delete(*args, **kwargs)
 
 
+class WorkOrderPayment(BaseUUIDModel):
+    """
+    Immutable ledger record of online and balance payments made towards a WorkOrder.
+    Supports partial payments, full settlements, and multi-gateway reconciliation (Razorpay/Stripe).
+    """
+    work_order = models.ForeignKey(
+        'workshops.WorkOrder',
+        on_delete=models.CASCADE,
+        related_name='payments',
+    )
+    payment_number = models.CharField(
+        max_length=50,
+        unique=True,
+        default=generate_work_order_payment_number,
+        db_index=True,
+    )
+    payment_type = models.CharField(
+        max_length=30,
+        choices=WorkOrderPaymentTypeChoices.choices,
+        default=WorkOrderPaymentTypeChoices.BALANCE,
+    )
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    currency = models.CharField(max_length=10)
+    provider = models.CharField(max_length=30, default='RAZORPAY')
+    status = models.CharField(
+        max_length=30,
+        choices=WorkOrderPaymentStatusChoices.choices,
+        default=WorkOrderPaymentStatusChoices.PENDING,
+        db_index=True,
+    )
+    provider_order_id = models.CharField(max_length=255, blank=True, db_index=True)
+    provider_payment_id = models.CharField(max_length=255, blank=True, db_index=True)
+    provider_signature = models.CharField(max_length=500, blank=True)
+    idempotency_key = models.CharField(max_length=120, blank=True, db_index=True)
+    is_late_payment = models.BooleanField(default=False)
+    error_message = models.TextField(blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='work_order_payments',
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Work Order Payment'
+        verbose_name_plural = 'Work Order Payments'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['work_order', 'status']),
+            models.Index(fields=['provider', 'status']),
+            models.Index(fields=['provider_order_id']),
+            models.Index(fields=['provider_payment_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.payment_number} ({self.currency} {self.amount}) - {self.get_status_display()}"
+
+
+class WorkOrderInvoice(BaseUUIDModel):
+    """
+    Final official commercial/tax invoice issued for a WorkOrder upon settlement.
+    Aggregates original accepted quotation, approved change orders, tax calculations,
+    deposits, balance payments, and remaining balance into an immutable ledger document.
+    """
+    work_order = models.OneToOneField(
+        'workshops.WorkOrder',
+        on_delete=models.PROTECT,
+        related_name='invoice',
+    )
+    invoice_number = models.CharField(
+        max_length=50,
+        unique=True,
+        default=generate_work_order_invoice_number,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=30,
+        choices=WorkOrderInvoiceStatusChoices.choices,
+        default=WorkOrderInvoiceStatusChoices.ISSUED,
+        db_index=True,
+        help_text="Invoice status: DRAFT, ISSUED, PAID, or VOID.",
+    )
+    document_type = models.CharField(
+        max_length=50,
+        default='TAX_INVOICE',
+        help_text="Statutory document classification (e.g. TAX_INVOICE, COMMERCIAL_INVOICE, BILL_OF_SUPPLY).",
+    )
+    issued_at = models.DateTimeField(default=timezone.now)
+    quotation_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    approved_change_orders_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    deposit_paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    balance_paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    total_paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    tax_rate_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    total_authorized_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    currency = models.CharField(max_length=10)
+    is_fully_settled = models.BooleanField(default=False, db_index=True)
+    invoice_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Comprehensive snapshot of line items, labor, parts, tax breakdown, and parties.",
+    )
+
+    @property
+    def subtotal_amount(self) -> Decimal:
+        return max(Decimal('0.00'), self.total_authorized_amount - self.tax_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    @property
+    def total_amount(self) -> Decimal:
+        return self.total_authorized_amount
+
+    @property
+    def amount_due(self) -> Decimal:
+        return self.outstanding_balance
+
+    @property
+    def discount_amount(self) -> Decimal:
+        disc = Decimal('0.00')
+        if self.work_order and self.work_order.quotation:
+            disc += getattr(self.work_order.quotation, 'discount_amount', Decimal('0.00')) or Decimal('0.00')
+        if self.work_order:
+            for co in self.work_order.change_orders.filter(status=ChangeOrderStatusChoices.APPROVED):
+                disc += getattr(co, 'discount_amount', Decimal('0.00')) or Decimal('0.00')
+        return disc.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    class Meta:
+        verbose_name = 'Work Order Invoice'
+        verbose_name_plural = 'Work Order Invoices'
+        ordering = ['-issued_at']
+
+    def __str__(self):
+        return f"{self.invoice_number} ({self.currency} {self.total_authorized_amount}) - Settled: {self.is_fully_settled}"
+
+
 class WorkshopReview(BaseUUIDModel):
     """
     Verified customer rating and review for a completed WorkshopBooking / WorkOrder.
@@ -1926,6 +2175,34 @@ class WorkshopDepositWebhookEvent(BaseUUIDModel):
         return f"{self.provider}:{self.event_type} [{self.event_id}] - Processed: {self.processed}"
 
 
+class WorkshopSettlementWebhookEvent(BaseUUIDModel):
+    """
+    Authoritative audit record of incoming payment gateway webhooks (Razorpay/Stripe)
+    for workshop work order balance settlements. Guarantees idempotent event processing and replay protection.
+    """
+    event_id = models.CharField(max_length=255, unique=True, db_index=True)
+    provider = models.CharField(max_length=50, default='RAZORPAY')
+    event_type = models.CharField(max_length=100)
+    work_order = models.ForeignKey(
+        'workshops.WorkOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='settlement_webhook_events',
+    )
+    processed = models.BooleanField(default=False, db_index=True)
+    payload = models.JSONField(default=dict)
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = 'Workshop Settlement Webhook Event'
+        verbose_name_plural = 'Workshop Settlement Webhook Events'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.provider}:{self.event_type} [{self.event_id}] - Processed: {self.processed}"
+
+
 class SenderTypeChoices(models.TextChoices):
     BUYER = 'BUYER', 'Buyer'
     WORKSHOP = 'WORKSHOP', 'Workshop'
@@ -2012,6 +2289,109 @@ class WorkshopMessage(BaseUUIDModel):
 
     def __str__(self):
         return f"Msg {self.id} by {self.sender_id} [{self.sender_type}] in {self.conversation_id}"
+
+
+class WorkshopRefund(BaseUUIDModel):
+    """
+    Authoritative record of a workshop customer refund.
+    Tied to a WorkshopBooking, and optionally a WorkOrder, WorkshopQuotation, or WorkOrderPayment.
+    Supports idempotent gateway refunds via Razorpay (INR) and Stripe (GBP) with reconciliation.
+    """
+    booking = models.ForeignKey(
+        'workshops.WorkshopBooking',
+        on_delete=models.CASCADE,
+        related_name='refunds',
+    )
+    work_order = models.ForeignKey(
+        'workshops.WorkOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='refunds',
+    )
+    quotation = models.ForeignKey(
+        'workshops.WorkshopQuotation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='refunds',
+    )
+    work_order_payment = models.ForeignKey(
+        'workshops.WorkOrderPayment',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='refunds',
+    )
+    refund_number = models.CharField(
+        max_length=60,
+        unique=True,
+        default=generate_workshop_refund_number,
+        db_index=True,
+        help_text="System-generated unique refund reference (e.g. REF-WB-YYYYMMDD-XXXXXX).",
+    )
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    currency = models.CharField(max_length=10, default='GBP')
+    status = models.CharField(
+        max_length=30,
+        choices=WorkshopRefundStatusChoices.choices,
+        default=WorkshopRefundStatusChoices.PENDING,
+        db_index=True,
+    )
+    gateway_provider = models.CharField(max_length=30, blank=True, default='')
+    gateway_refund_id = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    idempotency_key = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Gateway refund idempotency key preserved across safe retries."
+    )
+    payment_reference = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Gateway charge/payment reference refunded."
+    )
+    reason = models.CharField(max_length=255, blank=True, default='')
+    failure_reason = models.TextField(blank=True, default='')
+    processed_at = models.DateTimeField(null=True, blank=True)
+    reconciliation_attempts = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of background or manual reconciliation attempts executed."
+    )
+    last_reconciliation_at = models.DateTimeField(null=True, blank=True)
+    next_reconciliation_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='workshop_refunds',
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Workshop Refund'
+        verbose_name_plural = 'Workshop Refunds'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['booking', 'status']),
+            models.Index(fields=['work_order', 'status']),
+            models.Index(fields=['gateway_provider', 'status']),
+            models.Index(fields=['refund_number']),
+            models.Index(fields=['gateway_refund_id']),
+            models.Index(fields=['idempotency_key']),
+        ]
+
+    def __str__(self):
+        return f"{self.refund_number} ({self.currency} {self.amount}) - {self.get_status_display()}"
+
 
 
 
