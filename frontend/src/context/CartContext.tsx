@@ -454,8 +454,21 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         return vehicleOnlyResult;
       }
 
+      // ENG-01/ENG-03: no implicit delivery country. Without one, only the local stock check above applies;
+      // the backend would refuse the calculation (DELIVERY_COUNTRY_REQUIRED), so it is not called.
+      const targetCountry = (options?.country || "").trim();
+      if (!targetCountry) {
+        setIsValidating(false);
+        const noCountryResult: CartValidationResult = {
+          isValid: false,
+          issues: [...issues, "Select a delivery country to calculate verified prices, taxes and payment options."],
+          calculatedSummary: null,
+        };
+        setLastValidationResult(noCountryResult);
+        return noCountryResult;
+      }
+
       try {
-        const targetCountry = options?.country || "India";
         const isUK =
           targetCountry.toLowerCase().includes("kingdom") ||
           targetCountry.toLowerCase() === "uk" ||

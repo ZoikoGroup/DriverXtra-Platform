@@ -5225,6 +5225,8 @@ export interface PaymentMethodOption {
   quoted_price?: string;
   is_available: boolean;
   reason?: string | null;
+  // ENG-01: machine-readable reason when unavailable (e.g. MARKET_NOT_SPECIFIED, CURRENCY_NOT_SUPPORTED)
+  reason_code?: string | null;
   description: string;
 }
 

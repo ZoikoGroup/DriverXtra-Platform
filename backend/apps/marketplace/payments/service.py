@@ -20,6 +20,7 @@ from apps.marketplace.models import (
 from apps.marketplace.services import adjust_stock
 from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
 from apps.marketplace.payments.stripe_provider import StripePaymentProvider
+from apps.marketplace.payments import chargebacks
 from platform_core.audit.writer import record_audit_entry
 
 logger = logging.getLogger(__name__)
@@ -257,32 +258,115 @@ class PaymentService:
 
         return expired_count
 
+    # Machine-readable reasons a payment method is unavailable (ENG-01, fail-closed availability).
+    REASON_MARKET_NOT_SPECIFIED = 'MARKET_NOT_SPECIFIED'
+    REASON_MARKET_NOT_ENABLED = 'MARKET_NOT_ENABLED'
+    REASON_CURRENCY_NOT_SUPPORTED = 'CURRENCY_NOT_SUPPORTED'
+    REASON_PROVIDER_NOT_CONFIGURED = 'PROVIDER_NOT_CONFIGURED'
+    REASON_COD_NOT_ELIGIBLE = 'COD_NOT_ELIGIBLE'
+
+    @staticmethod
+    def _is_blank(value: Optional[str]) -> bool:
+        return not (value or '').strip()
+
+    @classmethod
+    def _market_unavailability(cls, country: Optional[str], currency: Optional[str]) -> Optional[Tuple[str, str]]:
+        """
+        Returns (reason_code, reason) when checkout cannot run for this destination/currency, else None.
+        Reuses the existing checkout destination rules in apps.marketplace.pricing (no separate market list).
+        """
+        if cls._is_blank(country):
+            return cls.REASON_MARKET_NOT_SPECIFIED, "A delivery country is required to determine available payment methods."
+
+        from apps.marketplace.pricing import (
+            PriceCalculationError,
+            normalize_destination_country,
+            SUPPORTED_DESTINATION_CURRENCIES,
+        )
+        try:
+            country_code, canonical_country = normalize_destination_country(country)
+        except PriceCalculationError as exc:
+            return cls.REASON_MARKET_NOT_ENABLED, str(exc)
+
+        required_currency = SUPPORTED_DESTINATION_CURRENCIES[country_code]
+        requested = (currency or '').strip().upper()
+        if requested != required_currency:
+            return (
+                cls.REASON_CURRENCY_NOT_SUPPORTED,
+                f"{requested or 'The requested currency'} cannot be used for delivery to {canonical_country}; "
+                f"orders to {canonical_country} must use {required_currency}.",
+            )
+        return None
+
+    @classmethod
+    def get_online_payment_availability(cls, country: Optional[str], currency: Optional[str]) -> Dict[str, Any]:
+        """
+        Fail-closed availability of the online payment method for a destination country and currency.
+        Online payment is available only when the destination is supported, the currency is the one that
+        destination requires, the resolved provider can actually charge that currency, and the provider is
+        configured (or in a permitted test environment).
+        """
+        requested = (currency or '').strip().upper()
+        if cls._is_blank(country):
+            # No implicit default country: choose the provider by currency only for labelling purposes.
+            provider = RazorpayPaymentProvider() if requested == 'INR' else StripePaymentProvider()
+        else:
+            provider = cls.get_provider_for_currency_and_country(currency=requested, country=country)
+
+        def result(available: bool, code: Optional[str], reason: Optional[str]) -> Dict[str, Any]:
+            return {"provider": provider, "is_available": available, "reason_code": code, "reason": reason}
+
+        if cls._is_blank(country):
+            return result(False, cls.REASON_MARKET_NOT_SPECIFIED,
+                          "A delivery country is required to determine available payment methods.")
+
+        if not provider.supports_currency(requested):
+            label = 'Razorpay' if provider.provider_name == 'RAZORPAY' else 'Card payment via Stripe'
+            supported = ', '.join(sorted(provider.supported_currencies))
+            return result(False, cls.REASON_CURRENCY_NOT_SUPPORTED,
+                          f"{label} is not available for {requested or 'this currency'}; supported: {supported}.")
+
+        market = cls._market_unavailability(country, requested)
+        if market:
+            return result(False, *market)
+
+        if not provider.is_ready:
+            if provider.provider_name == 'RAZORPAY':
+                reason = "Online payment via Razorpay is currently not configured on this server."
+            else:
+                reason = "Online card payment is currently not configured on this server."
+            return result(False, cls.REASON_PROVIDER_NOT_CONFIGURED, reason)
+
+        return result(True, None, None)
+
     @classmethod
     def get_available_payment_methods(
         cls,
-        country: str,
-        currency: str,
+        country: Optional[str],
+        currency: Optional[str],
         amount: Decimal,
     ) -> List[Dict[str, Any]]:
         """
         Returns list of available payment options for a given country, currency, and total amount.
+        A method is reported available only if checkout can actually complete with it (fail closed).
         """
-        country_code = cls.normalize_country_code(country)
+        currency = (currency or '').strip().upper()
         methods = []
 
         # 1. Online Provider
-        online_provider = cls.get_provider_for_currency_and_country(currency=currency, country=country)
-        is_online_ready = bool(getattr(online_provider, 'is_configured', False) or getattr(online_provider, 'test_mode', False))
+        online = cls.get_online_payment_availability(country=country, currency=currency)
+        online_provider = online["provider"]
 
-        if country_code == 'IN' or currency == 'INR':
+        if online_provider.provider_name == 'RAZORPAY':
             methods_info = online_provider.get_account_methods() if hasattr(online_provider, 'get_account_methods') else {}
             methods.append({
                 "code": PaymentMethodChoices.ONLINE,
                 "provider": "RAZORPAY",
                 "name": "Online Payment (UPI, Cards, NetBanking)",
                 "currency": "INR",
-                "is_available": is_online_ready,
-                "reason": None if is_online_ready else "Online payment via Razorpay is currently not configured on this server.",
+                "is_available": online["is_available"],
+                "reason": online["reason"],
+                "reason_code": online["reason_code"],
                 "description": "Secure instant checkout via Razorpay supporting all Indian banks and UPI.",
                 "methods_info": methods_info,
             })
@@ -292,13 +376,20 @@ class PaymentService:
                 "provider": "STRIPE",
                 "name": "Card Payment (Stripe / Apple Pay / Google Pay)",
                 "currency": "GBP",
-                "is_available": is_online_ready,
-                "reason": None if is_online_ready else "Online card payment is currently not configured on this server.",
+                "is_available": online["is_available"],
+                "reason": online["reason"],
+                "reason_code": online["reason_code"],
                 "description": "Secure card checkout via Stripe supporting UK debit/credit cards and digital wallets.",
             })
 
-        # 2. Cash on Delivery (COD)
-        is_eligible, reason = cls.check_cod_eligibility(country=country, currency=currency, amount=amount)
+        # 2. Cash on Delivery (COD): existing COD rules unchanged; additionally unavailable when the
+        # destination/currency cannot be checked out at all.
+        market = cls._market_unavailability(country, currency)
+        if market:
+            is_eligible, reason_code, reason = False, market[0], market[1]
+        else:
+            is_eligible, reason = cls.check_cod_eligibility(country=country, currency=currency, amount=amount)
+            reason_code = None if is_eligible else cls.REASON_COD_NOT_ELIGIBLE
         methods.append({
             "code": PaymentMethodChoices.COD,
             "provider": "COD",
@@ -306,6 +397,7 @@ class PaymentService:
             "currency": currency,
             "is_available": is_eligible,
             "reason": reason,
+            "reason_code": reason_code,
             "description": "Pay in cash or card to courier upon physical package delivery.",
         })
 
@@ -520,6 +612,7 @@ class PaymentService:
         order_number = None
         refund_obj = None
         gateway_refund_id = None
+        dispute_unmatched_reason = None
 
         if p_name == 'RAZORPAY':
             # Razorpay order & refund payload inspection
@@ -570,6 +663,10 @@ class PaymentService:
                     refund_obj = Refund.objects.filter(gateway_refund_id=gateway_refund_id).first()
                 if not refund_obj and rfnd_num:
                     refund_obj = Refund.objects.filter(refund_number=rfnd_num).first()
+            elif chargebacks.is_dispute_event(p_name, event_type) or obj_type == 'dispute':
+                # G17a: disputes carry no order metadata; link via PaymentIntent -> Order.payment_reference.
+                order, dispute_unmatched_reason = chargebacks.resolve_order(data_obj)
+                pi_id = None  # resolution is final here: no generic fallback may override an unmatched result
             elif obj_type == 'charge' or 'refunds' in data_obj or str(data_obj.get('id', '')).startswith('ch_'):
                 refunds_data = data_obj.get('refunds', {}).get('data', [])
                 if refunds_data:
@@ -620,6 +717,16 @@ class PaymentService:
             locked_order = None
             if order:
                 locked_order = Order.objects.select_for_update().filter(id=order.id).first()
+
+            # G17a: Stripe chargeback intake. Record only: no money movement, no order/payment state change.
+            if chargebacks.is_dispute_event(p_name, event_type):
+                if locked_order is not None and webhook_record.order_id != locked_order.id:
+                    webhook_record.order = locked_order  # an earlier unprocessed delivery may lack the link
+                    webhook_record.save(update_fields=['order'])
+                chargebacks.record_dispute_event(
+                    webhook_record, locked_order, event_type, event_id, payload,
+                    unmatched_reason=dispute_unmatched_reason,
+                )
 
             # Process Success Event
             if event_type in (

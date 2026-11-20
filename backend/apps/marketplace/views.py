@@ -1971,10 +1971,19 @@ class OrderCheckoutView(views.APIView):
 
         # Destination Country & Required Currency Resolution
         explicit_currency = (data.get('currency', '') or request.data.get('currency', '')).strip().upper()
+        # ENG-03: an explicit delivery country is required for preview and order creation. There is no
+        # implicit India/UK fallback; this check runs before any order, payment record or stock change.
         if not shipping_country_input:
-            shipping_country_raw = 'United Kingdom' if explicit_currency == 'GBP' else 'India'
-        else:
-            shipping_country_raw = shipping_country_input
+            return Response(
+                {
+                    "status": "error",
+                    "code": "DELIVERY_COUNTRY_REQUIRED",
+                    "error": "A delivery country is required.",
+                    "field_errors": {"shipping_country": "A delivery country is required."},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        shipping_country_raw = shipping_country_input
 
         try:
             country_code, canonical_country = normalize_destination_country(shipping_country_raw)
@@ -2279,6 +2288,24 @@ class OrderCheckoutView(views.APIView):
                             status=status.HTTP_400_BAD_REQUEST,
                         )
 
+                # ENG-01 fail-closed guard: never create an order (or reserve stock) for an online payment
+                # that cannot be taken for this destination and currency.
+                if payment_method == PaymentMethodChoices.ONLINE:
+                    online_option = next(
+                        (m for m in available_payment_methods if m.get("code") == PaymentMethodChoices.ONLINE),
+                        None,
+                    )
+                    if not online_option or not online_option.get("is_available"):
+                        return Response(
+                            {
+                                "status": "error",
+                                "code": "PAYMENT_METHOD_UNAVAILABLE",
+                                "reason_code": (online_option or {}).get("reason_code"),
+                                "error": f"Online payment is not available: {(online_option or {}).get('reason') or 'no online payment provider for this order.'}",
+                                "available_payment_methods": available_payment_methods,
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
 
 
                 # 5. Authoritative Price / Tax Change Guard
@@ -2707,6 +2734,23 @@ class SellerOrderStatusUpdateView(views.APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # ENG-05a: a seller may not change the order-level status of a shared (multi-seller) order, because
+        # that would act on other sellers' items (e.g. cancel and restock them). Shared orders progress
+        # through per-seller shipments, which already synchronize the order status.
+        from apps.marketplace.returns.service import order_item_ids_outside_seller
+        if order_item_ids_outside_seller(user, order):
+            return Response(
+                {
+                    "status": "error",
+                    "code": "MULTI_SELLER_ORDER_STATUS_LOCKED",
+                    "error": (
+                        "This order contains items from other sellers. Its status is updated automatically "
+                        "from each seller's shipments and cannot be changed by one seller."
+                    ),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         serializer = OrderStatusUpdateSerializer(data=request.data, context={'order': order})
         serializer.is_valid(raise_exception=True)
 
@@ -3024,10 +3068,18 @@ class AvailablePaymentMethodsView(views.APIView):
 
     def get(self, request):
         from decimal import Decimal
-        country = request.query_params.get('country', 'India').strip()
-        country_code = PaymentService.normalize_country_code(country)
-        default_curr = 'GBP' if country_code == 'GB' else 'INR'
-        currency = request.query_params.get('currency', default_curr).strip().upper()
+        from apps.marketplace.pricing import PriceCalculationError, get_required_currency_for_country
+
+        # ENG-01: no implicit default country. Without a country every method is reported unavailable
+        # (reason_code MARKET_NOT_SPECIFIED) instead of silently assuming India.
+        country = request.query_params.get('country', '').strip()
+        default_curr = ''
+        if country:
+            try:
+                default_curr = get_required_currency_for_country(country)
+            except PriceCalculationError:
+                default_curr = ''
+        currency = (request.query_params.get('currency', '') or default_curr).strip().upper()
         amount_str = request.query_params.get('amount', '0.00').strip()
         try:
             amount = Decimal(amount_str)
@@ -3035,14 +3087,14 @@ class AvailablePaymentMethodsView(views.APIView):
             amount = Decimal('0.00')
 
         methods = PaymentService.get_available_payment_methods(
-            country=country,
+            country=country or None,
             currency=currency,
             amount=amount,
         )
         return Response({
             "status": "success",
-            "country": PaymentService.normalize_country_code(country),
-            "currency": currency,
+            "country": PaymentService.normalize_country_code(country) if country else None,
+            "currency": currency or None,
             "amount": str(amount),
             "payment_methods": methods,
         }, status=status.HTTP_200_OK)
@@ -4278,7 +4330,26 @@ class OrderRefundSummaryView(views.APIView):
 
         summary = RefundService.get_order_refund_summary(order)
         summary["refunds"] = RefundSerializer(order.refunds.all().order_by('-created_at'), many=True).data
+        # G17a: chargeback state is internal; expose it to refund/finance staff only (buyer/seller notice deferred).
+        if _has_permission(request.user, 'order.refund') or _has_permission(request.user, 'finance.payout'):
+            from apps.marketplace.payments import chargebacks
+            disputes = chargebacks.dispute_states(order)
+            blocking = [d for d in disputes if d["blocks_refunds"]]
+            summary["chargebacks"] = disputes
+            summary["chargeback_refund_block_code"] = (
+                ("CHARGEBACK_LOST" if any(d["state"] == chargebacks.STATE_LOST for d in blocking)
+                 else "CHARGEBACK_OPEN") if blocking else None
+            )
         return Response(summary, status=status.HTTP_200_OK)
+
+
+def _refund_error_body(exc, msg):
+    """400 body for refund actions: existing message, plus a machine-readable code when the service set one
+    (e.g. G17a CHARGEBACK_OPEN / CHARGEBACK_LOST, ENG-05a seller-share codes). Additive only."""
+    body = {"error": msg}
+    if getattr(exc, 'code', None):
+        body["code"] = exc.code
+    return body
 
 
 class AdminOrderRefundCreateView(views.APIView):
@@ -4337,7 +4408,7 @@ class AdminOrderRefundCreateView(views.APIView):
             msg = e.message if hasattr(e, 'message') else str(e)
             if "permission denied" in msg.lower():
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
-            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(_refund_error_body(e, msg), status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminRefundListView(generics.ListAPIView):
@@ -4391,7 +4462,7 @@ class AdminRefundProcessView(views.APIView):
             msg = e.message if hasattr(e, 'message') else str(e)
             if "permission denied" in msg.lower():
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
-            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(_refund_error_body(e, msg), status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminRefundApproveView(views.APIView):
@@ -4423,7 +4494,7 @@ class AdminRefundApproveView(views.APIView):
             msg = e.message if hasattr(e, 'message') else str(e)
             if "permission denied" in msg.lower():
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
-            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(_refund_error_body(e, msg), status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminRefundRejectView(views.APIView):
@@ -4488,7 +4559,7 @@ class AdminRefundDispatchView(views.APIView):
             msg = e.message if hasattr(e, 'message') else str(e)
             if "permission denied" in msg.lower():
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
-            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(_refund_error_body(e, msg), status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminRefundReconcileView(views.APIView):
@@ -4715,7 +4786,10 @@ class SellerOrderRecordRefundView(views.APIView):
             msg = e.message if hasattr(e, 'message') else str(e)
             if "permission denied" in msg.lower():
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
-            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+            body = {"error": msg}
+            if getattr(e, 'code', None):
+                body["code"] = e.code
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
 
 class SellerOrderRequestPlatformRefundView(views.APIView):
@@ -4763,6 +4837,7 @@ class SellerOrderRequestPlatformRefundView(views.APIView):
                 refund_method=RefundMethodChoices.ORIGINAL_PAYMENT,
                 notes=data.get('notes', ''),
                 auto_process=False,
+                enforce_seller_share=True,  # ENG-05a: seller-initiated request limited to own share
             )
             return Response({
                 "status": "success",
@@ -4773,7 +4848,10 @@ class SellerOrderRequestPlatformRefundView(views.APIView):
             msg = e.message if hasattr(e, 'message') else str(e)
             if "permission denied" in msg.lower():
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
-            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+            body = {"error": msg}
+            if getattr(e, 'code', None):
+                body["code"] = e.code
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AdminDisputeListView(generics.ListAPIView):

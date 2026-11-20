@@ -2311,7 +2311,10 @@ class ApprovalRequestExecuteView(APIView):
             msg = exc.message if hasattr(exc, 'message') else str(exc)
             if "permission denied" in msg.lower():
                 return Response({"detail": msg}, status=status.HTTP_403_FORBIDDEN)
-            return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+            body = {"error": msg}
+            if getattr(exc, 'code', None):  # G17a: e.g. CHARGEBACK_OPEN / CHARGEBACK_LOST (additive)
+                body["code"] = exc.code
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

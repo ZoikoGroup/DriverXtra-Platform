@@ -36,6 +36,7 @@ from apps.marketplace.models import (
 )
 from apps.marketplace.services import adjust_stock
 from platform_core.audit.writer import record_audit_entry, record_denied_audit_entry
+from apps.marketplace.payments import chargebacks
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,75 @@ def _is_seller_authorized_for_order(user, order: Order, allow_staff: bool = True
     return order.items.filter(
         models.Q(listing__seller=user) | models.Q(listing__organisation_id__in=user_org_ids)
     ).exists()
+
+
+# --- G17a: Stripe chargeback refund guard --------------------------------------------------------------
+
+def _guard_chargeback(order: Order, actor: Any, operation: str, action: str,
+                      refund: Optional['Refund'] = None, amount: Optional[Decimal] = None) -> None:
+    """Fail closed while a Stripe chargeback blocks refunds (open or lost). Call with the order row locked.
+
+    The refused attempt is recorded autonomously (survives the rollback) so the evidence is not lost.
+    Existing refunds are never modified here.
+    """
+    try:
+        chargebacks.assert_refunds_not_blocked(order, operation)
+    except chargebacks.ChargebackRefundBlocked as blocked:
+        record_denied_audit_entry(
+            action=action,
+            resource_type="Refund" if refund is not None else "Order",
+            resource_id=str(refund.id) if refund is not None else str(order.id),
+            reason_code=blocked.code,
+            actor_id=getattr(actor, 'id', None),
+            metadata={
+                "order_number": order.order_number,
+                "refund_number": refund.refund_number if refund is not None else None,
+                "attempted_amount": str(amount if amount is not None else (refund.amount if refund else '')),
+                "disputes": [{k: d[k] for k in ("dispute_id", "state", "status")} for d in blocked.disputes],
+            },
+        )
+        raise
+
+
+# --- ENG-05a: seller ownership inside shared (multi-seller) orders ------------------------------------
+
+# Refund statuses that consume refundable balance (same set as get_order_refund_summary).
+_ACTIVE_REFUND_STATUSES = (
+    RefundStatusChoices.PENDING,
+    RefundStatusChoices.PROCESSING,
+    RefundStatusChoices.PROCESSING_UNKNOWN,
+    RefundStatusChoices.SUCCEEDED,
+)
+
+
+class SellerRefundShareViolation(DjangoValidationError):
+    """Seller refund rejected by the shared-order share rules. Carries a machine-readable code."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message, code=code)
+
+
+def seller_owned_item_ids(user, order: Order) -> set:
+    """IDs of order items the user sells directly or through an organisation they own/administer.
+    Items whose listing no longer exists belong to nobody (fail closed)."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return set()
+    from apps.organisations.models import OrganisationMembership, OrganisationRoleChoices
+    org_ids = set(OrganisationMembership.objects.filter(
+        user=user,
+        is_active=True,
+        role__in=[OrganisationRoleChoices.OWNER, OrganisationRoleChoices.ADMIN],
+    ).values_list('organisation_id', flat=True))
+    return set(order.items.filter(
+        models.Q(listing__seller=user) | models.Q(listing__organisation_id__in=org_ids)
+    ).values_list('id', flat=True))
+
+
+def order_item_ids_outside_seller(user, order: Order) -> set:
+    """IDs of order items NOT owned by the user. Non-empty means the order is shared with another
+    seller (or contains an item whose seller can no longer be determined) from this user's view."""
+    all_ids = set(order.items.values_list('id', flat=True))
+    return all_ids - seller_owned_item_ids(user, order)
 
 
 def _is_seller_authorized_for_return(user, return_request: ReturnRequest) -> bool:
@@ -619,6 +689,93 @@ class RefundService:
         }
 
     @classmethod
+    def enforce_seller_refund_share(
+        cls,
+        locked_order: Order,
+        actor: Any,
+        amount: Decimal,
+        return_request: Optional[ReturnRequest] = None,
+    ) -> None:
+        """ENG-05a: a seller may refund at most their own items' share of a shared (multi-seller) order.
+
+        Must be called inside the caller's transaction after the order row is locked with
+        select_for_update(), so concurrent refunds on the same order are serialized and the balance read
+        here cannot be overtaken. Single-seller orders (the actor owns every item) are unaffected.
+
+        Existing refunds are attributed using existing links only, most specific first:
+        return_request.order_item -> return_request.seller -> dispute.seller -> created_by.
+        Any active refund that cannot be attributed to exactly one side fails the request closed.
+        """
+        owned = seller_owned_item_ids(actor, locked_order)
+        all_items = {item.id: item for item in locked_order.items.all()}
+        others = set(all_items) - owned
+        if not others:
+            return  # single-seller from this actor's view: existing order-level rules apply unchanged
+        if not owned:
+            raise SellerRefundShareViolation(
+                'SELLER_UNAUTHORIZED_FOR_ORDER',
+                "Permission denied: you do not sell any item in this order.",
+            )
+
+        if return_request is not None and return_request.order_item_id not in owned:
+            raise SellerRefundShareViolation(
+                'REFUND_NOT_SELLER_ITEM',
+                "The linked return request does not concern one of your items in this shared order.",
+            )
+
+        ownership_cache: Dict[Any, set] = {}
+
+        def side_of_user(user_id) -> str:
+            if user_id not in ownership_cache:
+                from apps.identity.models import User
+                user = User.objects.filter(id=user_id).first()
+                ownership_cache[user_id] = seller_owned_item_ids(user, locked_order) if user else set()
+            user_items = ownership_cache[user_id]
+            if user_items and user_items <= owned:
+                return 'own'
+            if user_items and not (user_items & owned):
+                return 'other'
+            return 'ambiguous'
+
+        def side_of_refund(refund: Refund) -> str:
+            rr = refund.return_request
+            if rr is not None and rr.order_item_id:
+                if rr.order_item_id in owned:
+                    return 'own'
+                return 'other' if rr.order_item_id in others else 'ambiguous'
+            for user_id in (
+                rr.seller_id if rr is not None else None,
+                refund.dispute.seller_id if refund.dispute_id else None,
+                refund.created_by_id,
+            ):
+                if user_id:
+                    return side_of_user(user_id)
+            return 'ambiguous'
+
+        already_refunded_own = Decimal('0.00')
+        for existing in locked_order.refunds.filter(status__in=_ACTIVE_REFUND_STATUSES).select_related(
+            'return_request', 'dispute',
+        ):
+            side = side_of_refund(existing)
+            if side == 'ambiguous':
+                raise SellerRefundShareViolation(
+                    'REFUND_ATTRIBUTION_AMBIGUOUS',
+                    f"Refund {existing.refund_number} on this shared order cannot be attributed to a single seller; "
+                    "seller refunds are blocked until platform operations resolve it.",
+                )
+            if side == 'own':
+                already_refunded_own += existing.amount
+
+        own_total = sum((all_items[item_id].total_amount for item_id in owned), Decimal('0.00'))
+        remaining = max(Decimal('0.00'), (own_total - already_refunded_own).quantize(Decimal('0.01')))
+        if amount > remaining:
+            raise SellerRefundShareViolation(
+                'SELLER_REFUND_LIMIT_EXCEEDED',
+                f"Requested refund amount ({locked_order.currency} {amount}) exceeds your remaining refundable share "
+                f"of this shared order ({locked_order.currency} {remaining}).",
+            )
+
+    @classmethod
     def create_refund(
         cls,
         order: Order,
@@ -630,11 +787,14 @@ class RefundService:
         refund_method: Optional[str] = None,
         notes: str = '',
         auto_process: bool = False,
+        enforce_seller_share: bool = False,
     ) -> Refund:
         """
         Creates a refund request or record.
         Strictly enforces that refund cannot exceed remaining paid balance.
         Never pretends a refund was paid if automated gateway has not processed it.
+        enforce_seller_share=True (seller-initiated requests only) additionally limits the amount to the
+        actor's own share of a shared multi-seller order (ENG-05a). Admin/dispute callers are unaffected.
         """
         if hasattr(order, 'vehicle') or getattr(order, 'order_number', '').startswith('VO-'):
             raise DjangoValidationError("Vehicle orders use offline direct payment between buyer and dealer and are not eligible for platform payment gateway refunds.")
@@ -669,6 +829,8 @@ class RefundService:
                     f"Cannot issue a new refund for order {locked_order.order_number}: an ambiguous refund is currently awaiting gateway reconciliation. "
                     "Please resolve the pending transaction before issuing additional refunds."
                 )
+            # G17a: no new refund (admin, seller platform request or auto-processed) while a chargeback blocks.
+            _guard_chargeback(locked_order, actor, "create a refund", "marketplace:refund.create", amount=amt)
             summary = cls.get_order_refund_summary(locked_order)
             if not summary['is_paid']:
                 if locked_order.payment_method == 'COD':
@@ -683,6 +845,9 @@ class RefundService:
                 raise DjangoValidationError(
                     f"Requested refund amount ({locked_order.currency} {amt}) exceeds maximum available refundable balance ({locked_order.currency} {summary['available_refundable']})."
                 )
+
+            if enforce_seller_share:
+                cls.enforce_seller_refund_share(locked_order, actor, amt, return_request)
 
             refund_num = f"REF-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
@@ -802,6 +967,15 @@ class RefundService:
                     f"Requested refund amount ({locked_order.currency} {amt}) exceeds maximum available refundable balance ({locked_order.currency} {summary['available_refundable']})."
                 )
 
+            # ENG-05a: on shared orders a seller may only refund their own share (checked under the order lock).
+            if not _is_staff_or_admin(actor):
+                cls.enforce_seller_refund_share(locked_order, actor, amt, return_request)
+
+            # G17a (decision 4): this endpoint only records a payment the seller attests is already completed
+            # (mandatory transaction reference); it never initiates money movement, so it stays available during
+            # an open or lost chargeback. Share and balance checks above still apply; the state is evidenced below.
+            chargeback_states = chargebacks.dispute_states(locked_order)
+
             refund_num = f"REF-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
             formatted_notes = notes or ''
@@ -844,6 +1018,9 @@ class RefundService:
                     "transaction_reference": txn_ref,
                     "method": refund.refund_method,
                     "status": "PROCESSING",
+                    **({"chargebacks_at_recording": chargeback_states,
+                        "recorded_while_chargeback_blocks": any(d["blocks_refunds"] for d in chargeback_states)}
+                       if chargeback_states else {}),
                 },
             )
 
@@ -881,8 +1058,9 @@ class RefundService:
             raise DjangoValidationError(f"Cannot confirm receipt for refund with status '{refund.status}'. Expected 'PROCESSING'.")
 
         with transaction.atomic():
-            locked_refund = Refund.objects.select_for_update().get(id=refund.id)
+            # G17a: order -> refund lock order, consistent with the webhook, approve and dispatch paths (no deadlock).
             locked_order = Order.objects.select_for_update().get(id=order.id)
+            locked_refund = Refund.objects.select_for_update().get(id=refund.id)
 
             locked_refund.status = RefundStatusChoices.SUCCEEDED
             locked_refund.processed_at = timezone.now()
@@ -944,6 +1122,14 @@ class RefundService:
             )
 
         with transaction.atomic():
+            # G17a (decision 2): settling a pending/approved refund is a dispatch for non-gateway methods. Lock the
+            # order (same order -> refund lock order as the webhook) and block while a chargeback blocks refunds.
+            # A seller-direct refund records a payment the seller already completed, so its completion stays allowed.
+            locked_order = Order.objects.select_for_update().get(id=refund.order_id)
+            if refund.gateway_provider != 'SELLER_DIRECT':
+                _guard_chargeback(locked_order, actor, "settle refund " + refund.refund_number,
+                                  "marketplace:refund.process", refund=refund)
+
             refund.status = RefundStatusChoices.SUCCEEDED
             refund.processed_at = timezone.now()
             if gateway_reference:
@@ -1052,6 +1238,12 @@ class RefundService:
         from apps.identity.approval_service import ApprovalService
         from apps.identity.models import ApprovalRequest, ApprovalStatusChoices
 
+        # G17a (decision 2): refuse before any maker-checker request is created. Re-checked under lock below.
+        # (An already-succeeded refund keeps its existing idempotent return.)
+        if refund.status != RefundStatusChoices.SUCCEEDED:
+            _guard_chargeback(refund.order, actor, "dispatch refund " + refund.refund_number,
+                              "marketplace:refund.dispatch", refund=refund)
+
         # Check Maker-Checker requirement if amount exceeds dual-authorization threshold
         if ApprovalService.is_approval_required(action_type='REFUND_DISPATCH', amount=refund.amount, currency=refund.currency):
             if approved_request is None:
@@ -1120,6 +1312,8 @@ class RefundService:
                 )
 
         with transaction.atomic():
+            # G17a: lock the order before the refund (same lock order as the webhook) for the chargeback guard.
+            locked_order_for_guard = Order.objects.select_for_update().get(id=refund.order_id)
             locked_refund = Refund.objects.select_for_update().select_related('order').get(id=refund.id)
 
             # Idempotency check: if already succeeded, do not dispatch again
@@ -1140,6 +1334,10 @@ class RefundService:
 
             if locked_refund.status == RefundStatusChoices.CANCELLED:
                 raise DjangoValidationError(f"Cannot dispatch cancelled refund {locked_refund.refund_number}.")
+
+            # G17a (decision 2): authoritative check under the order lock, before any state change or gateway call.
+            _guard_chargeback(locked_order_for_guard, actor, "dispatch refund " + locked_refund.refund_number,
+                              "marketplace:refund.dispatch", refund=locked_refund)
 
             if locked_refund.refund_method != RefundMethodChoices.ORIGINAL_PAYMENT:
                 return cls.process_refund(locked_refund, actor, notes="Settled non-gateway refund.")
@@ -1964,11 +2162,16 @@ class RefundService:
             raise DjangoValidationError("Permission denied: You do not have the 'order.refund' permission.")
 
         with transaction.atomic():
+            # G17a (decision 2): order lock first (same lock order as the webhook), then refuse approval while a
+            # chargeback blocks refunds, before anything about the refund is changed.
+            locked_order = Order.objects.select_for_update().get(id=refund.order_id)
             locked = Refund.objects.select_for_update().get(id=refund.id)
             if locked.status not in (RefundStatusChoices.PENDING, RefundStatusChoices.FAILED):
                 raise DjangoValidationError(
                     f"Cannot approve refund {locked.refund_number} with status '{locked.status}'."
                 )
+            _guard_chargeback(locked_order, actor, "approve refund " + locked.refund_number,
+                              "marketplace:refund.approve", refund=locked)
 
             locked.approved_by = actor
             if notes:
