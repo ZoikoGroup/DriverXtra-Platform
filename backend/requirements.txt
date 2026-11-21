@@ -12,3 +12,5 @@ channels>=4.0.0
 
 daphne>=4.0.0
 reportlab>=4.0.0
+celery>=5.3.6
+redis>=5.0.1

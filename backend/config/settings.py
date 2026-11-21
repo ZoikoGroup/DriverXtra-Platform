@@ -429,6 +429,14 @@ STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "pk_test_placeholde
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "sk_test_placeholder_secret")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "whsec_test_placeholder_secret")
 
+# Advertising Payment Gates (Disabled until formal tax and accounting signoff)
+LIVE_ADVERTISING_PAYMENTS_ENABLED = os.getenv("LIVE_ADVERTISING_PAYMENTS_ENABLED", "False").lower() in ("true", "1", "yes")
+LIVE_ADVERTISING_CHARGES_ENABLED = os.getenv(
+    "LIVE_ADVERTISING_CHARGES_ENABLED",
+    str(LIVE_ADVERTISING_PAYMENTS_ENABLED)
+).lower() in ("true", "1", "yes")
+LIVE_ADVERTISING_REFUNDS_ENABLED = os.getenv("LIVE_ADVERTISING_REFUNDS_ENABLED", "False").lower() in ("true", "1", "yes")
+
 # Cash on Delivery (COD) Rules
 COD_ENABLED = os.getenv("COD_ENABLED", "True").lower() in ("true", "1", "yes")
 COD_ALLOWED_COUNTRIES = [
@@ -476,4 +484,59 @@ MAKER_CHECKER_DEFAULT_THRESHOLD = Decimal(os.getenv("MAKER_CHECKER_DEFAULT_THRES
 # all roles (ADMIN, BUYER, SELLER, WORKSHOP) can authenticate using email and password only.
 # Set MFA_MANDATORY_ENFORCED=True to re-enable mandatory dual-factor login.
 MFA_MANDATORY_ENFORCED = os.getenv("MFA_MANDATORY_ENFORCED", "False").lower() in ("true", "1", "yes")
+
+# =========================================================
+# CELERY & REDIS CONFIGURATION (Phase 7.1)
+# =========================================================
+
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL",
+    os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
+)
+CELERY_RESULT_BACKEND = os.environ.get(
+    "CELERY_RESULT_BACKEND",
+    os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
+)
+
+# JSON-only serialization for safe execution
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+
+# Task acknowledgement, worker resilience and safe retry behaviour
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_DEFAULT_RETRY_DELAY = 60
+CELERY_TASK_MAX_RETRIES = 3
+CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes hard execution limit
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes soft execution limit
+CELERY_RESULT_EXPIRES = 86400  # 24 hours
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+# CELERY BEAT PERIODIC SCHEDULE (Phase 7.1 & 7.2)
+CELERY_BEAT_SCHEDULE = {
+    'recover-pending-bulk-upload-jobs': {
+        'task': 'apps.marketplace.tasks.recover_pending_bulk_upload_jobs_task',
+        'schedule': 600.0,  # every 10 minutes (600s)
+    },
+    'activate-scheduled-advertising-campaigns': {
+        'task': 'apps.marketplace.tasks.activate_scheduled_campaigns_task',
+        'schedule': 300.0,  # every 5 minutes
+    },
+    'recover-held-advertising-campaigns': {
+        'task': 'apps.marketplace.tasks.recover_held_advertising_campaigns_task',
+        'schedule': 300.0,  # every 5 minutes
+    },
+    'expire-completed-advertising-campaigns': {
+        'task': 'apps.marketplace.tasks.expire_completed_campaigns_task',
+        'schedule': 900.0,  # every 15 minutes
+    },
+    'aggregate-campaign-daily-metrics': {
+        'task': 'apps.marketplace.tasks.aggregate_campaign_daily_metrics_task',
+        'schedule': 1800.0,  # every 30 minutes
+    },
+}
 
