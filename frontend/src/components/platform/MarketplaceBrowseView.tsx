@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import Image from "next/image";
 import {
   api,
@@ -17,6 +17,8 @@ import {
   ProductRatingSummary,
   SellerReputationSummary,
   ReviewReportReason,
+  SponsoredFeedItem,
+  SponsoredItemListing,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import {
@@ -51,8 +53,131 @@ import {
   Star,
   ThumbsUp,
   Flag,
+  Megaphone,
 } from "lucide-react";
 import { useCart } from "@/context/CartContext";
+
+function getOrCreateSessionId(): string {
+  if (typeof window === "undefined") return "server-session";
+  let sId = window.sessionStorage.getItem("dx_ad_session_id");
+  if (!sId) {
+    sId = "sess_" + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    window.sessionStorage.setItem("dx_ad_session_id", sId);
+  }
+  return sId;
+}
+
+function SponsoredListingCard({
+  item,
+  onInspect,
+}: {
+  item: SponsoredFeedItem;
+  onInspect: (listing: SponsoredItemListing) => void;
+}) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const impressionSent = useRef(false);
+
+  useEffect(() => {
+    if (!cardRef.current || impressionSent.current) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.5 && !impressionSent.current) {
+            impressionSent.current = true;
+            const sessionId = getOrCreateSessionId();
+            api.marketplace.trackAdvertisingImpression(item.sponsored_listing_id, sessionId).catch(console.error);
+          }
+        });
+      },
+      { threshold: 0.5 }
+    );
+    observer.observe(cardRef.current);
+    return () => observer.disconnect();
+  }, [item.sponsored_listing_id]);
+
+  const handleClick = () => {
+    const sessionId = getOrCreateSessionId();
+    api.marketplace.trackAdvertisingClick(item.sponsored_listing_id, sessionId).catch(console.error);
+    onInspect(item.listing);
+  };
+
+  const listing = item.listing || {};
+  const isVehicle = item.target_type === "VEHICLES";
+  const title =
+    listing.title ||
+    (isVehicle ? `${listing.make || ""} ${listing.model || ""}`.trim() : listing.part?.name) ||
+    "Featured Listing";
+  const price = listing.price ? `£${Number(listing.price).toLocaleString()}` : "Price On Request";
+  const imgUrl = typeof listing.primary_image_url === "string" ? resolveMediaUrl(listing.primary_image_url) : null;
+
+  return (
+    <div
+      ref={cardRef}
+      onClick={handleClick}
+      className="group relative bg-slate-900 border-2 border-amber-400/60 rounded-3xl overflow-hidden shadow-lg hover:shadow-amber-400/10 hover:border-amber-400 transition-all cursor-pointer flex flex-col justify-between"
+    >
+      <div>
+        <div className="relative h-44 bg-slate-950 flex items-center justify-center overflow-hidden">
+          {imgUrl ? (
+            <Image
+              src={imgUrl}
+              alt={title}
+              fill
+              sizes="(max-width: 768px) 100vw, 50vw"
+              className="object-cover group-hover:scale-105 transition-transform duration-300"
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center text-slate-600 gap-1">
+              {isVehicle ? <Car className="w-10 h-10" /> : <Wrench className="w-10 h-10" />}
+              <span className="text-[10px] text-slate-500">Sponsored Dealership Listing</span>
+            </div>
+          )}
+
+          <div className="absolute top-3 left-3 flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-400 text-slate-950 text-xs font-black shadow-md">
+            <Megaphone className="w-3.5 h-3.5" />
+            <span>SPONSORED</span>
+          </div>
+
+          <div className="absolute bottom-3 right-3 px-3 py-1 rounded-xl bg-slate-950/90 text-amber-300 font-black text-sm border border-amber-400/30">
+            {price}
+          </div>
+        </div>
+
+        <div className="p-4 space-y-2">
+          <div className="flex items-center justify-between text-[11px] text-amber-400/90 font-semibold">
+            <span>
+              {isVehicle
+                ? `${listing.year || 2024} • ${
+                    listing.mileage ? `${Number(listing.mileage).toLocaleString()} mi` : "Low Mileage"
+                  }`
+                : String(listing.part_category || "OEM Part")}
+            </span>
+            <span className="text-slate-400">
+              {String(listing.seller_name || listing.organisation_name || "Verified Dealer")}
+            </span>
+          </div>
+          <h4 className="text-sm font-bold text-white group-hover:text-amber-300 transition-colors line-clamp-1">
+            {title}
+          </h4>
+        </div>
+      </div>
+
+      <div className="p-4 pt-0">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleClick();
+          }}
+          className="w-full py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-black rounded-xl transition-all flex items-center justify-center gap-1.5 shadow"
+        >
+          <Eye className="w-3.5 h-3.5" />
+          <span>Inspect Sponsored Listing</span>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 interface MarketplaceBrowseViewProps {
   initialVehicleId?: string;
@@ -75,6 +200,28 @@ export default function MarketplaceBrowseView({
   // Vehicles state
   const [vehicles, setVehicles] = useState<MarketplaceVehicleListing[]>([]);
   const [vehiclesLoading, setVehiclesLoading] = useState(false);
+
+  // Sponsored listings state (Phase 7.2)
+  const [sponsoredItems, setSponsoredItems] = useState<SponsoredFeedItem[]>([]);
+
+  useEffect(() => {
+    let ignore = false;
+    async function loadSponsoredFeed() {
+      try {
+        const type = activeTab === "vehicles" ? "VEHICLES" : "SPARE_PARTS";
+        const feed = await api.marketplace.getSponsoredFeed(type, "GB", 2);
+        if (!ignore) {
+          setSponsoredItems(feed || []);
+        }
+      } catch (err) {
+        console.error("Failed to load sponsored feed", err);
+      }
+    }
+    loadSponsoredFeed();
+    return () => {
+      ignore = true;
+    };
+  }, [activeTab]);
   const [vehicleSearch, setVehicleSearch] = useState("");
   const [selectedMake, setSelectedMake] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
@@ -1004,7 +1151,31 @@ export default function MarketplaceBrowseView({
               </button>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            <>
+              {sponsoredItems.length > 0 && activeTab === "vehicles" && (
+                <div className="mb-6 p-4 rounded-3xl bg-slate-900 border border-amber-400/30 shadow-lg">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                    <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                      Featured & Sponsored Placements
+                    </span>
+                    <span className="text-[10px] text-slate-400">• Verified Dealership Inventory</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {sponsoredItems.map((sItem) => (
+                      <SponsoredListingCard
+                        key={sItem.sponsored_listing_id}
+                        item={sItem}
+                        onInspect={(l) => {
+                          setSelectedVehicle(l as unknown as MarketplaceVehicleListing);
+                          setSelectedVehicleImageIdx(0);
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
               {vehicles.map((v) => (
                 <div
                   key={v.id}
@@ -1139,6 +1310,7 @@ export default function MarketplaceBrowseView({
                 </div>
               ))}
             </div>
+          </>
           )}
         </div>
       )}
@@ -1641,6 +1813,29 @@ export default function MarketplaceBrowseView({
                 </div>
               ) : (
                 <>
+                  {sponsoredItems.length > 0 && activeTab === "parts" && (
+                    <div className="mb-6 p-4 rounded-3xl bg-slate-900 border border-amber-400/30 shadow-lg">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                        <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                          Featured & Sponsored Placements
+                        </span>
+                        <span className="text-[10px] text-slate-400">• Verified Supplier Inventory</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {sponsoredItems.map((sItem) => (
+                          <SponsoredListingCard
+                            key={sItem.sponsored_listing_id}
+                            item={sItem}
+                            onInspect={(l) => {
+                              setSelectedPart(l as unknown as MarketplacePartListing);
+                              setSelectedPartImageIdx(0);
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-5">
                     {parts.map((p) => (
                       <div

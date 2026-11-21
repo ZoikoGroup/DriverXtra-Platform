@@ -2543,5 +2543,697 @@ class VehicleDocumentReviewEvent(BaseUUIDModel):
         return f"DocReview {self.event_type} on Doc {self.document_id} by {self.actor_id if self.actor else 'system'}"
 
 
+# ---------------------------------------------------------------------------
+# Phase 7.1: Dealer Bulk Uploads & B2B Inventory Management
+# ---------------------------------------------------------------------------
+
+
+class BulkUploadTypeChoices(models.TextChoices):
+    VEHICLES = 'VEHICLES', 'Vehicles'
+    SPARE_PARTS = 'SPARE_PARTS', 'Spare Parts'
+
+
+class BulkUploadStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    PARSING = 'PARSING', 'Parsing File'
+    PROCESSING = 'PROCESSING', 'Processing Rows'
+    COMPLETED = 'COMPLETED', 'Completed Successfully'
+    PARTIALLY_FAILED = 'PARTIALLY_FAILED', 'Completed with Errors'
+    FAILED = 'FAILED', 'Failed'
+
+
+class BulkUploadDuplicatePolicy(models.TextChoices):
+    SKIP = 'SKIP', 'Skip Duplicates'
+    FAIL_ROW = 'FAIL_ROW', 'Mark Row as Error'
+    UPDATE = 'UPDATE', 'Update Existing (Stock/Price for Parts)'
+
+
+class BulkUploadJob(BaseUUIDModel):
+    """Tracks asynchronous dealer bulk inventory import operations."""
+
+    seller = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bulk_upload_jobs',
+        help_text="Seller or dealership user who initiated the bulk upload.",
+    )
+    organisation = models.ForeignKey(
+        Organisation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bulk_upload_jobs',
+        help_text="Dealership organisation this inventory belongs to.",
+    )
+    upload_type = models.CharField(
+        max_length=20,
+        choices=BulkUploadTypeChoices.choices,
+        help_text="Type of inventory uploaded (Vehicles vs Spare Parts).",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=BulkUploadStatusChoices.choices,
+        default=BulkUploadStatusChoices.PENDING,
+        db_index=True,
+    )
+    duplicate_policy = models.CharField(
+        max_length=20,
+        choices=BulkUploadDuplicatePolicy.choices,
+        default=BulkUploadDuplicatePolicy.SKIP,
+        help_text="Handling policy for duplicate records detected during import.",
+    )
+    filename = models.CharField(
+        max_length=255,
+        help_text="Original uploaded filename.",
+    )
+    file = models.FileField(
+        upload_to='uploads/bulk_imports/%Y/%m/',
+        blank=True,
+        null=True,
+        help_text="Uploaded CSV or spreadsheet data file.",
+    )
+    file_size_bytes = models.PositiveIntegerField(
+        default=0,
+        help_text="Uploaded file size in bytes.",
+    )
+    total_rows = models.PositiveIntegerField(
+        default=0,
+        help_text="Total number of data rows parsed from the file.",
+    )
+    processed_rows = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of data rows processed so far.",
+    )
+    successful_rows = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of listings successfully created or updated.",
+    )
+    failed_rows = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of data rows that failed validation or creation.",
+    )
+    duplicate_rows = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of duplicate rows skipped or updated.",
+    )
+    started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when batch parsing/processing began.",
+    )
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when batch processing concluded.",
+    )
+    error_summary = models.TextField(
+        blank=True,
+        default='',
+        help_text="High-level failure reason or batch error synopsis.",
+    )
+
+    class Meta:
+        verbose_name = 'Bulk Upload Job'
+        verbose_name_plural = 'Bulk Upload Jobs'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['seller', 'status']),
+            models.Index(fields=['organisation', 'status']),
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['upload_type', 'status']),
+        ]
+
+    def __str__(self):
+        return f"BulkUploadJob {self.id} ({self.upload_type}) - {self.status}"
+
+    @property
+    def progress_percentage(self) -> int:
+        if self.total_rows == 0:
+            return 0
+        return min(100, int((self.processed_rows / self.total_rows) * 100))
+
+    @property
+    def is_finished(self) -> bool:
+        return self.status in (
+            BulkUploadStatusChoices.COMPLETED,
+            BulkUploadStatusChoices.PARTIALLY_FAILED,
+            BulkUploadStatusChoices.FAILED,
+        )
+
+
+class BulkUploadRowError(BaseUUIDModel):
+    """Stores granular, row-level validation and processing errors for a bulk upload job."""
+
+    job = models.ForeignKey(
+        BulkUploadJob,
+        on_delete=models.CASCADE,
+        related_name='row_errors',
+        help_text="Associated bulk upload job.",
+    )
+    row_number = models.PositiveIntegerField(
+        help_text="1-based row number in the uploaded file.",
+    )
+    field_name = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        help_text="Specific CSV column or model field that failed validation.",
+    )
+    error_code = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+        help_text="Machine-readable error classification code.",
+    )
+    error_message = models.TextField(
+        help_text="Human-readable description of why this row failed.",
+    )
+    raw_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Original row content captured for review and selective retry.",
+    )
+    is_resolved = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Indicates whether this row failure has been resolved via re-import or manual correction.",
+    )
+
+    class Meta:
+        verbose_name = 'Bulk Upload Row Error'
+        verbose_name_plural = 'Bulk Upload Row Errors'
+        ordering = ['row_number']
+        indexes = [
+            models.Index(fields=['job', 'row_number']),
+            models.Index(fields=['job', 'is_resolved']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['job', 'row_number'],
+                name='unique_bulk_upload_job_row_error',
+            ),
+        ]
+
+    def __str__(self):
+        return f"RowError Job {self.job_id} Row {self.row_number}: {self.field_name or 'General'} - {self.error_code}"
+
+
+# =============================================================================
+# PHASE 7.2: SPONSORED LISTINGS & ADVERTISING CAMPAIGNS
+# =============================================================================
+
+class CampaignTypeChoices(models.TextChoices):
+    VEHICLES = 'VEHICLES', 'Vehicles'
+    SPARE_PARTS = 'SPARE_PARTS', 'Spare Parts'
+
+
+class CampaignStatusChoices(models.TextChoices):
+    DRAFT = 'DRAFT', 'Draft'
+    PENDING_APPROVAL = 'PENDING_APPROVAL', 'Pending Staff Approval'
+    APPROVED = 'APPROVED', 'Approved (Awaiting Payment/Start)'
+    PAYMENT_PENDING = 'PAYMENT_PENDING', 'Payment Pending'
+    SCHEDULED = 'SCHEDULED', 'Scheduled (Paid, Awaiting Start Date)'
+    ACTIVE = 'ACTIVE', 'Active / Running'
+    PAUSED = 'PAUSED', 'Paused by Seller'
+    COMPLETED = 'COMPLETED', 'Completed'
+    REJECTED = 'REJECTED', 'Rejected by Staff'
+    CANCELLED = 'CANCELLED', 'Cancelled by Seller'
+
+
+class CampaignPaymentStatusChoices(models.TextChoices):
+    UNPAID = 'UNPAID', 'Unpaid'
+    PENDING = 'PENDING', 'Payment Pending'
+    PAID = 'PAID', 'Paid in Full'
+    FAILED = 'FAILED', 'Payment Failed'
+    REFUND_PENDING = 'REFUND_PENDING', 'Refund Pending'
+    PARTIALLY_REFUNDED = 'PARTIALLY_REFUNDED', 'Partially Refunded'
+    REFUNDED = 'REFUNDED', 'Fully Refunded'
+
+
+class AdvertisingCampaign(BaseUUIDModel):
+    """Represents a sponsored advertising campaign created by a seller or dealership."""
+
+    title = models.CharField(max_length=200, help_text="Campaign title for seller reference.")
+    description = models.TextField(blank=True, default='', help_text="Internal notes or campaign objective.")
+    seller = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='advertising_campaigns',
+        help_text="Seller who created the campaign.",
+    )
+    organisation = models.ForeignKey(
+        'organisations.Organisation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='advertising_campaigns',
+        help_text="Dealership organisation this campaign belongs to.",
+    )
+    campaign_type = models.CharField(
+        max_length=20,
+        choices=CampaignTypeChoices.choices,
+        default=CampaignTypeChoices.VEHICLES,
+        help_text="Inventory category promoted in this campaign.",
+    )
+    status = models.CharField(
+        max_length=25,
+        choices=CampaignStatusChoices.choices,
+        default=CampaignStatusChoices.DRAFT,
+        db_index=True,
+        help_text="Lifecycle state of the campaign.",
+    )
+    start_date = models.DateField(db_index=True, help_text="First active date of promotion.")
+    end_date = models.DateField(db_index=True, help_text="Final active date of promotion.")
+    currency = models.CharField(max_length=10, default='GBP', help_text="Operating currency (e.g. GBP, INR).")
+    total_budget_minor = models.PositiveIntegerField(
+        help_text="Total campaign package budget in integer minor units (e.g. pence or paise).",
+    )
+    spent_amount_minor = models.PositiveIntegerField(
+        default=0,
+        help_text="Calculated spend in minor units based on elapsed active days.",
+    )
+    daily_rate_minor = models.PositiveIntegerField(
+        default=0,
+        help_text="Calculated daily rate in minor units.",
+    )
+    package_code = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+        help_text="Commercial rate package code (e.g. AD_PKG_7D, AD_PKG_14D, AD_PKG_30D).",
+    )
+    payment_status = models.CharField(
+        max_length=25,
+        choices=CampaignPaymentStatusChoices.choices,
+        default=CampaignPaymentStatusChoices.UNPAID,
+        db_index=True,
+        help_text="Financial payment state.",
+    )
+    payment_reference = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text="External payment reference from Stripe or Razorpay.",
+    )
+    rejection_reason = models.TextField(
+        blank=True,
+        default='',
+        help_text="Staff-provided rejection reason if rejected.",
+    )
+    review_notes = models.TextField(
+        blank=True,
+        default='',
+        help_text="Internal notes recorded during staff review.",
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approved_advertising_campaigns',
+        help_text="Staff user who reviewed and approved the campaign.",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    paused_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    impressions_count = models.PositiveIntegerField(default=0, help_text="Aggregate impressions delivered.")
+    clicks_count = models.PositiveIntegerField(default=0, help_text="Aggregate clicks delivered.")
+
+    class Meta:
+        verbose_name = 'Advertising Campaign'
+        verbose_name_plural = 'Advertising Campaigns'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'start_date', 'end_date']),
+            models.Index(fields=['seller', 'status']),
+            models.Index(fields=['organisation', 'status']),
+            models.Index(fields=['campaign_type', 'status']),
+            models.Index(fields=['payment_status']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(end_date__gte=models.F('start_date')),
+                name='campaign_valid_date_range',
+            ),
+            models.CheckConstraint(
+                check=models.Q(total_budget_minor__gt=0),
+                name='campaign_positive_budget',
+            ),
+        ]
+
+    def __str__(self):
+        return f"Campaign {self.title} ({self.get_status_display()}) - {self.currency} {self.total_budget_minor / 100:.2f}"
+
+    @property
+    def duration_days(self) -> int:
+        if self.start_date and self.end_date:
+            return (self.end_date - self.start_date).days + 1
+        return 0
+
+    @property
+    def remaining_budget_minor(self) -> int:
+        return max(0, self.total_budget_minor - self.spent_amount_minor)
+
+    @property
+    def ctr(self) -> float:
+        if self.impressions_count > 0:
+            return round((self.clicks_count / self.impressions_count) * 100.0, 2)
+        return 0.0
+
+    @property
+    def click_through_rate(self) -> float:
+        return self.ctr
+
+    @property
+    def is_currently_promoted(self) -> bool:
+        """Indicates whether this campaign is actively serving sponsored inventory."""
+        from django.utils import timezone
+        today = timezone.localdate()
+        return (
+            self.status == CampaignStatusChoices.ACTIVE
+            and self.payment_status == CampaignPaymentStatusChoices.PAID
+            and self.start_date <= today <= self.end_date
+        )
+
+    @property
+    def is_eligible_for_serving(self) -> bool:
+        return self.is_currently_promoted
+
+
+class SponsoredListing(BaseUUIDModel):
+    """Associates an approved VehicleListing or SparePartListing with an AdvertisingCampaign."""
+
+    campaign = models.ForeignKey(
+        AdvertisingCampaign,
+        on_delete=models.CASCADE,
+        related_name='sponsored_listings',
+        help_text="Associated advertising campaign.",
+    )
+    vehicle_listing = models.ForeignKey(
+        VehicleListing,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='sponsored_entries',
+        help_text="Target vehicle listing if campaign promotes vehicles.",
+    )
+    part_listing = models.ForeignKey(
+        SparePartListing,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='sponsored_entries',
+        help_text="Target spare part listing if campaign promotes parts.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Controls active placement in sponsored search feeds.",
+    )
+    impressions_count = models.PositiveIntegerField(default=0)
+    clicks_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = 'Sponsored Listing'
+        verbose_name_plural = 'Sponsored Listings'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['campaign', 'is_active']),
+            models.Index(fields=['vehicle_listing', 'is_active']),
+            models.Index(fields=['part_listing', 'is_active']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    (models.Q(vehicle_listing__isnull=False) & models.Q(part_listing__isnull=True))
+                    | (models.Q(vehicle_listing__isnull=True) & models.Q(part_listing__isnull=False))
+                ),
+                name='sponsored_listing_single_target',
+            ),
+            models.UniqueConstraint(
+                fields=['campaign', 'vehicle_listing'],
+                name='unique_sponsored_vehicle_per_campaign',
+            ),
+            models.UniqueConstraint(
+                fields=['campaign', 'part_listing'],
+                name='unique_sponsored_part_per_campaign',
+            ),
+        ]
+
+    def __str__(self):
+        target = self.vehicle_listing.title if self.vehicle_listing else (self.part_listing.name if self.part_listing else 'Empty')
+        return f"Sponsored [{target}] in Campaign '{self.campaign.title}'"
+
+    @property
+    def target_listing(self):
+        return self.vehicle_listing or self.part_listing
+
+    @property
+    def target_type(self) -> str:
+        if self.vehicle_listing_id:
+            return CampaignTypeChoices.VEHICLES
+        return CampaignTypeChoices.SPARE_PARTS
+
+    @property
+    def is_eligible_for_serving(self) -> bool:
+        """Ensures listing is active, approved, and campaign is actively promoted."""
+        if not self.is_active or not self.campaign.is_currently_promoted:
+            return False
+        if self.vehicle_listing:
+            return (
+                self.vehicle_listing.status == ListingStatusChoices.APPROVED
+                and self.vehicle_listing.is_active
+            )
+        if self.part_listing:
+            return (
+                self.part_listing.status == ListingStatusChoices.APPROVED
+                and self.part_listing.is_active
+            )
+        return False
+
+
+class CampaignPayment(BaseUUIDModel):
+    """Tracks gateway payment transactions, webhooks, and refunds for an advertising campaign."""
+
+    campaign = models.ForeignKey(
+        AdvertisingCampaign,
+        on_delete=models.CASCADE,
+        related_name='payments',
+        help_text="Advertising campaign being funded.",
+    )
+    transaction = models.ForeignKey(
+        PaymentTransaction,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='campaign_payments',
+        help_text="Underlying platform payment transaction record.",
+    )
+    provider = models.CharField(max_length=30, help_text="Payment provider (e.g. STRIPE, RAZORPAY).")
+    gateway_reference = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Gateway session, charge, or order ID (e.g. cs_xxx, order_xxx).",
+    )
+    gateway_payment_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Captured payment ID (e.g. pi_xxx, pay_xxx).",
+    )
+    amount_minor = models.PositiveIntegerField(help_text="Payment amount in integer minor units.")
+    tax_amount_minor = models.PositiveIntegerField(default=0, help_text="Applicable tax amount in minor units.")
+    net_amount_minor = models.PositiveIntegerField(default=0, help_text="Net amount before tax in minor units.")
+    currency = models.CharField(max_length=10)
+    payment_status = models.CharField(
+        max_length=25,
+        choices=CampaignPaymentStatusChoices.choices,
+        default=CampaignPaymentStatusChoices.PENDING,
+        db_index=True,
+    )
+    idempotency_key = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    refunded_at = models.DateTimeField(null=True, blank=True)
+    refund_amount_minor = models.PositiveIntegerField(default=0)
+    refund_reason = models.TextField(blank=True, default='')
+    raw_response = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = 'Campaign Payment'
+        verbose_name_plural = 'Campaign Payments'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['campaign', 'payment_status']),
+            models.Index(fields=['gateway_reference']),
+            models.Index(fields=['gateway_payment_id']),
+            models.Index(fields=['idempotency_key']),
+        ]
+
+    def __str__(self):
+        return f"CampaignPayment {self.campaign.title}: {self.currency} {self.amount_minor / 100:.2f} ({self.payment_status})"
+
+
+class CampaignRefundStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    SUCCEEDED = 'SUCCEEDED', 'Succeeded'
+    FAILED = 'FAILED', 'Failed'
+
+
+class CampaignRefundOperation(BaseUUIDModel):
+    """Tracks distinct refund operations against a campaign payment with unique operation idempotency."""
+
+    payment = models.ForeignKey(
+        CampaignPayment,
+        on_delete=models.CASCADE,
+        related_name='refund_operations',
+        help_text="Target campaign payment record.",
+    )
+    campaign = models.ForeignKey(
+        AdvertisingCampaign,
+        on_delete=models.CASCADE,
+        related_name='refund_operations',
+        help_text="Advertising campaign associated with this refund.",
+    )
+    operation_id = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text="Unique client or system-generated idempotency identifier for this refund operation.",
+    )
+    amount_minor = models.PositiveIntegerField(help_text="Refund amount in integer minor units.")
+    status = models.CharField(
+        max_length=25,
+        choices=CampaignRefundStatusChoices.choices,
+        default=CampaignRefundStatusChoices.PENDING,
+        db_index=True,
+    )
+    gateway_refund_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text="Gateway refund identifier (e.g. re_xxx, rfr_xxx).",
+    )
+    reason = models.TextField(blank=True, default='', help_text="Reason for the refund operation.")
+    raw_response = models.JSONField(default=dict, blank=True, help_text="Gateway response payload or error.")
+
+    class Meta:
+        verbose_name = 'Campaign Refund Operation'
+        verbose_name_plural = 'Campaign Refund Operations'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['payment', 'status']),
+            models.Index(fields=['campaign', 'status']),
+            models.Index(fields=['operation_id']),
+            models.Index(fields=['gateway_refund_id']),
+        ]
+
+    def __str__(self):
+        return f"CampaignRefundOperation {self.operation_id} ({self.amount_minor} minor) - {self.status}"
+
+
+class CampaignImpression(BaseUUIDModel):
+    """Immutable record of an impression event delivered for a sponsored listing."""
+
+    campaign = models.ForeignKey(
+        AdvertisingCampaign,
+        on_delete=models.CASCADE,
+        related_name='impressions',
+    )
+    sponsored_listing = models.ForeignKey(
+        SponsoredListing,
+        on_delete=models.CASCADE,
+        related_name='impressions',
+    )
+    session_hash = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Anonymized SHA-256 session/user hash for de-duplication.",
+    )
+    date = models.DateField(default=timezone.now, db_index=True)
+
+    class Meta:
+        verbose_name = 'Campaign Impression'
+        verbose_name_plural = 'Campaign Impressions'
+        indexes = [
+            models.Index(fields=['campaign', 'date']),
+            models.Index(fields=['sponsored_listing', 'date']),
+            models.Index(fields=['session_hash', 'sponsored_listing', 'date']),
+        ]
+
+    def __str__(self):
+        return f"Impression {self.campaign_id} - {self.date}"
+
+
+class CampaignClick(BaseUUIDModel):
+    """Immutable record of a click event delivered on a sponsored listing."""
+
+    campaign = models.ForeignKey(
+        AdvertisingCampaign,
+        on_delete=models.CASCADE,
+        related_name='clicks',
+    )
+    sponsored_listing = models.ForeignKey(
+        SponsoredListing,
+        on_delete=models.CASCADE,
+        related_name='clicks',
+    )
+    session_hash = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Anonymized SHA-256 session/user hash for de-duplication.",
+    )
+    date = models.DateField(default=timezone.now, db_index=True)
+
+    class Meta:
+        verbose_name = 'Campaign Click'
+        verbose_name_plural = 'Campaign Clicks'
+        indexes = [
+            models.Index(fields=['campaign', 'date']),
+            models.Index(fields=['sponsored_listing', 'date']),
+            models.Index(fields=['session_hash', 'sponsored_listing', 'date']),
+        ]
+
+    def __str__(self):
+        return f"Click {self.campaign_id} - {self.date}"
+
+
+class CampaignDailyMetric(BaseUUIDModel):
+    """Daily aggregated performance and spend metrics for an advertising campaign."""
+
+    campaign = models.ForeignKey(
+        AdvertisingCampaign,
+        on_delete=models.CASCADE,
+        related_name='daily_metrics',
+    )
+    date = models.DateField(db_index=True)
+    impressions = models.PositiveIntegerField(default=0)
+    clicks = models.PositiveIntegerField(default=0)
+    spend_minor = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = 'Campaign Daily Metric'
+        verbose_name_plural = 'Campaign Daily Metrics'
+        ordering = ['-date']
+        indexes = [
+            models.Index(fields=['campaign', '-date']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['campaign', 'date'],
+                name='unique_campaign_daily_metric',
+            ),
+        ]
+
+    def __str__(self):
+        return f"DailyMetric {self.campaign.title} on {self.date}: {self.impressions} impr, {self.clicks} clicks"
 
 

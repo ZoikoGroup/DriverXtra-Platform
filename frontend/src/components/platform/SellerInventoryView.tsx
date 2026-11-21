@@ -26,6 +26,8 @@ import {
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import ListingPhotoManager from "./ListingPhotoManager";
+import BulkUploadModal from "./BulkUploadModal";
+import CreateCampaignModal from "./CreateCampaignModal";
 import {
   Car,
   Wrench,
@@ -54,6 +56,7 @@ import {
   Send,
   Check,
   Lock,
+  Megaphone,
 } from "lucide-react";
 
 export default function SellerInventoryView() {
@@ -82,6 +85,14 @@ export default function SellerInventoryView() {
   const [parts, setParts] = useState<MarketplacePartListing[]>([]);
   const [partsLoading, setPartsLoading] = useState(false);
   const [addPartOpen, setAddPartOpen] = useState(false);
+
+  // Phase 7.1: Bulk Upload State
+  const [bulkUploadOpen, setBulkUploadOpen] = useState(false);
+  const [bulkUploadInitialType, setBulkUploadInitialType] = useState<"VEHICLES" | "SPARE_PARTS">("VEHICLES");
+
+  // Phase 7.2: Sponsored Ad Campaign State
+  const [adCampaignModalOpen, setAdCampaignModalOpen] = useState(false);
+  const [adCampaignInitialType, setAdCampaignInitialType] = useState<"VEHICLES" | "SPARE_PARTS">("VEHICLES");
 
   // Edit Vehicle State
   const [editingVehicle, setEditingVehicle] = useState<MarketplaceVehicleListing | null>(null);
@@ -1177,29 +1188,77 @@ export default function SellerInventoryView() {
         </div>
 
         {/* Action Button */}
-        <div className="flex items-center gap-2 self-start md:self-auto">
+        <div className="flex items-center gap-2 self-start md:self-auto flex-wrap">
           {activeSection === "vehicles" ? (
-            <button
-              onClick={() => {
-                setErrorMessage("");
-                setAddVehicleOpen(true);
-              }}
-              className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all shadow-md flex items-center gap-1.5"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add Vehicle</span>
-            </button>
+            <>
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setAdCampaignInitialType("VEHICLES");
+                  setAdCampaignModalOpen(true);
+                }}
+                className="px-3.5 py-2.5 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 text-xs font-bold rounded-xl transition-all border border-amber-400/30 flex items-center gap-1.5 shadow-sm"
+              >
+                <Megaphone className="w-4 h-4 text-amber-400" />
+                <span>Promote Inventory</span>
+              </button>
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setBulkUploadInitialType("VEHICLES");
+                  setBulkUploadOpen(true);
+                }}
+                className="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-amber-400 text-xs font-bold rounded-xl transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Bulk Upload</span>
+              </button>
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setAddVehicleOpen(true);
+                }}
+                className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all shadow-md flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Vehicle</span>
+              </button>
+            </>
           ) : activeSection === "parts" ? (
-            <button
-              onClick={() => {
-                setErrorMessage("");
-                setAddPartOpen(true);
-              }}
-              className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all shadow-md flex items-center gap-1.5"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add Spare Part</span>
-            </button>
+            <>
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setAdCampaignInitialType("SPARE_PARTS");
+                  setAdCampaignModalOpen(true);
+                }}
+                className="px-3.5 py-2.5 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 text-xs font-bold rounded-xl transition-all border border-amber-400/30 flex items-center gap-1.5 shadow-sm"
+              >
+                <Megaphone className="w-4 h-4 text-amber-400" />
+                <span>Promote Inventory</span>
+              </button>
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setBulkUploadInitialType("SPARE_PARTS");
+                  setBulkUploadOpen(true);
+                }}
+                className="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-amber-400 text-xs font-bold rounded-xl transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Bulk Upload</span>
+              </button>
+              <button
+                onClick={() => {
+                  setErrorMessage("");
+                  setAddPartOpen(true);
+                }}
+                className="px-4 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-xl transition-all shadow-md flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Spare Part</span>
+              </button>
+            </>
           ) : activeSection === "applications" ? (
             <div className="flex items-center gap-2">
               <button
@@ -4550,6 +4609,32 @@ export default function SellerInventoryView() {
           </div>
         </div>
       )}
+
+      {/* Phase 7.1: Bulk Upload Modal */}
+      <BulkUploadModal
+        isOpen={bulkUploadOpen}
+        onClose={() => setBulkUploadOpen(false)}
+        initialUploadType={bulkUploadInitialType}
+        userOrgs={userOrgs}
+        onUploadComplete={() => {
+          const statusParam = statusFilter === "ALL" ? undefined : statusFilter;
+          if (activeSection === "vehicles") {
+            api.marketplace.listMyVehicles(statusParam).then(setVehicles).catch(console.error);
+          } else if (activeSection === "parts") {
+            api.marketplace.listMyParts(statusParam).then(setParts).catch(console.error);
+          }
+        }}
+      />
+
+      {/* Phase 7.2: Create Ad Campaign Modal */}
+      <CreateCampaignModal
+        isOpen={adCampaignModalOpen}
+        onClose={() => setAdCampaignModalOpen(false)}
+        initialType={adCampaignInitialType}
+        onSuccess={() => {
+          alert("Advertising campaign created! Check 'Sponsored Listings & Ads' tab for status & performance.");
+        }}
+      />
     </div>
   );
 }
