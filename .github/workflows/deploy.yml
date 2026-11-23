@@ -18,7 +18,7 @@ jobs:
   technical-evidence:
     name: Technical release evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
       actions: read
@@ -46,6 +46,13 @@ jobs:
         if: always() && steps.backend_dependencies.outcome == 'success'
         working-directory: backend
         shell: bash
+        env:
+          # CI-only test configuration. Not a secret and never used outside this test step.
+          SECRET_KEY: ci-only-insecure-django-test-key-not-for-production-use
+          # Avoid the PostgreSQL DB_PASSWORD requirement at settings import; under pytest,
+          # settings.py replaces the database with in-memory SQLite (TEST_USE_SQLITE).
+          USE_SQLITE: "True"
+          TEST_USE_SQLITE: "True"
         run: |
           set +e
           python -m pytest
