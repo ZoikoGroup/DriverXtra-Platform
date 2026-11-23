@@ -26,6 +26,7 @@ from django.db.models import (
 from django.db.models.functions import Cast
 from django.utils import timezone
 from django.core.exceptions import (
+    ValidationError,
     ValidationError as DjangoValidationError,
     PermissionDenied as DjangoPermissionDenied,
 )
@@ -6399,4 +6400,1254 @@ class VehicleOrderDocumentDownloadView(views.APIView):
             return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# =====================================================================
+# Phase 7.1: Dealer Bulk Upload APIs
+# =====================================================================
+
+from django.http import HttpResponse
+from apps.marketplace.models import (
+    BulkUploadJob,
+    BulkUploadRowError,
+    BulkUploadTypeChoices,
+    BulkUploadStatusChoices,
+    BulkUploadDuplicatePolicy,
+)
+from apps.marketplace.serializers import (
+    BulkUploadJobSerializer,
+    BulkUploadSubmitSerializer,
+    BulkUploadRowErrorSerializer,
+)
+from apps.marketplace.tasks import (
+    dispatch_bulk_upload_job,
+    dispatch_bulk_upload_retry,
+)
+from apps.marketplace.bulk_upload_service import (
+    generate_csv_template,
+    generate_error_csv,
+)
+
+
+class BulkUploadPagination(PageNumberPagination):
+    """Custom pagination for bulk upload job listing."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class BulkUploadRowErrorPagination(PageNumberPagination):
+    """Custom pagination for bulk upload row errors."""
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 200
+
+
+class BulkUploadListCreateView(generics.ListCreateAPIView):
+    """Seller and Dealership endpoint to list bulk upload jobs or submit a new CSV import job.
+
+    GET /api/v1/marketplace/bulk-upload/
+    POST /api/v1/marketplace/bulk-upload/
+    """
+    permission_classes = [IsSellerOrStaff]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    pagination_class = BulkUploadPagination
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return BulkUploadSubmitSerializer
+        return BulkUploadJobSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = BulkUploadJob.objects.select_related('seller', 'organisation')
+
+        if not (user.is_staff or user.has_role('ADMIN')):
+            queryset = queryset.filter(
+                Q(seller=user) | Q(organisation__memberships__user=user, organisation__memberships__is_active=True)
+            ).distinct()
+
+        upload_type = self.request.query_params.get('upload_type')
+        if upload_type:
+            queryset = queryset.filter(upload_type=upload_type.upper())
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param.upper())
+
+        return queryset.order_by('-created_at')
+
+    def create(self, request, *args, **kwargs):
+        user = request.user
+        if not (user.has_role('SELLER') or user.has_role('WORKSHOP') or user.is_staff or user.has_role('ADMIN')):
+            raise PermissionDenied("You must hold the SELLER or WORKSHOP operational role to submit bulk uploads.")
+
+        serializer = BulkUploadSubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        organisation = data.get('organisation')
+        if not organisation and not (user.is_staff or user.has_role('ADMIN')):
+            membership = user.organisation_memberships.filter(is_active=True).select_related('organisation').first()
+            if membership:
+                organisation = membership.organisation
+
+        if organisation and not (user.is_staff or user.has_role('ADMIN')):
+            member_role = organisation.get_member_role(user)
+            if member_role not in ('OWNER', 'ADMIN'):
+                raise PermissionDenied("Only organisation OWNER or ADMIN may create bulk uploads for this organisation.")
+
+        uploaded_file = data['file']
+        upload_type = data['upload_type']
+        duplicate_policy = data.get('duplicate_policy', BulkUploadDuplicatePolicy.SKIP.value)
+
+        with transaction.atomic():
+            job = BulkUploadJob.objects.create(
+                seller=user,
+                organisation=organisation,
+                upload_type=upload_type,
+                duplicate_policy=duplicate_policy,
+                file=uploaded_file,
+                filename=uploaded_file.name,
+                file_size_bytes=uploaded_file.size,
+                status=BulkUploadStatusChoices.PENDING,
+            )
+
+            record_audit_entry(
+                event_type="bulk_upload.submitted",
+                action="bulk_upload:submit",
+                resource_type="BulkUploadJob",
+                resource_id=str(job.id),
+                actor_id=user.id,
+                operating_org_id=organisation.id if organisation else None,
+                metadata={
+                    "upload_type": upload_type,
+                    "filename": uploaded_file.name,
+                    "file_size": uploaded_file.size,
+                    "organisation_id": str(organisation.id) if organisation else None,
+                    "duplicate_policy": duplicate_policy,
+                },
+            )
+
+        # Dispatch Celery task reliably on transaction commit
+        dispatch_bulk_upload_job(job.id)
+
+        output_serializer = BulkUploadJobSerializer(job)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class BulkUploadDetailView(generics.RetrieveAPIView):
+    """Retrieve detailed status, counts, and progress for a bulk upload job.
+
+    GET /api/v1/marketplace/bulk-upload/<id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = BulkUploadJobSerializer
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = BulkUploadJob.objects.select_related('seller', 'organisation')
+        if not (user.is_staff or user.has_role('ADMIN')):
+            queryset = queryset.filter(
+                Q(seller=user) | Q(organisation__memberships__user=user, organisation__memberships__is_active=True)
+            ).distinct()
+        return queryset
+
+
+class BulkUploadErrorListView(generics.ListAPIView):
+    """Paginated list of row-level errors for a bulk upload job.
+
+    GET /api/v1/marketplace/bulk-upload/<id>/errors/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = BulkUploadRowErrorSerializer
+    pagination_class = BulkUploadRowErrorPagination
+
+    def get_queryset(self):
+        job_id = self.kwargs.get('id')
+        user = self.request.user
+
+        job_qs = BulkUploadJob.objects.filter(id=job_id)
+        if not (user.is_staff or user.has_role('ADMIN')):
+            job_qs = job_qs.filter(
+                Q(seller=user) | Q(organisation__memberships__user=user, organisation__memberships__is_active=True)
+            ).distinct()
+
+        job = job_qs.first()
+        if not job:
+            raise Http404("Bulk upload job not found.")
+
+        queryset = BulkUploadRowError.objects.filter(job=job).order_by('row_number', 'id')
+
+        is_resolved = self.request.query_params.get('is_resolved')
+        if is_resolved is not None:
+            val = is_resolved.strip().lower()
+            if val in ('true', '1'):
+                queryset = queryset.filter(is_resolved=True)
+            elif val in ('false', '0'):
+                queryset = queryset.filter(is_resolved=False)
+
+        return queryset
+
+
+class BulkUploadErrorExportView(views.APIView):
+    """Download CSV file of all failed rows with error descriptions and formula sanitization.
+
+    GET /api/v1/marketplace/bulk-upload/<id>/export-errors/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        user = request.user
+        job_qs = BulkUploadJob.objects.filter(id=id)
+        if not (user.is_staff or user.has_role('ADMIN')):
+            job_qs = job_qs.filter(
+                Q(seller=user) | Q(organisation__memberships__user=user, organisation__memberships__is_active=True)
+            ).distinct()
+
+        job = job_qs.first()
+        if not job:
+            raise Http404("Bulk upload job not found.")
+
+        csv_content = generate_error_csv(job)
+        response = HttpResponse(csv_content, content_type='text/csv; charset=utf-8')
+        filename = f"bulk_upload_errors_{job.id}.csv"
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+
+class BulkUploadRetryView(views.APIView):
+    """Retries unresolved failed rows from a previous bulk upload job.
+
+    POST /api/v1/marketplace/bulk-upload/<id>/retry/
+    """
+    permission_classes = [IsSellerOrStaff]
+
+    def post(self, request, id):
+        user = request.user
+        job_qs = BulkUploadJob.objects.filter(id=id)
+        if not (user.is_staff or user.has_role('ADMIN')):
+            job_qs = job_qs.filter(
+                Q(seller=user) | Q(organisation__memberships__user=user, organisation__memberships__is_active=True)
+            ).distinct()
+
+        job = job_qs.first()
+        if not job:
+            raise Http404("Bulk upload job not found.")
+
+        if job.organisation and not (user.is_staff or user.has_role('ADMIN')):
+            member_role = job.organisation.get_member_role(user)
+            if member_role not in ('OWNER', 'ADMIN'):
+                raise PermissionDenied("Only organisation OWNER or ADMIN may retry bulk upload jobs.")
+
+        if job.status in (BulkUploadStatusChoices.PARSING, BulkUploadStatusChoices.PROCESSING):
+            return Response(
+                {"detail": f"Job is currently in progress ({job.status}) and cannot be retried."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        unresolved_count = job.row_errors.filter(is_resolved=False).count()
+        if unresolved_count == 0:
+            return Response(
+                {"detail": "No unresolved errors found to retry for this job."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        dispatch_bulk_upload_retry(job.id)
+
+        record_audit_entry(
+            event_type="bulk_upload.retry_dispatched",
+            action="bulk_upload:retry",
+            resource_type="BulkUploadJob",
+            resource_id=str(job.id),
+            actor_id=user.id,
+            operating_org_id=job.organisation_id if job.organisation else None,
+            metadata={
+                "unresolved_errors": unresolved_count,
+            },
+        )
+
+        return Response(
+            {
+                "detail": f"Retry dispatched for {unresolved_count} unresolved row(s).",
+                "job_id": str(job.id),
+                "unresolved_errors": unresolved_count,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class BulkUploadTemplateDownloadView(views.APIView):
+    """Download sample CSV template for vehicles or spare parts bulk import.
+
+    GET /api/v1/marketplace/bulk-upload/templates/<upload_type>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, upload_type):
+        ut = upload_type.strip().lower()
+        if ut in ('vehicles', 'vehicle', 'v'):
+            target_type = BulkUploadTypeChoices.VEHICLES
+            filename = "vehicles_template.csv"
+        elif ut in ('spare_parts', 'spare-parts', 'spareparts', 'parts', 'part', 'sp'):
+            target_type = BulkUploadTypeChoices.SPARE_PARTS
+            filename = "spare_parts_template.csv"
+        else:
+            return Response(
+                {
+                    "detail": f"Invalid upload type '{upload_type}'. Must be 'vehicles' or 'spare_parts'.",
+                    "valid_types": ["vehicles", "spare_parts"],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        csv_content = generate_csv_template(target_type)
+        response = HttpResponse(csv_content, content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+
+# ==============================================================================
+# PHASE 7.2: SPONSORED LISTINGS & ADVERTISING VIEWS
+# ==============================================================================
+
+import datetime
+from django.shortcuts import get_object_or_404
+from rest_framework import exceptions
+
+from apps.organisations.models import Organisation, OrganisationMembership
+from apps.marketplace.models import (
+    AdvertisingCampaign,
+    SponsoredListing,
+    CampaignPayment,
+    CampaignImpression,
+    CampaignClick,
+    CampaignDailyMetric,
+    CampaignStatusChoices,
+    CampaignPaymentStatusChoices,
+    CampaignTypeChoices,
+    PaymentWebhookEvent,
+)
+from apps.marketplace.serializers import (
+    AdvertisingCampaignSerializer,
+    AdvertisingCampaignCreateSerializer,
+    AdvertisingCampaignUpdateSerializer,
+    CampaignPricingQuoteRequestSerializer,
+    CampaignReviewSerializer,
+    TrackImpressionSerializer,
+    TrackClickSerializer,
+    SponsoredListingSummarySerializer,
+)
+from apps.marketplace.advertising_service import AdvertisingCampaignService
+from apps.marketplace.advertising_pricing import calculate_campaign_pricing
+from apps.marketplace.payments.stripe_provider import StripePaymentProvider
+from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+
+def _get_seller_campaign_or_403(user, campaign_id):
+    """Retrieves an AdvertisingCampaign ensuring the user is the owner or org member or staff."""
+    campaign = get_object_or_404(AdvertisingCampaign, id=campaign_id)
+    if user.is_staff or user.is_superuser:
+        return campaign
+    if campaign.seller_id == user.id:
+        return campaign
+    if campaign.organisation_id:
+        is_member = OrganisationMembership.objects.filter(
+            organisation_id=campaign.organisation_id,
+            user=user,
+            is_active=True,
+        ).exists()
+        if is_member:
+            return campaign
+    raise exceptions.PermissionDenied("You do not have permission to access this advertising campaign.")
+
+
+class AdvertisingCampaignListCreateView(views.APIView):
+    """
+    List seller advertising campaigns or create a new campaign.
+    GET /api/v1/marketplace/advertising/campaigns/
+    POST /api/v1/marketplace/advertising/campaigns/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        qs = AdvertisingCampaign.objects.select_related('seller', 'organisation', 'approved_by').prefetch_related('sponsored_listings', 'payments')
+
+        # Staff can inspect all or filter by seller
+        if (user.is_staff or user.is_superuser) and request.query_params.get('all') == 'true':
+            pass
+        else:
+            # User's own campaigns OR campaigns for organizations they belong to
+            user_org_ids = list(OrganisationMembership.objects.filter(
+                user=user,
+                is_active=True,
+            ).values_list('organisation_id', flat=True))
+            qs = qs.filter(
+                models.Q(seller=user) | models.Q(organisation_id__in=user_org_ids)
+            )
+
+        # Filters
+        status_param = request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param.strip().upper())
+
+        campaign_type = request.query_params.get('campaign_type')
+        if campaign_type:
+            qs = qs.filter(campaign_type=campaign_type.strip().upper())
+
+        org_id = request.query_params.get('organisation')
+        if org_id:
+            qs = qs.filter(organisation_id=org_id)
+
+        campaigns = qs.order_by('-created_at')
+        serializer = AdvertisingCampaignSerializer(campaigns, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = AdvertisingCampaignCreateSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+
+        try:
+            campaign = AdvertisingCampaignService.create_campaign(
+                seller=request.user,
+                title=validated['title'],
+                campaign_type=validated['campaign_type'],
+                currency=validated['currency'],
+                target_country=validated['target_country'],
+                package_code=validated.get('package_code', 'CUSTOM'),
+                duration_days=validated.get('duration_days'),
+                start_date=validated.get('start_date'),
+                organisation=validated.get('organisation'),
+                description=validated.get('description', ''),
+            )
+
+            # Attach listings
+            AdvertisingCampaignService.attach_listings(
+                campaign=campaign,
+                listing_ids=validated['listing_ids'],
+                user=request.user,
+            )
+
+            # If submit_for_review flag is set in query or body
+            submit_now = request.data.get('submit_for_review') is True or request.query_params.get('submit') == 'true'
+            if submit_now:
+                campaign = AdvertisingCampaignService.submit_campaign(campaign, request.user)
+
+            return Response(
+                AdvertisingCampaignSerializer(campaign).data,
+                status=status.HTTP_201_CREATED,
+            )
+        except (ValidationError, exceptions.ValidationError) as e:
+            detail = e.message_dict if hasattr(e, 'message_dict') else (e.messages if hasattr(e, 'messages') else str(e))
+            return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdvertisingCampaignDetailUpdateView(views.APIView):
+    """
+    Retrieve, update or delete a specific advertising campaign.
+    GET /api/v1/marketplace/advertising/campaigns/<uuid:id>/
+    PATCH /api/v1/marketplace/advertising/campaigns/<uuid:id>/
+    DELETE /api/v1/marketplace/advertising/campaigns/<uuid:id>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        return Response(AdvertisingCampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        if campaign.status != CampaignStatusChoices.DRAFT:
+            return Response(
+                {"detail": f"Only campaigns in DRAFT status can be modified. Current status: '{campaign.status}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = AdvertisingCampaignUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        update_fields = []
+        if 'title' in data:
+            campaign.title = data['title']
+            update_fields.append('title')
+        if 'description' in data:
+            campaign.description = data['description']
+            update_fields.append('description')
+        if 'start_date' in data:
+            campaign.start_date = data['start_date']
+            # Recompute end_date
+            campaign.end_date = campaign.start_date + datetime.timedelta(days=campaign.duration_days)
+            update_fields.extend(['start_date', 'end_date'])
+
+        if 'package_code' in data or 'duration_days' in data:
+            pkg_code = data.get('package_code', campaign.package_code)
+            dur = data.get('duration_days', campaign.duration_days)
+            quote = calculate_campaign_pricing(
+                currency=campaign.currency,
+                package_code=pkg_code,
+                custom_duration_days=dur if pkg_code == 'CUSTOM' else None,
+                target_country=campaign.target_country,
+            )
+            campaign.package_code = pkg_code
+            campaign.duration_days = quote['duration_days']
+            campaign.total_budget_minor = quote['total_amount_minor']
+            campaign.net_amount_minor = quote['net_amount_minor']
+            campaign.tax_amount_minor = quote['tax_amount_minor']
+            campaign.tax_rate_percent = quote['tax_rate_percent']
+            campaign.daily_rate_minor = quote['daily_rate_minor']
+            campaign.end_date = campaign.start_date + datetime.timedelta(days=campaign.duration_days)
+            update_fields.extend([
+                'package_code', 'duration_days', 'total_budget_minor', 'net_amount_minor',
+                'tax_amount_minor', 'tax_rate_percent', 'daily_rate_minor', 'end_date'
+            ])
+
+        if update_fields:
+            campaign.updated_at = timezone.now()
+            update_fields.append('updated_at')
+            campaign.save(update_fields=update_fields)
+
+        if 'listing_ids' in data:
+            AdvertisingCampaignService.attach_listings(
+                campaign=campaign,
+                listing_ids=data['listing_ids'],
+                user=request.user,
+            )
+
+        return Response(AdvertisingCampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+
+    def delete(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        if campaign.status != CampaignStatusChoices.DRAFT:
+            return Response(
+                {"detail": f"Only campaigns in DRAFT status can be deleted. Current status: '{campaign.status}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        campaign.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdvertisingCampaignSubmitView(views.APIView):
+    """
+    Submits a DRAFT campaign for staff review.
+    POST /api/v1/marketplace/advertising/campaigns/<uuid:id>/submit/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        try:
+            campaign = AdvertisingCampaignService.submit_campaign(campaign, request.user)
+            return Response(
+                {
+                    "detail": "Campaign submitted for review successfully.",
+                    "campaign": AdvertisingCampaignSerializer(campaign).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except (ValidationError, exceptions.ValidationError) as e:
+            detail = e.message_dict if hasattr(e, 'message_dict') else (e.messages if hasattr(e, 'messages') else str(e))
+            return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdvertisingCampaignPaymentSessionView(views.APIView):
+    """
+    Initiates payment session via Stripe or Razorpay for an APPROVED campaign.
+    POST /api/v1/marketplace/advertising/campaigns/<uuid:id>/payment-session/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        return_url = request.data.get('return_url')
+        cancel_url = request.data.get('cancel_url')
+
+        try:
+            session_result = AdvertisingCampaignService.create_payment_session(
+                campaign=campaign,
+                return_url=return_url,
+                cancel_url=cancel_url,
+            )
+            return Response(session_result, status=status.HTTP_200_OK)
+        except (ValidationError, exceptions.ValidationError, ValueError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdvertisingCampaignPauseView(views.APIView):
+    """
+    Seller pauses an ACTIVE campaign.
+    POST /api/v1/marketplace/advertising/campaigns/<uuid:id>/pause/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        try:
+            campaign = AdvertisingCampaignService.pause_campaign(campaign, request.user)
+            return Response(AdvertisingCampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+        except (ValidationError, exceptions.ValidationError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdvertisingCampaignResumeView(views.APIView):
+    """
+    Seller resumes a PAUSED campaign.
+    POST /api/v1/marketplace/advertising/campaigns/<uuid:id>/resume/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        try:
+            campaign = AdvertisingCampaignService.resume_campaign(campaign, request.user)
+            return Response(AdvertisingCampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+        except (ValidationError, exceptions.ValidationError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdvertisingCampaignCancelView(views.APIView):
+    """
+    Seller cancels a campaign and triggers a whole-day pro-rata refund.
+    POST /api/v1/marketplace/advertising/campaigns/<uuid:id>/cancel/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        reason = request.data.get('reason', 'Cancelled by seller')
+        try:
+            campaign, refund_minor = AdvertisingCampaignService.cancel_campaign(
+                campaign=campaign,
+                actor=request.user,
+                reason=reason,
+            )
+            return Response(
+                {
+                    "detail": "Campaign cancelled successfully.",
+                    "refund_amount_minor": refund_minor,
+                    "campaign": AdvertisingCampaignSerializer(campaign).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except (ValidationError, exceptions.ValidationError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdvertisingCampaignAnalyticsView(views.APIView):
+    """
+    Performance analytics for an advertising campaign.
+    GET /api/v1/marketplace/advertising/campaigns/<uuid:id>/analytics/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, id):
+        campaign = _get_seller_campaign_or_403(request.user, id)
+
+        daily_metrics = CampaignDailyMetric.objects.filter(campaign=campaign).order_by('date')
+        daily_data = [
+            {
+                "date": str(dm.date),
+                "impressions": dm.impressions_count,
+                "clicks": dm.clicks_count,
+                "ctr_pct": dm.click_through_rate,
+                "spend_minor": dm.spend_amount_minor,
+            }
+            for dm in daily_metrics
+        ]
+
+        listings_metrics = []
+        for sl in campaign.sponsored_listings.all():
+            title = ""
+            if sl.target_type == CampaignTypeChoices.VEHICLES and sl.vehicle_listing:
+                title = sl.vehicle_listing.title
+            elif sl.target_type == CampaignTypeChoices.SPARE_PARTS and sl.part_listing:
+                title = sl.part_listing.title
+
+            listings_metrics.append({
+                "sponsored_listing_id": str(sl.id),
+                "listing_id": str(sl.vehicle_listing_id or sl.part_listing_id),
+                "target_type": sl.target_type,
+                "title": title,
+                "impressions": sl.impression_count,
+                "clicks": sl.click_count,
+                "ctr_pct": sl.click_through_rate,
+                "is_active": sl.is_active,
+            })
+
+        return Response(
+            {
+                "campaign_id": str(campaign.id),
+                "title": campaign.title,
+                "status": campaign.status,
+                "currency": campaign.currency,
+                "total_budget_minor": campaign.total_budget_minor,
+                "spent_amount_minor": campaign.spent_amount_minor,
+                "total_impressions": campaign.total_impressions,
+                "total_clicks": campaign.total_clicks,
+                "click_through_rate_pct": campaign.click_through_rate,
+                "daily_metrics": daily_data,
+                "listings_metrics": listings_metrics,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class CampaignPricingQuoteView(views.APIView):
+    """
+    Calculates dynamic advertising campaign pricing quote with tax breakdown.
+    POST /api/v1/marketplace/advertising/pricing-quote/
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = CampaignPricingQuoteRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            quote = calculate_campaign_pricing(
+                currency=data['currency'],
+                package_code=data.get('package_code', 'CUSTOM'),
+                custom_duration_days=data.get('duration_days'),
+                target_country=data.get('target_country'),
+            )
+            return Response(quote, status=status.HTTP_200_OK)
+        except (ValueError, ValidationError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SponsoredFeedView(views.APIView):
+    """
+    Public API returning eligible sponsored listings to display at the top of marketplace results.
+    GET /api/v1/marketplace/advertising/sponsored-feed/
+    Query params: type (VEHICLES | SPARE_PARTS), country (GB | IN), limit (default 2)
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        campaign_type = request.query_params.get('type', 'VEHICLES').strip().upper()
+        country = request.query_params.get('country', 'GB').strip().upper()
+        try:
+            limit = min(10, max(1, int(request.query_params.get('limit', 2))))
+        except ValueError:
+            limit = 2
+
+        sponsored_listings = AdvertisingCampaignService.get_sponsored_feed(
+            campaign_type=campaign_type,
+            target_country=country,
+            limit=limit,
+        )
+
+        results = []
+        for sl in sponsored_listings:
+            item_data = {
+                "sponsored_listing_id": str(sl.id),
+                "campaign_id": str(sl.campaign_id),
+                "target_type": sl.target_type,
+                "is_sponsored": True,
+                "badge_label": "Sponsored",
+            }
+
+            if sl.target_type == CampaignTypeChoices.VEHICLES and sl.vehicle_listing:
+                item_data["listing"] = VehicleListingPublicSerializer(sl.vehicle_listing).data
+            elif sl.target_type == CampaignTypeChoices.SPARE_PARTS and sl.part_listing:
+                item_data["listing"] = SparePartListingPublicSerializer(sl.part_listing).data
+            else:
+                continue
+
+            results.append(item_data)
+
+        return Response(results, status=status.HTTP_200_OK)
+
+
+class TrackImpressionView(views.APIView):
+    """
+    Public tracking endpoint for sponsored listing impression with session de-duplication.
+    POST /api/v1/marketplace/advertising/track-impression/
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = TrackImpressionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        ip_addr = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '')).split(',')[0].strip()
+        user_agent = data.get('user_agent') or request.META.get('HTTP_USER_AGENT', '')
+
+        try:
+            impression, created = AdvertisingCampaignService.record_impression(
+                sponsored_listing_id=data['sponsored_listing_id'],
+                session_id=data['session_id'],
+                ip_address=ip_addr,
+                referrer=data.get('referrer', ''),
+                user_agent=user_agent,
+            )
+            return Response({"recorded": True, "duplicate": not created}, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TrackClickView(views.APIView):
+    """
+    Public tracking endpoint for sponsored listing click with session de-duplication.
+    POST /api/v1/marketplace/advertising/track-click/
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = TrackClickSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        ip_addr = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '')).split(',')[0].strip()
+
+        try:
+            click, created = AdvertisingCampaignService.record_click(
+                sponsored_listing_id=data['sponsored_listing_id'],
+                session_id=data['session_id'],
+                ip_address=ip_addr,
+                destination_url=data.get('destination_url', ''),
+            )
+            return Response({"recorded": True, "duplicate": not created}, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminAdvertisingCampaignListView(views.APIView):
+    """
+    Admin endpoint to view and filter all advertising campaigns across the platform.
+    GET /api/v1/marketplace/advertising/admin/campaigns/
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def get(self, request):
+        qs = AdvertisingCampaign.objects.select_related('seller', 'organisation', 'approved_by').prefetch_related('sponsored_listings', 'payments')
+
+        status_param = request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param.strip().upper())
+
+        campaign_type = request.query_params.get('campaign_type')
+        if campaign_type:
+            qs = qs.filter(campaign_type=campaign_type.strip().upper())
+
+        country = request.query_params.get('country')
+        if country:
+            qs = qs.filter(target_country=country.strip().upper())
+
+        search = request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                models.Q(title__icontains=search)
+                | models.Q(seller__email__icontains=search)
+                | models.Q(organisation__name__icontains=search)
+            )
+
+        campaigns = qs.order_by('-created_at')
+        return Response(AdvertisingCampaignSerializer(campaigns, many=True).data, status=status.HTTP_200_OK)
+
+
+class AdminAdvertisingCampaignDetailView(views.APIView):
+    """
+    Admin endpoint to inspect a specific advertising campaign in full detail.
+    GET /api/v1/marketplace/advertising/admin/campaigns/<uuid:id>/
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def get(self, request, id):
+        campaign = get_object_or_404(
+            AdvertisingCampaign.objects.select_related('seller', 'organisation', 'approved_by').prefetch_related('sponsored_listings', 'payments'),
+            id=id,
+        )
+        return Response(AdvertisingCampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+
+
+class AdminAdvertisingCampaignReviewView(views.APIView):
+    """
+    Admin endpoint to approve or reject an advertising campaign.
+    POST /api/v1/marketplace/advertising/admin/campaigns/<uuid:id>/review/
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def post(self, request, id):
+        campaign = get_object_or_404(AdvertisingCampaign, id=id)
+        serializer = CampaignReviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            if data['action'] == 'APPROVE':
+                campaign = AdvertisingCampaignService.approve_campaign(
+                    campaign=campaign,
+                    staff_user=request.user,
+                    approval_notes=data.get('notes', ''),
+                )
+                msg = "Campaign approved successfully."
+            else:
+                campaign = AdvertisingCampaignService.reject_campaign(
+                    campaign=campaign,
+                    staff_user=request.user,
+                    rejection_reason=data['rejection_reason'],
+                )
+                msg = "Campaign rejected."
+
+            return Response(
+                {
+                    "detail": msg,
+                    "campaign": AdvertisingCampaignSerializer(campaign).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except (ValidationError, exceptions.ValidationError) as e:
+            detail = e.message_dict if hasattr(e, 'message_dict') else (e.messages if hasattr(e, 'messages') else str(e))
+            return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminAdvertisingCampaignPauseView(views.APIView):
+    """
+    Admin force-pauses an active advertising campaign for policy or compliance reasons.
+    POST /api/v1/marketplace/advertising/admin/campaigns/<uuid:id>/pause/
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def post(self, request, id):
+        campaign = get_object_or_404(AdvertisingCampaign, id=id)
+        try:
+            campaign = AdvertisingCampaignService.pause_campaign(campaign, request.user)
+            return Response(AdvertisingCampaignSerializer(campaign).data, status=status.HTTP_200_OK)
+        except (ValidationError, exceptions.ValidationError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminAdvertisingCampaignTerminateView(views.APIView):
+    """
+    Admin force-terminates an advertising campaign and triggers appropriate refund.
+    POST /api/v1/marketplace/advertising/admin/campaigns/<uuid:id>/terminate/
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def post(self, request, id):
+        campaign = get_object_or_404(AdvertisingCampaign, id=id)
+        reason = request.data.get('reason', 'Administrative termination')
+        try:
+            campaign, refund_minor = AdvertisingCampaignService.cancel_campaign(
+                campaign=campaign,
+                actor=request.user,
+                reason=reason,
+            )
+            return Response(
+                {
+                    "detail": "Campaign terminated by platform administration.",
+                    "refund_amount_minor": refund_minor,
+                    "campaign": AdvertisingCampaignSerializer(campaign).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except (ValidationError, exceptions.ValidationError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminAdvertisingOverviewView(views.APIView):
+    """
+    Admin dashboard metrics for sponsored listings and advertising revenue.
+    GET /api/v1/marketplace/advertising/admin/overview/
+    """
+    permission_classes = [IsPlatformStaff]
+
+    def get(self, request):
+        total_campaigns = AdvertisingCampaign.objects.count()
+        active_campaigns = AdvertisingCampaign.objects.filter(status=CampaignStatusChoices.ACTIVE).count()
+        pending_approval = AdvertisingCampaign.objects.filter(status=CampaignStatusChoices.PENDING_APPROVAL).count()
+        scheduled_campaigns = AdvertisingCampaign.objects.filter(status=CampaignStatusChoices.SCHEDULED).count()
+
+        total_revenue_minor = AdvertisingCampaign.objects.filter(
+            payment_status=CampaignPaymentStatusChoices.PAID,
+        ).aggregate(total=models.Sum('total_budget_minor'))['total'] or 0
+
+        total_impressions = AdvertisingCampaign.objects.aggregate(total=models.Sum('impressions_count'))['total'] or 0
+        total_clicks = AdvertisingCampaign.objects.aggregate(total=models.Sum('clicks_count'))['total'] or 0
+
+        overall_ctr = round((total_clicks / total_impressions) * 100, 2) if total_impressions > 0 else 0.0
+
+        return Response(
+            {
+                "total_campaigns": total_campaigns,
+                "active_campaigns": active_campaigns,
+                "pending_approval": pending_approval,
+                "scheduled_campaigns": scheduled_campaigns,
+                "total_revenue_minor": total_revenue_minor,
+                "total_impressions": total_impressions,
+                "total_clicks": total_clicks,
+                "overall_ctr_percent": overall_ctr,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdvertisingPaymentWebhookView(views.APIView):
+    """
+    Authoritative webhook endpoint for Stripe / Razorpay advertising campaign payments.
+    POST /api/v1/marketplace/advertising/webhook/<provider>/
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, provider):
+        provider_name = provider.strip().upper()
+        headers = {}
+        for key, value in request.META.items():
+            if key.startswith('HTTP_'):
+                headers[key[5:].replace('_', '-').lower()] = value
+            elif key in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
+                headers[key.replace('_', '-').lower()] = value
+
+        if provider_name == 'STRIPE':
+            gateway_provider = StripePaymentProvider()
+        elif provider_name == 'RAZORPAY':
+            gateway_provider = RazorpayPaymentProvider()
+        else:
+            return Response({"error": f"Unsupported provider '{provider}'"}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_valid, event_id, event_type, payload = gateway_provider.verify_webhook(request.body, headers)
+        if not is_valid:
+            return Response(payload, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check live advertising mode
+        from apps.marketplace.advertising_pricing import is_live_advertising_charge_authorized
+        is_live = False
+        if provider_name == 'STRIPE':
+            is_live = (
+                payload.get('livemode') is True
+                or payload.get('data', {}).get('object', {}).get('livemode') is True
+                or not getattr(gateway_provider, 'test_mode', True)
+            )
+        elif provider_name == 'RAZORPAY':
+            is_live = not getattr(gateway_provider, 'test_mode', True)
+
+        # Webhook idempotency
+        existing_event = PaymentWebhookEvent.objects.filter(provider=provider_name, event_id=event_id).first()
+        if existing_event and existing_event.processed:
+            return Response(
+                {"status": "already_processed", "event_id": event_id},
+                status=status.HTTP_200_OK,
+            )
+
+        # Extract campaign reference and details
+        campaign_id = None
+        gateway_payment_id = ""
+        gateway_order_id = ""
+        amount_minor = 0
+        currency = ""
+
+        if provider_name == 'STRIPE':
+            data_obj = payload.get('data', {}).get('object', {})
+            metadata = data_obj.get('metadata', {})
+            campaign_id = metadata.get('campaign_id')
+            gateway_payment_id = data_obj.get('id', '')
+            amount_minor = int(data_obj.get('amount', 0))
+            currency = str(data_obj.get('currency', 'gbp')).upper()
+
+            if event_type == 'charge.refunded':
+                campaign = AdvertisingCampaign.objects.filter(id=campaign_id).first() if campaign_id else None
+                payment = None
+                if not campaign and gateway_payment_id:
+                    payment = CampaignPayment.objects.filter(
+                        models.Q(gateway_payment_id=gateway_payment_id) | models.Q(gateway_reference=gateway_payment_id)
+                    ).first()
+                    if payment:
+                        campaign = payment.campaign
+
+                if not campaign and not payment:
+                    PaymentWebhookEvent.objects.update_or_create(
+                        provider=provider_name,
+                        event_id=event_id,
+                        defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                    )
+                    logger.warning("Unmatched Stripe charge.refunded event %s recorded for reconciliation.", event_id)
+                    return Response({"status": "unmatched_recorded", "event_id": event_id}, status=status.HTTP_200_OK)
+
+                refunds_list = data_obj.get('refunds', {}).get('data', [])
+                cumulative_refunded = int(data_obj.get('amount_refunded', 0))
+
+                if refunds_list:
+                    for rfnd_item in refunds_list:
+                        rfnd_id = rfnd_item.get('id', '')
+                        rfnd_amt = int(rfnd_item.get('amount', 0))
+                        rfnd_meta = rfnd_item.get('metadata', {}) or {}
+                        op_hint = rfnd_meta.get('operation_id')
+                        AdvertisingCampaignService.reconcile_refund_from_webhook(
+                            campaign=campaign,
+                            payment=payment,
+                            gateway_refund_id=rfnd_id,
+                            refund_amount_minor=rfnd_amt,
+                            raw_payload=rfnd_item,
+                            operation_id_hint=op_hint,
+                            event_id=event_id,
+                        )
+                else:
+                    AdvertisingCampaignService.reconcile_refund_from_webhook(
+                        campaign=campaign,
+                        payment=payment,
+                        gateway_refund_id="",
+                        refund_amount_minor=0,
+                        cumulative_amount_refunded_minor=cumulative_refunded,
+                        raw_payload=payload,
+                        event_id=event_id,
+                    )
+
+                PaymentWebhookEvent.objects.update_or_create(
+                    provider=provider_name,
+                    event_id=event_id,
+                    defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                )
+                return Response(
+                    {"status": "refund_reconciled", "campaign_id": str(campaign.id) if campaign else None},
+                    status=status.HTTP_200_OK,
+                )
+
+            # Dispute or failure events
+            if event_type in ('charge.dispute.created', 'payment_intent.payment_failed', 'charge.failed'):
+                PaymentWebhookEvent.objects.update_or_create(
+                    provider=provider_name,
+                    event_id=event_id,
+                    defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                )
+                return Response({"status": "event_recorded", "event_type": event_type}, status=status.HTTP_200_OK)
+
+            # Only process successful charges
+            if event_type not in ('payment_intent.succeeded', 'charge.succeeded', 'checkout.session.completed'):
+                PaymentWebhookEvent.objects.update_or_create(
+                    provider=provider_name,
+                    event_id=event_id,
+                    defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                )
+                return Response({"status": "ignored", "event_type": event_type}, status=status.HTTP_200_OK)
+
+        elif provider_name == 'RAZORPAY':
+            if event_type in ('refund.processed', 'payment.refunded'):
+                entity = payload.get('payload', {}).get('refund', {}).get('entity', {}) or payload.get('payload', {}).get('payment', {}).get('entity', {})
+                notes = entity.get('notes', {}) or {}
+                campaign_id = notes.get('campaign_id')
+                gateway_refund_id = entity.get('id', '')
+                gateway_payment_id = entity.get('payment_id', '')
+                amount_refunded = int(entity.get('amount', 0))
+                op_hint = notes.get('operation_id')
+
+                campaign = AdvertisingCampaign.objects.filter(id=campaign_id).first() if campaign_id else None
+                payment = None
+                if not campaign and gateway_payment_id:
+                    payment = CampaignPayment.objects.filter(
+                        models.Q(gateway_payment_id=gateway_payment_id) | models.Q(gateway_reference=gateway_payment_id)
+                    ).first()
+                    if payment:
+                        campaign = payment.campaign
+
+                if not campaign and not payment:
+                    PaymentWebhookEvent.objects.update_or_create(
+                        provider=provider_name,
+                        event_id=event_id,
+                        defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                    )
+                    logger.warning("Unmatched Razorpay refund event %s recorded for reconciliation.", event_id)
+                    return Response({"status": "unmatched_recorded", "event_id": event_id}, status=status.HTTP_200_OK)
+
+                AdvertisingCampaignService.reconcile_refund_from_webhook(
+                    campaign=campaign,
+                    payment=payment,
+                    gateway_refund_id=gateway_refund_id,
+                    refund_amount_minor=amount_refunded,
+                    raw_payload=payload,
+                    operation_id_hint=op_hint,
+                    event_id=event_id,
+                )
+
+                PaymentWebhookEvent.objects.update_or_create(
+                    provider=provider_name,
+                    event_id=event_id,
+                    defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                )
+                return Response(
+                    {"status": "refund_reconciled", "campaign_id": str(campaign.id) if campaign else None},
+                    status=status.HTTP_200_OK,
+                )
+
+            # Failure / dispute events
+            if event_type in ('payment.failed', 'refund.failed'):
+                PaymentWebhookEvent.objects.update_or_create(
+                    provider=provider_name,
+                    event_id=event_id,
+                    defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                )
+                return Response({"status": "event_recorded", "event_type": event_type}, status=status.HTTP_200_OK)
+
+            entity = payload.get('payload', {}).get('payment', {}).get('entity', {})
+            notes = entity.get('notes', {}) or {}
+            campaign_id = notes.get('campaign_id')
+            gateway_payment_id = entity.get('id', '')
+            gateway_order_id = entity.get('order_id', '')
+            amount_minor = int(entity.get('amount', 0))
+            currency = str(entity.get('currency', 'inr')).upper()
+
+            if event_type not in ('payment.captured', 'order.paid'):
+                PaymentWebhookEvent.objects.update_or_create(
+                    provider=provider_name,
+                    event_id=event_id,
+                    defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+                )
+                return Response({"status": "ignored", "event_type": event_type}, status=status.HTTP_200_OK)
+
+        if not campaign_id:
+            # Not an advertising campaign webhook event
+            PaymentWebhookEvent.objects.update_or_create(
+                provider=provider_name,
+                event_id=event_id,
+                defaults={"event_type": event_type, "payload": payload, "processed": True, "order_id": None},
+            )
+            return Response({"status": "not_advertising_event"}, status=status.HTTP_200_OK)
+
+        try:
+            payment = AdvertisingCampaignService.record_successful_payment(
+                campaign_id=campaign_id,
+                provider=provider_name,
+                gateway_reference=gateway_order_id or gateway_payment_id,
+                gateway_payment_id=gateway_payment_id,
+                amount_minor=amount_minor,
+                currency=currency,
+                raw_response=payload,
+                idempotency_key=event_id,
+                is_live=is_live,
+            )
+
+            # Record event as processed
+            PaymentWebhookEvent.objects.update_or_create(
+                provider=provider_name,
+                event_id=event_id,
+                defaults={
+                    "event_type": event_type,
+                    "payload": payload,
+                    "processed": True,
+                    "order_id": None,
+                },
+            )
+
+            resp_status = (
+                "payment_recorded_activation_held"
+                if (is_live and not is_live_advertising_charge_authorized())
+                else "success"
+            )
+
+            return Response(
+                {
+                    "status": resp_status,
+                    "campaign_id": campaign_id,
+                    "payment_id": str(payment.id),
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.error("Error processing advertising webhook for campaign %s: %s", campaign_id, str(e), exc_info=True)
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

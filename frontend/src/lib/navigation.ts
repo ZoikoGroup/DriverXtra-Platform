@@ -22,6 +22,7 @@ import {
   Store,
   Users,
   Receipt,
+  Megaphone,
 } from "lucide-react";
 import { PrototypeUser } from "@/lib/prototype-auth/types";
 
@@ -48,6 +49,7 @@ export const BUYER_NAV_ITEMS: NavItem[] = [
 
 export const SELLER_NAV_ITEMS: NavItem[] = [
   { id: "seller_inventory", label: "My Inventory (Vehicles & Parts)", icon: Layers, badge: "Manage" },
+  { id: "seller_advertising", label: "Sponsored Listings & Ads", icon: Megaphone, badge: "Promote" },
   { id: "seller_orders", label: "Customer Orders", icon: Boxes, badge: "Orders" },
   { id: "seller_onboarding", label: "Seller Verification Status", icon: FileCheck2, badge: "Verified" },
   { id: "organisations", label: "Dealership & Teams", icon: Building2, badge: "Organisation" },
@@ -68,6 +70,7 @@ export const WORKSHOP_NAV_ITEMS: NavItem[] = [
 export const ADMIN_NAV_ITEMS: NavItem[] = [
   { id: "admin_overview", label: "Admin Overview", icon: LayoutDashboard, badge: "Live" },
   { id: "admin_marketplace_review", label: "Marketplace Moderation", icon: ShieldCheck, badge: "Review" },
+  { id: "admin_advertising", label: "Advertising Oversight", icon: Megaphone, badge: "Ads" },
   { id: "admin_sellers", label: "Seller Management", icon: Store, badge: "Sellers" },
   { id: "admin_workshops", label: "Workshop Management", icon: Wrench, badge: "Workshops" },
   { id: "admin_buyers", label: "Buyer Management", icon: Users, badge: "Buyers" },

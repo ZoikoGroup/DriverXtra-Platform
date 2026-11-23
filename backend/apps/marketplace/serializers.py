@@ -4,6 +4,11 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 from apps.marketplace.models import (
+    BulkUploadJob,
+    BulkUploadRowError,
+    BulkUploadTypeChoices,
+    BulkUploadStatusChoices,
+    BulkUploadDuplicatePolicy,
     VehicleListing,
     SparePartListing,
     StockMovement,
@@ -2699,5 +2704,554 @@ class VehiclePurchaseDocumentVerificationSerializer(serializers.Serializer):
         return attrs
 
 
+# ---------------------------------------------------------------------------
+# Phase 7.1: Dealer Bulk Upload Serializers
+# ---------------------------------------------------------------------------
+
+
+class BulkUploadRowErrorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BulkUploadRowError
+        fields = [
+            'id',
+            'job',
+            'row_number',
+            'field_name',
+            'error_code',
+            'error_message',
+            'raw_data',
+            'is_resolved',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class BulkUploadJobSerializer(serializers.ModelSerializer):
+    seller_name = serializers.CharField(source='seller.full_name', read_only=True, allow_null=True)
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+    progress_percentage = serializers.IntegerField(read_only=True)
+    is_finished = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = BulkUploadJob
+        fields = [
+            'id',
+            'seller',
+            'seller_name',
+            'organisation',
+            'organisation_name',
+            'upload_type',
+            'status',
+            'duplicate_policy',
+            'filename',
+            'file_size_bytes',
+            'total_rows',
+            'processed_rows',
+            'successful_rows',
+            'failed_rows',
+            'duplicate_rows',
+            'progress_percentage',
+            'is_finished',
+            'started_at',
+            'completed_at',
+            'error_summary',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class BulkUploadSubmitSerializer(serializers.Serializer):
+    file = serializers.FileField(required=True)
+    upload_type = serializers.ChoiceField(choices=BulkUploadTypeChoices.choices, required=True)
+    duplicate_policy = serializers.ChoiceField(
+        choices=[
+            (BulkUploadDuplicatePolicy.SKIP.value, 'Skip Duplicates'),
+            (BulkUploadDuplicatePolicy.FAIL_ROW.value, 'Mark Row as Error'),
+        ],
+        default=BulkUploadDuplicatePolicy.SKIP.value,
+        required=False,
+    )
+    organisation = serializers.PrimaryKeyRelatedField(
+        queryset=Organisation.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+
+    def validate_file(self, value):
+        max_size = 15 * 1024 * 1024  # 15 MB
+        if value.size > max_size:
+            raise serializers.ValidationError(
+                f"File size ({value.size / (1024 * 1024):.2f} MB) exceeds maximum allowed limit of 15 MB."
+            )
+
+        name = value.name.lower()
+        if not (name.endswith('.csv') or name.endswith('.txt')):
+            raise serializers.ValidationError("Only CSV text files (.csv) are accepted.")
+
+        pos = value.tell() if hasattr(value, 'tell') else 0
+        header = value.read(4096)
+        if hasattr(value, 'seek'):
+            value.seek(pos)
+
+        if b'\x00' in header:
+            raise serializers.ValidationError("File contains binary data. Please upload a genuine plain text CSV file.")
+
+        return value
+
+
+# ==============================================================================
+# PHASE 7.2: SPONSORED LISTINGS & ADVERTISING SERIALIZERS
+# ==============================================================================
+
+from typing import Optional, Dict, Any, List
+from apps.marketplace.models import (
+    AdvertisingCampaign,
+    SponsoredListing,
+    CampaignPayment,
+    CampaignImpression,
+    CampaignClick,
+    CampaignDailyMetric,
+    CampaignTypeChoices,
+    CampaignStatusChoices,
+    CampaignPaymentStatusChoices,
+)
+from apps.marketplace.advertising_pricing import (
+    calculate_campaign_pricing,
+    normalize_advertising_country,
+    ADVERTISING_PACKAGES,
+)
+
+
+class SponsoredListingSummarySerializer(serializers.ModelSerializer):
+    """Summarized representation of a single sponsored listing attached to a campaign."""
+    target_type = serializers.ReadOnlyField()
+    impression_count = serializers.IntegerField(source='impressions_count', read_only=True)
+    click_count = serializers.IntegerField(source='clicks_count', read_only=True)
+    ctr_percentage = serializers.ReadOnlyField(source='click_through_rate')
+    bid_weight = serializers.SerializerMethodField()
+    listing_title = serializers.SerializerMethodField()
+    listing_price = serializers.SerializerMethodField()
+    listing_currency = serializers.SerializerMethodField()
+    listing_image = serializers.SerializerMethodField()
+    listing_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SponsoredListing
+        fields = [
+            'id',
+            'campaign',
+            'target_type',
+            'vehicle_listing',
+            'part_listing',
+            'bid_weight',
+            'impression_count',
+            'click_count',
+            'ctr_percentage',
+            'is_active',
+            'created_at',
+            'listing_title',
+            'listing_price',
+            'listing_currency',
+            'listing_image',
+            'listing_status',
+        ]
+        read_only_fields = fields
+
+    def get_bid_weight(self, obj) -> int:
+        return 1
+
+    def get_ctr_percentage(self, obj) -> float:
+        return obj.click_through_rate
+
+    def get_listing_title(self, obj) -> str:
+        if obj.target_type == CampaignTypeChoices.VEHICLES and obj.vehicle_listing:
+            return obj.vehicle_listing.title or f"{obj.vehicle_listing.make} {obj.vehicle_listing.model}"
+        elif obj.target_type == CampaignTypeChoices.SPARE_PARTS and obj.part_listing:
+            return obj.part_listing.title or getattr(obj.part_listing.part, 'name', 'Spare Part')
+        return "Unknown Listing"
+
+    def get_listing_price(self, obj) -> Optional[str]:
+        if obj.target_type == CampaignTypeChoices.VEHICLES and obj.vehicle_listing:
+            return str(obj.vehicle_listing.price) if obj.vehicle_listing.price is not None else None
+        elif obj.target_type == CampaignTypeChoices.SPARE_PARTS and obj.part_listing:
+            return str(obj.part_listing.price) if obj.part_listing.price is not None else None
+        return None
+
+    def get_listing_currency(self, obj) -> str:
+        if obj.target_type == CampaignTypeChoices.VEHICLES and obj.vehicle_listing:
+            return obj.vehicle_listing.currency or 'GBP'
+        elif obj.target_type == CampaignTypeChoices.SPARE_PARTS and obj.part_listing:
+            return obj.part_listing.currency or 'GBP'
+        return 'GBP'
+
+    def get_listing_image(self, obj) -> Optional[str]:
+        if obj.target_type == CampaignTypeChoices.VEHICLES and obj.vehicle_listing:
+            images = getattr(obj.vehicle_listing, 'images', None)
+            if images and hasattr(images, 'all'):
+                first_img = images.filter(is_primary=True).first() or images.first()
+                if first_img and hasattr(first_img, 'image'):
+                    return getattr(first_img.image, 'url', None)
+        elif obj.target_type == CampaignTypeChoices.SPARE_PARTS and obj.part_listing:
+            images = getattr(obj.part_listing, 'images', None)
+            if images and hasattr(images, 'all'):
+                first_img = images.filter(is_primary=True).first() or images.first()
+                if first_img and hasattr(first_img, 'image'):
+                    return getattr(first_img.image, 'url', None)
+        return None
+
+    def get_listing_status(self, obj) -> str:
+        if obj.target_type == CampaignTypeChoices.VEHICLES and obj.vehicle_listing:
+            return str(obj.vehicle_listing.status)
+        elif obj.target_type == CampaignTypeChoices.SPARE_PARTS and obj.part_listing:
+            return str(obj.part_listing.status)
+        return 'UNKNOWN'
+
+
+class CampaignPaymentSummarySerializer(serializers.ModelSerializer):
+    """Summary of payments associated with an advertising campaign."""
+    class Meta:
+        model = CampaignPayment
+        fields = [
+            'id',
+            'provider',
+            'gateway_reference',
+            'gateway_payment_id',
+            'amount_minor',
+            'currency',
+            'payment_status',
+            'paid_at',
+            'refund_amount_minor',
+            'refunded_at',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class CampaignDailyMetricSerializer(serializers.ModelSerializer):
+    """Daily performance metric aggregates for a campaign."""
+    impressions_count = serializers.IntegerField(source='impressions', read_only=True)
+    clicks_count = serializers.IntegerField(source='clicks', read_only=True)
+    spend_amount_minor = serializers.IntegerField(source='spend_minor', read_only=True)
+    ctr_percentage = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CampaignDailyMetric
+        fields = [
+            'id',
+            'date',
+            'impressions',
+            'impressions_count',
+            'clicks',
+            'clicks_count',
+            'ctr_percentage',
+            'spend_minor',
+            'spend_amount_minor',
+        ]
+        read_only_fields = fields
+
+    def get_ctr_percentage(self, obj) -> float:
+        if obj.impressions > 0:
+            return round((obj.clicks / obj.impressions) * 100.0, 2)
+        return 0.0
+
+
+class AdvertisingCampaignSerializer(serializers.ModelSerializer):
+    """Comprehensive read representation of an Advertising Campaign."""
+    seller_email = serializers.EmailField(source='seller.email', read_only=True)
+    seller_name = serializers.SerializerMethodField()
+    organisation_name = serializers.CharField(source='organisation.name', read_only=True, allow_null=True)
+    approved_by_email = serializers.EmailField(source='approved_by.email', read_only=True, allow_null=True)
+    sponsored_listings = SponsoredListingSummarySerializer(many=True, read_only=True)
+    payments = CampaignPaymentSummarySerializer(many=True, read_only=True)
+    listings_count = serializers.SerializerMethodField()
+    remaining_budget_minor = serializers.ReadOnlyField()
+    ctr_percentage = serializers.ReadOnlyField(source='ctr')
+    total_impressions = serializers.IntegerField(source='impressions_count', read_only=True)
+    total_clicks = serializers.IntegerField(source='clicks_count', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    payment_status_display = serializers.CharField(source='get_payment_status_display', read_only=True)
+    campaign_type_display = serializers.CharField(source='get_campaign_type_display', read_only=True)
+    duration_days = serializers.ReadOnlyField()
+    approval_notes = serializers.CharField(source='review_notes', read_only=True)
+    target_country = serializers.SerializerMethodField()
+    net_amount_minor = serializers.SerializerMethodField()
+    tax_amount_minor = serializers.SerializerMethodField()
+    tax_rate_percent = serializers.SerializerMethodField()
+    tax_regime = serializers.SerializerMethodField()
+    sac_code = serializers.SerializerMethodField()
+    rejected_at = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AdvertisingCampaign
+        fields = [
+            'id',
+            'seller',
+            'seller_email',
+            'seller_name',
+            'organisation',
+            'organisation_name',
+            'title',
+            'description',
+            'campaign_type',
+            'campaign_type_display',
+            'status',
+            'status_display',
+            'payment_status',
+            'payment_status_display',
+            'currency',
+            'target_country',
+            'package_code',
+            'duration_days',
+            'start_date',
+            'end_date',
+            'total_budget_minor',
+            'spent_amount_minor',
+            'daily_rate_minor',
+            'net_amount_minor',
+            'tax_amount_minor',
+            'tax_rate_percent',
+            'tax_regime',
+            'sac_code',
+            'total_impressions',
+            'total_clicks',
+            'ctr_percentage',
+            'remaining_budget_minor',
+            'listings_count',
+            'sponsored_listings',
+            'payments',
+            'approval_notes',
+            'rejection_reason',
+            'approved_by',
+            'approved_by_email',
+            'approved_at',
+            'rejected_at',
+            'payment_reference',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_seller_name(self, obj) -> str:
+        if not obj.seller:
+            return ""
+        name = f"{getattr(obj.seller, 'first_name', '')} {getattr(obj.seller, 'last_name', '')}".strip()
+        return name or obj.seller.email
+
+    def get_listings_count(self, obj) -> int:
+        return obj.sponsored_listings.count()
+
+    def get_target_country(self, obj) -> str:
+        if obj.organisation and getattr(obj.organisation, 'country', None):
+            return obj.organisation.country
+        return 'IN' if obj.currency == 'INR' else 'GB'
+
+    def get_net_amount_minor(self, obj) -> int:
+        country = self.get_target_country(obj)
+        rate = Decimal('18.00') if country == 'IN' else Decimal('20.00')
+        net = (Decimal(obj.total_budget_minor) / (Decimal('1.00') + (rate / Decimal('100.00')))).quantize(Decimal('1'))
+        return int(net)
+
+    def get_tax_amount_minor(self, obj) -> int:
+        return max(0, obj.total_budget_minor - self.get_net_amount_minor(obj))
+
+    def get_tax_rate_percent(self, obj) -> float:
+        country = self.get_target_country(obj)
+        return 18.0 if country == 'IN' else 20.0
+
+    def get_tax_regime(self, obj) -> str:
+        country = self.get_target_country(obj)
+        return 'Indian GST' if country == 'IN' else 'UK VAT'
+
+    def get_sac_code(self, obj) -> str:
+        country = self.get_target_country(obj)
+        return '998365' if country == 'IN' else ''
+
+    def get_rejected_at(self, obj):
+        return obj.updated_at if obj.status == CampaignStatusChoices.REJECTED else None
+
+
+class AdvertisingCampaignCreateSerializer(serializers.Serializer):
+    """Validates creation of a new advertising campaign by a seller."""
+    title = serializers.CharField(max_length=200, required=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+    campaign_type = serializers.ChoiceField(choices=CampaignTypeChoices.choices, required=True)
+    target_country = serializers.ChoiceField(choices=[('GB', 'United Kingdom'), ('IN', 'India')], required=True)
+    currency = serializers.ChoiceField(choices=[('GBP', 'GBP'), ('INR', 'INR')], required=True)
+    package_code = serializers.ChoiceField(
+        choices=['7_DAYS', '14_DAYS', '30_DAYS', 'CUSTOM'],
+        default='7_DAYS',
+    )
+    duration_days = serializers.IntegerField(required=False, min_value=3, max_value=90, allow_null=True)
+    start_date = serializers.DateField(required=False, allow_null=True)
+    listing_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=True,
+        min_length=1,
+        max_length=100,
+    )
+    organisation = serializers.PrimaryKeyRelatedField(
+        queryset=Organisation.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        country = normalize_advertising_country(attrs['target_country'])
+        attrs['target_country'] = country
+        currency = attrs['currency'].strip().upper()
+
+        if country == 'GB' and currency != 'GBP':
+            raise serializers.ValidationError({"currency": "Campaigns targeting United Kingdom (GB) must use GBP currency."})
+        elif country == 'IN' and currency != 'INR':
+            raise serializers.ValidationError({"currency": "Campaigns targeting India (IN) must use INR currency."})
+
+        package_code = attrs.get('package_code', 'CUSTOM')
+        pkg_alias_map = {
+            '7_DAYS': 7,
+            '14_DAYS': 14,
+            '30_DAYS': 30,
+            'AD_PKG_7D': 7,
+            'AD_PKG_14D': 14,
+            'AD_PKG_30D': 30,
+        }
+        if package_code in pkg_alias_map:
+            attrs['duration_days'] = pkg_alias_map[package_code]
+        else:
+            duration = attrs.get('duration_days')
+            if not duration or not (3 <= duration <= 90):
+                raise serializers.ValidationError(
+                    {"duration_days": "Custom package duration must be specified between 3 and 90 days."}
+                )
+
+        start_date = attrs.get('start_date')
+        today = timezone.localdate()
+        if start_date and start_date < today:
+            raise serializers.ValidationError({"start_date": "Campaign start date cannot be in the past."})
+
+        # Validate organisation membership if provided
+        org = attrs.get('organisation')
+        if org:
+            is_member = OrganisationMembership.objects.filter(
+                organisation=org,
+                user=user,
+                is_active=True,
+            ).exists()
+            if not is_member and not user.is_staff:
+                raise serializers.ValidationError({"organisation": "You are not an active member of this organisation."})
+
+        # Validate listing IDs exist, match campaign type, and are owned by user/org
+        campaign_type = attrs['campaign_type']
+        listing_ids = attrs['listing_ids']
+
+        if campaign_type == CampaignTypeChoices.VEHICLES:
+            qs = VehicleListing.objects.filter(id__in=listing_ids)
+            if org:
+                qs = qs.filter(organisation=org)
+            else:
+                qs = qs.filter(seller=user)
+            found_count = qs.count()
+            if found_count != len(listing_ids):
+                raise serializers.ValidationError(
+                    {"listing_ids": f"Only {found_count} of {len(listing_ids)} vehicle listings were found belonging to your account."}
+                )
+            unapproved = qs.exclude(status=ListingStatusChoices.APPROVED).count()
+            if unapproved > 0:
+                raise serializers.ValidationError(
+                    {"listing_ids": f"{unapproved} selected vehicle listing(s) are not in APPROVED state. Only approved listings can be sponsored."}
+                )
+        elif campaign_type == CampaignTypeChoices.SPARE_PARTS:
+            qs = SparePartListing.objects.filter(id__in=listing_ids)
+            if org:
+                qs = qs.filter(organisation=org)
+            else:
+                qs = qs.filter(seller=user)
+            found_count = qs.count()
+            if found_count != len(listing_ids):
+                raise serializers.ValidationError(
+                    {"listing_ids": f"Only {found_count} of {len(listing_ids)} spare-part listings were found belonging to your account."}
+                )
+            unapproved = qs.exclude(status=ListingStatusChoices.APPROVED).count()
+            if unapproved > 0:
+                raise serializers.ValidationError(
+                    {"listing_ids": f"{unapproved} selected spare-part listing(s) are not in APPROVED state. Only approved listings can be sponsored."}
+                )
+
+        return attrs
+
+
+class AdvertisingCampaignUpdateSerializer(serializers.Serializer):
+    """Allows modifying title, description, or start_date of a DRAFT campaign."""
+    title = serializers.CharField(max_length=200, required=False)
+    description = serializers.CharField(required=False, allow_blank=True)
+    start_date = serializers.DateField(required=False, allow_null=True)
+    package_code = serializers.ChoiceField(
+        choices=['7_DAYS', '14_DAYS', '30_DAYS', 'CUSTOM'],
+        required=False,
+    )
+    duration_days = serializers.IntegerField(required=False, min_value=3, max_value=90)
+    listing_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=False,
+        min_length=1,
+        max_length=100,
+    )
+
+
+class CampaignPricingQuoteRequestSerializer(serializers.Serializer):
+    """Dynamic pricing calculator request serializer."""
+    currency = serializers.ChoiceField(choices=['GBP', 'INR'], required=True)
+    duration_days = serializers.IntegerField(min_value=3, max_value=90, required=False)
+    package_code = serializers.ChoiceField(choices=['7_DAYS', '14_DAYS', '30_DAYS', 'CUSTOM'], default='7_DAYS')
+    target_country = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        currency = attrs['currency'].strip().upper()
+        country = attrs.get('target_country') or ('GB' if currency == 'GBP' else 'IN')
+        attrs['target_country'] = normalize_advertising_country(country)
+
+        package_code = attrs.get('package_code', 'CUSTOM')
+        pkg_alias_map = {
+            '7_DAYS': 7,
+            '14_DAYS': 14,
+            '30_DAYS': 30,
+            'AD_PKG_7D': 7,
+            'AD_PKG_14D': 14,
+            'AD_PKG_30D': 30,
+        }
+        if package_code in pkg_alias_map:
+            attrs['duration_days'] = pkg_alias_map[package_code]
+        elif not attrs.get('duration_days'):
+            attrs['duration_days'] = 7
+        return attrs
+
+
+class CampaignReviewSerializer(serializers.Serializer):
+    """Validates admin approval or rejection of an advertising campaign."""
+    action = serializers.ChoiceField(choices=['APPROVE', 'REJECT'], required=True)
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, default='')
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        if attrs['action'] == 'REJECT':
+            reason = attrs.get('rejection_reason', '').strip()
+            if not reason:
+                raise serializers.ValidationError({"rejection_reason": "A detailed rejection reason is mandatory when rejecting a campaign."})
+        return attrs
+
+
+class TrackImpressionSerializer(serializers.Serializer):
+    """Validates impression tracking payload."""
+    sponsored_listing_id = serializers.UUIDField(required=True)
+    session_id = serializers.CharField(max_length=128, required=True)
+    referrer = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+    user_agent = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+
+
+class TrackClickSerializer(serializers.Serializer):
+    """Validates click tracking payload."""
+    sponsored_listing_id = serializers.UUIDField(required=True)
+    session_id = serializers.CharField(max_length=128, required=True)
+    destination_url = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
 
 

@@ -1,1 +1,6 @@
 """Configuration package for DriverXtra backend."""
+
+# This ensures the Celery app is loaded whenever Django starts.
+from .celery import app as celery_app
+
+__all__ = ('celery_app',)

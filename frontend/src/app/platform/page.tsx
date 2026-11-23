@@ -32,6 +32,8 @@ import BuyerFavouritesView from "@/components/platform/BuyerFavouritesView";
 import BuyerEnquiriesView from "@/components/platform/BuyerEnquiriesView";
 import BuyerOrdersView from "@/components/platform/BuyerOrdersView";
 import SellerOrdersView from "@/components/platform/SellerOrdersView";
+import SellerAdvertisingView from "@/components/platform/SellerAdvertisingView";
+import AdminAdvertisingView from "@/components/platform/AdminAdvertisingView";
 import NotificationDrawer, { useNotificationUnreadCount } from "@/components/platform/NotificationDrawer";
 import { getDefaultTabForRole, isTabAllowedForRole, getTabLabel } from "@/lib/navigation";
 
@@ -250,6 +252,18 @@ export default function PlatformDashboardPage() {
               <SellerInventoryView />
             ) : (
               <Phase2SellerOnboardingView initialTab="my_application" />
+            )
+          ) : currentTab === "seller_advertising" ? (
+            isSellerOrWorkshop ? (
+              <SellerAdvertisingView />
+            ) : (
+              <Phase2SellerOnboardingView initialTab="my_application" />
+            )
+          ) : currentTab === "admin_advertising" ? (
+            canAccessListingReview ? (
+              <AdminAdvertisingView />
+            ) : (
+              <MarketplaceBrowseView />
             )
           ) : currentTab === "admin_marketplace_review" ? (
             canAccessListingReview ? (
