@@ -533,10 +533,12 @@ def test_7_duplicate_payment_prevention(in_work_order, buyer_client):
 @pytest.mark.django_db
 def test_8_concurrent_payment_attempts_auto_refunds_excess(in_work_order, buyer_user):
     """8. Concurrent payment attempts: second payment after full settlement is safely auto-refunded."""
+    secret = getattr(settings, 'RAZORPAY_KEY_SECRET', 'test_razorpay_secret')
+    sig1 = build_razorpay_signature("order_first_123", "pay_first_123", secret)
     # First payment settles work order
     WorkOrderSettlementService.verify_settlement_payment(
         work_order_id=in_work_order.id,
-        payload={"razorpay_payment_id": "pay_first_123", "razorpay_order_id": "order_first_123", "razorpay_signature": "test_sig_valid", "amount": "8000.00"},
+        payload={"razorpay_payment_id": "pay_first_123", "razorpay_order_id": "order_first_123", "razorpay_signature": sig1, "amount": "8000.00"},
         actor=buyer_user,
         preferred_provider="RAZORPAY",
     )
@@ -544,9 +546,10 @@ def test_8_concurrent_payment_attempts_auto_refunds_excess(in_work_order, buyer_
     assert in_work_order.settlement_status == WorkOrderSettlementStatusChoices.FULLY_PAID
 
     # Second concurrent payment arrives for already settled work order
+    sig2 = build_razorpay_signature("order_second_456", "pay_second_456", secret)
     wo, late_payment = WorkOrderSettlementService.verify_settlement_payment(
         work_order_id=in_work_order.id,
-        payload={"razorpay_payment_id": "pay_second_456", "razorpay_order_id": "order_second_456", "razorpay_signature": "test_sig_valid", "amount": "8000.00"},
+        payload={"razorpay_payment_id": "pay_second_456", "razorpay_order_id": "order_second_456", "razorpay_signature": sig2, "amount": "8000.00"},
         actor=buyer_user,
         preferred_provider="RAZORPAY",
     )
@@ -613,9 +616,9 @@ def test_10_webhook_confirmation(in_work_order, buyer_user):
     sig = build_razorpay_webhook_signature(raw_body, secret)
 
     headers = {
-        'HTTP_X_RAZORPAY_SIGNATURE': 'test_webhook_sig_valid',
-        'X-Razorpay-Signature': 'test_webhook_sig_valid',
-        'x-razorpay-signature': 'test_webhook_sig_valid',
+        'HTTP_X_RAZORPAY_SIGNATURE': sig,
+        'X-Razorpay-Signature': sig,
+        'x-razorpay-signature': sig,
     }
 
     # Delivery 1
@@ -624,7 +627,7 @@ def test_10_webhook_confirmation(in_work_order, buyer_user):
         request_body=raw_body,
         headers=headers,
     )
-    assert success is True
+    assert success is True, f"process_settlement_webhook failed with: {msg}"
     in_work_order.refresh_from_db()
     assert in_work_order.settlement_status == WorkOrderSettlementStatusChoices.FULLY_PAID
 
@@ -669,9 +672,11 @@ def test_12_late_payment_after_work_order_cancellation(in_work_order, buyer_user
     in_work_order.status = WorkOrderStatusChoices.CANCELLED
     in_work_order.save(update_fields=['status'])
 
+    secret = getattr(settings, 'RAZORPAY_KEY_SECRET', 'test_razorpay_secret')
+    sig = build_razorpay_signature("order_late_123", "pay_late_cancelled_123", secret)
     wo, late_payment = WorkOrderSettlementService.verify_settlement_payment(
         work_order_id=in_work_order.id,
-        payload={"razorpay_payment_id": "pay_late_cancelled_123", "razorpay_order_id": "order_late_123", "razorpay_signature": "test_sig_valid", "amount": "8000.00"},
+        payload={"razorpay_payment_id": "pay_late_cancelled_123", "razorpay_order_id": "order_late_123", "razorpay_signature": sig, "amount": "8000.00"},
         actor=buyer_user,
         preferred_provider="RAZORPAY",
     )
@@ -1099,7 +1104,7 @@ def test_22_duplicate_webhook_delivery_does_not_duplicate_ledger_or_refund(in_wo
         request_body=raw_body,
         headers=headers,
     )
-    assert success1 is True
+    assert success1 is True, f"process_settlement_webhook failed with: {msg1}"
     assert in_work_order.payments.filter(status=WorkOrderPaymentStatusChoices.SUCCESS).count() == 1
 
     success2, msg2 = WorkOrderSettlementService.process_settlement_webhook(

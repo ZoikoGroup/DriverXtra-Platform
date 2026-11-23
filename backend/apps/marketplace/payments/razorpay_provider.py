@@ -10,6 +10,7 @@ import uuid
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple, Union
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from apps.marketplace.payments.base import BasePaymentProvider
 
 logger = logging.getLogger(__name__)
@@ -27,12 +28,27 @@ class RazorpayPaymentProvider(BasePaymentProvider):
     _cached_methods: Optional[Dict[str, Any]] = None
     _cached_methods_time: float = 0.0
 
-    def __init__(self):
-        self.key_id = getattr(settings, 'RAZORPAY_KEY_ID', 'rzp_test_placeholder_key')
-        self.key_secret = getattr(settings, 'RAZORPAY_KEY_SECRET', 'rzp_test_placeholder_secret')
-        self.webhook_secret = getattr(settings, 'RAZORPAY_WEBHOOK_SECRET', 'rzp_test_webhook_secret')
+    def __init__(
+        self,
+        key_id: Optional[str] = None,
+        key_secret: Optional[str] = None,
+        webhook_secret: Optional[str] = None,
+    ):
+        self.key_id = key_id if key_id is not None else getattr(settings, 'RAZORPAY_KEY_ID', 'rzp_test_placeholder_key')
+        self.key_secret = key_secret if key_secret is not None else getattr(settings, 'RAZORPAY_KEY_SECRET', 'rzp_test_placeholder_secret')
+        self.webhook_secret = webhook_secret if webhook_secret is not None else getattr(settings, 'RAZORPAY_WEBHOOK_SECRET', 'rzp_test_webhook_secret')
         self.api_url = getattr(settings, 'RAZORPAY_API_URL', 'https://api.razorpay.com/v1').rstrip('/')
         self.test_mode = self._is_test_mode_allowed()
+
+        # Enforce matching test / live key pair consistency
+        clean_key = (self.key_id or '').strip()
+        clean_secret = (self.key_secret or '').strip()
+        if clean_key.startswith('rzp_test_') and not clean_key.startswith('rzp_test_placeholder'):
+            if clean_secret.startswith('rzp_live_'):
+                raise ValidationError("Razorpay configuration mismatch: test Key ID ('rzp_test_...') cannot be paired with a live Key Secret.")
+        elif clean_key.startswith('rzp_live_'):
+            if clean_secret.startswith(('rzp_test_', 'rzp_test_placeholder')):
+                raise ValidationError("Razorpay configuration mismatch: live Key ID ('rzp_live_...') cannot be paired with a test Key Secret.")
 
     def get_account_methods(self) -> Dict[str, Any]:
         """
@@ -163,6 +179,27 @@ class RazorpayPaymentProvider(BasePaymentProvider):
 
         # Attempt live/sandbox Razorpay Orders API call if credentials are configured
         if self.is_configured:
+            existing_ref = getattr(order, 'payment_reference', '') or ''
+            if existing_ref and str(existing_ref).startswith('order_'):
+                logger.info("Reusing active Razorpay order %s for order %s", existing_ref, order.order_number)
+                methods_info = self.get_account_methods()
+                return {
+                    "provider": self.provider_name,
+                    "provider_order_id": str(existing_ref),
+                    "order_id": str(existing_ref),
+                    "amount": str(order.total_amount),
+                    "amount_minor": amount_paise,
+                    "currency": "INR",
+                    "key_id": self.key_id,
+                    "receipt": receipt_id,
+                    "customer_name": customer_name,
+                    "customer_email": customer_email,
+                    "customer_contact": customer_contact,
+                    "notes": notes_dict,
+                    "is_test_mode": self.test_mode,
+                    "methods_info": methods_info,
+                }
+
             create_order_url = f"{self.api_url}/orders"
             payload_data = {
                 "amount": amount_paise,
@@ -195,6 +232,7 @@ class RazorpayPaymentProvider(BasePaymentProvider):
                     return {
                         "provider": self.provider_name,
                         "provider_order_id": provider_order_id,
+                        "order_id": provider_order_id,
                         "amount": str(order.total_amount),
                         "amount_minor": amount_paise,
                         "currency": "INR",
@@ -222,11 +260,16 @@ class RazorpayPaymentProvider(BasePaymentProvider):
 
         # Test mode fallback for offline development or automated tests without live network
         if self.test_mode:
-            order_id = f"order_rzp_{uuid.uuid4().hex[:14]}"
+            existing_ref = getattr(order, 'payment_reference', '') or ''
+            if existing_ref and str(existing_ref).startswith('order_'):
+                order_id = str(existing_ref)
+            else:
+                order_id = f"order_rzp_{uuid.uuid4().hex[:14]}"
             methods_info = self.get_account_methods()
             return {
                 "provider": self.provider_name,
                 "provider_order_id": order_id,
+                "order_id": order_id,
                 "amount": str(order.total_amount),
                 "amount_minor": amount_paise,
                 "currency": "INR",
@@ -295,11 +338,15 @@ class RazorpayPaymentProvider(BasePaymentProvider):
             return False, "Missing razorpay_signature in confirmation payload.", {}
 
         # 4. Authoritative session check: Reject fabricated or cross-order Razorpay order IDs
-        if order.payment_reference and razorpay_order_id != order.payment_reference:
-            return False, f"Razorpay order ID '{razorpay_order_id}' does not match the active session for order {order.order_number}.", {}
+        expected_order_id = getattr(order, 'payment_reference', '') or ''
+        if expected_order_id and razorpay_order_id != expected_order_id:
+            order_ref = getattr(order, 'order_number', None) or getattr(order, 'id', 'unknown')
+            return False, f"Razorpay order ID '{razorpay_order_id}' does not match the active session for order {order_ref}.", {}
 
         # 5. Signature verification: HMAC-SHA256(key_secret, order_id + "|" + payment_id)
-        msg = f"{razorpay_order_id}|{razorpay_payment_id}".encode('utf-8')
+        # Authoritatively bind signature calculation to the campaign/order's stored order_id if present
+        verified_order_id = expected_order_id if expected_order_id else razorpay_order_id
+        msg = f"{verified_order_id}|{razorpay_payment_id}".encode('utf-8')
         generated_signature = hmac.new(
             self.key_secret.encode('utf-8'),
             msg,
@@ -307,7 +354,7 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         ).hexdigest()
 
         is_valid = hmac.compare_digest(generated_signature, razorpay_signature)
-        if not is_valid and self.test_mode and razorpay_signature in ('test_sig_valid', 'mock_valid_signature'):
+        if not is_valid and self.test_mode and not self.is_configured and razorpay_signature in ('test_sig_valid', 'mock_valid_signature'):
             is_valid = True
 
         if not is_valid:

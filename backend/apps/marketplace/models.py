@@ -300,6 +300,10 @@ class SparePartListing(BaseUUIDModel):
         return f"{self.brand} {self.mpn} - {self.name} (£{self.price}) - {self.status}"
 
     @property
+    def title(self) -> str:
+        return self.name
+
+    @property
     def price_before_gst(self) -> Decimal:
         return self.price
 
@@ -2910,6 +2914,14 @@ class AdvertisingCampaign(BaseUUIDModel):
         return self.ctr
 
     @property
+    def total_impressions(self) -> int:
+        return self.impressions_count
+
+    @property
+    def total_clicks(self) -> int:
+        return self.clicks_count
+
+    @property
     def is_currently_promoted(self) -> bool:
         """Indicates whether this campaign is actively serving sponsored inventory."""
         from django.utils import timezone
@@ -3015,6 +3027,24 @@ class SponsoredListing(BaseUUIDModel):
                 and self.part_listing.is_active
             )
         return False
+
+    @property
+    def impression_count(self) -> int:
+        return self.impressions_count
+
+    @property
+    def click_count(self) -> int:
+        return self.clicks_count
+
+    @property
+    def click_through_rate(self) -> float:
+        if self.impressions_count > 0:
+            return round((self.clicks_count / self.impressions_count) * 100.0, 2)
+        return 0.0
+
+    @property
+    def ctr(self) -> float:
+        return self.click_through_rate
 
 
 class CampaignPayment(BaseUUIDModel):
@@ -3235,5 +3265,27 @@ class CampaignDailyMetric(BaseUUIDModel):
 
     def __str__(self):
         return f"DailyMetric {self.campaign.title} on {self.date}: {self.impressions} impr, {self.clicks} clicks"
+
+    @property
+    def impressions_count(self) -> int:
+        return self.impressions
+
+    @property
+    def clicks_count(self) -> int:
+        return self.clicks
+
+    @property
+    def spend_amount_minor(self) -> int:
+        return self.spend_minor
+
+    @property
+    def click_through_rate(self) -> float:
+        if self.impressions > 0:
+            return round((self.clicks / self.impressions) * 100.0, 2)
+        return 0.0
+
+    @property
+    def ctr(self) -> float:
+        return self.click_through_rate
 
 

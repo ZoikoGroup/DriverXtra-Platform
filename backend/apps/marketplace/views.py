@@ -6877,13 +6877,110 @@ class AdvertisingCampaignSubmitView(views.APIView):
 
 class AdvertisingCampaignPaymentSessionView(views.APIView):
     """
-    Initiates payment session via Stripe or Razorpay for an APPROVED campaign.
+    Retrieves, initiates, or confirms a payment session via Stripe or Razorpay
+    for an APPROVED or PAYMENT_PENDING campaign.
+    GET /api/v1/marketplace/advertising/campaigns/<uuid:id>/payment-session/
     POST /api/v1/marketplace/advertising/campaigns/<uuid:id>/payment-session/
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    def get(self, request, id):
+        """
+        Safely retrieves or resumes an active payment session for an APPROVED or PAYMENT_PENDING campaign.
+        """
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        if campaign.payment_status == CampaignPaymentStatusChoices.PAID:
+            return Response(
+                {
+                    "detail": "Campaign has already been paid for.",
+                    "status": campaign.status,
+                    "payment_status": campaign.payment_status,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if campaign.status not in (CampaignStatusChoices.APPROVED, CampaignStatusChoices.PAYMENT_PENDING):
+            return Response(
+                {
+                    "detail": f"Campaign does not require payment (status: '{campaign.status}').",
+                    "status": campaign.status,
+                    "payment_status": campaign.payment_status,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return_url = request.query_params.get('return_url')
+        cancel_url = request.query_params.get('cancel_url')
+
+        try:
+            session_result = AdvertisingCampaignService.create_payment_session(
+                campaign=campaign,
+                return_url=return_url,
+                cancel_url=cancel_url,
+            )
+            return Response(session_result, status=status.HTTP_200_OK)
+        except (ValidationError, exceptions.ValidationError, ValueError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
     def post(self, request, id):
         campaign = _get_seller_campaign_or_403(request.user, id)
+        action = request.data.get('action')
+
+        if action == 'confirm':
+            # Authoritative client confirmation verification
+            if campaign.payment_status == CampaignPaymentStatusChoices.PAID:
+                return Response(
+                    {
+                        "detail": "Campaign has already been paid for.",
+                        "campaign": AdvertisingCampaignSerializer(campaign).data,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            from apps.marketplace.advertising_service import AdvertisingOrderAdapter
+            from apps.marketplace.advertising_pricing import is_live_advertising_charge_authorized
+            from apps.marketplace.payments.stripe_provider import StripePaymentProvider
+            from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+            order_adapter = AdvertisingOrderAdapter(campaign)
+            if campaign.currency.upper() == 'INR':
+                provider = RazorpayPaymentProvider()
+            elif campaign.currency.upper() == 'GBP':
+                provider = StripePaymentProvider()
+            else:
+                return Response({"detail": f"Unsupported currency: '{campaign.currency}'"}, status=status.HTTP_400_BAD_REQUEST)
+
+            is_live = not getattr(provider, 'test_mode', True)
+            if is_live and not is_live_advertising_charge_authorized():
+                return Response(
+                    {"detail": "Live commercial advertising payments are disabled pending formal tax and compliance signoff."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            payload = request.data.get('payload') or request.data
+            is_valid, ref_or_err, extra = provider.verify_payment(order_adapter, payload)
+            if not is_valid:
+                return Response({"detail": ref_or_err or "Payment verification failed."}, status=status.HTTP_400_BAD_REQUEST)
+
+            payment = AdvertisingCampaignService.record_successful_payment(
+                campaign_id=campaign.id,
+                provider=provider.provider_name,
+                gateway_reference=extra.get('order_id') or ref_or_err,
+                gateway_payment_id=ref_or_err,
+                amount_minor=campaign.total_budget_minor,
+                currency=campaign.currency,
+                raw_response=extra,
+                is_live=is_live,
+            )
+            campaign.refresh_from_db()
+            return Response(
+                {
+                    "detail": "Payment confirmed successfully.",
+                    "payment_id": str(payment.id),
+                    "campaign": AdvertisingCampaignSerializer(campaign).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         return_url = request.data.get('return_url')
         cancel_url = request.data.get('cancel_url')
 
@@ -6969,35 +7066,62 @@ class AdvertisingCampaignAnalyticsView(views.APIView):
         campaign = _get_seller_campaign_or_403(request.user, id)
 
         daily_metrics = CampaignDailyMetric.objects.filter(campaign=campaign).order_by('date')
-        daily_data = [
-            {
+        daily_data = []
+        for dm in daily_metrics:
+            impr = getattr(dm, 'impressions', 0) or 0
+            clk = getattr(dm, 'clicks', 0) or 0
+            spnd = getattr(dm, 'spend_minor', 0) or 0
+            ctr = round((clk / impr) * 100.0, 2) if impr > 0 else 0.0
+            daily_data.append({
                 "date": str(dm.date),
-                "impressions": dm.impressions_count,
-                "clicks": dm.clicks_count,
-                "ctr_pct": dm.click_through_rate,
-                "spend_minor": dm.spend_amount_minor,
-            }
-            for dm in daily_metrics
-        ]
+                "impressions": impr,
+                "clicks": clk,
+                "ctr_pct": ctr,
+                "spend_minor": spnd,
+            })
 
         listings_metrics = []
         for sl in campaign.sponsored_listings.all():
             title = ""
             if sl.target_type == CampaignTypeChoices.VEHICLES and sl.vehicle_listing:
-                title = sl.vehicle_listing.title
+                title = getattr(sl.vehicle_listing, 'title', '') or ''
             elif sl.target_type == CampaignTypeChoices.SPARE_PARTS and sl.part_listing:
-                title = sl.part_listing.title
+                title = getattr(sl.part_listing, 'title', None) or getattr(sl.part_listing, 'name', '') or ''
+
+            impr = getattr(sl, 'impressions_count', None)
+            if impr is None and hasattr(sl, 'impressions'):
+                impr = sl.impressions.count()
+            impr = impr or 0
+
+            clk = getattr(sl, 'clicks_count', None)
+            if clk is None and hasattr(sl, 'clicks'):
+                clk = sl.clicks.count()
+            clk = clk or 0
+
+            ctr = round((clk / impr) * 100.0, 2) if impr > 0 else 0.0
 
             listings_metrics.append({
                 "sponsored_listing_id": str(sl.id),
                 "listing_id": str(sl.vehicle_listing_id or sl.part_listing_id),
                 "target_type": sl.target_type,
                 "title": title,
-                "impressions": sl.impression_count,
-                "clicks": sl.click_count,
-                "ctr_pct": sl.click_through_rate,
+                "impressions": impr,
+                "clicks": clk,
+                "ctr_pct": ctr,
                 "is_active": sl.is_active,
             })
+
+        total_impressions = getattr(campaign, 'impressions_count', None)
+        if total_impressions is None and hasattr(campaign, 'impressions'):
+            total_impressions = campaign.impressions.count()
+        total_impressions = total_impressions or 0
+
+        total_clicks = getattr(campaign, 'clicks_count', None)
+        if total_clicks is None and hasattr(campaign, 'clicks'):
+            total_clicks = campaign.clicks.count()
+        total_clicks = total_clicks or 0
+
+        campaign_ctr = round((total_clicks / total_impressions) * 100.0, 2) if total_impressions > 0 else 0.0
 
         return Response(
             {
@@ -7005,11 +7129,11 @@ class AdvertisingCampaignAnalyticsView(views.APIView):
                 "title": campaign.title,
                 "status": campaign.status,
                 "currency": campaign.currency,
-                "total_budget_minor": campaign.total_budget_minor,
-                "spent_amount_minor": campaign.spent_amount_minor,
-                "total_impressions": campaign.total_impressions,
-                "total_clicks": campaign.total_clicks,
-                "click_through_rate_pct": campaign.click_through_rate,
+                "total_budget_minor": campaign.total_budget_minor or 0,
+                "spent_amount_minor": campaign.spent_amount_minor or 0,
+                "total_impressions": total_impressions,
+                "total_clicks": total_clicks,
+                "click_through_rate_pct": campaign_ctr,
                 "daily_metrics": daily_data,
                 "listings_metrics": listings_metrics,
             },

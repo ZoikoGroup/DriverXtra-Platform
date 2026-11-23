@@ -10,6 +10,8 @@ Covers:
 """
 
 import datetime
+import hashlib
+import hmac
 import json
 import uuid
 from decimal import Decimal
@@ -954,3 +956,135 @@ class TestAdvertisingPaymentWebhookView:
                 succeeded_op = CampaignRefundOperation.objects.get(operation_id="ref_authorized_live_01")
                 assert succeeded_op.status == CampaignRefundStatusChoices.SUCCEEDED
                 assert succeeded_op.gateway_refund_id == "re_live_success_999"
+
+
+@pytest.mark.django_db
+class TestRazorpaySignatureVerification:
+    """Verifies Razorpay HMAC-SHA256 signature verification and order binding."""
+
+    def test_razorpay_verify_valid_signature(self, inr_approved_campaign):
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+        test_key_id = "rzp_test_validkey123"
+        test_key_secret = "rzp_test_validsecret456"
+        provider = RazorpayPaymentProvider(key_id=test_key_id, key_secret=test_key_secret)
+
+        order_id = "order_rzp_valid_001"
+        payment_id = "pay_rzp_valid_001"
+        inr_approved_campaign.payment_reference = order_id
+        inr_approved_campaign.save()
+
+        msg = f"{order_id}|{payment_id}".encode("utf-8")
+        valid_signature = hmac.new(test_key_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+        success, payment_id_res, extra = provider.verify_payment(
+            inr_approved_campaign,
+            {
+                "razorpay_order_id": order_id,
+                "razorpay_payment_id": payment_id,
+                "razorpay_signature": valid_signature,
+            },
+        )
+        assert success is True
+        assert payment_id_res == payment_id
+        assert extra["verified"] is True
+        assert extra["razorpay_order_id"] == order_id
+        assert extra["razorpay_payment_id"] == payment_id
+
+    def test_razorpay_verify_invalid_signature(self, inr_approved_campaign):
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+        test_key_id = "rzp_test_validkey123"
+        test_key_secret = "rzp_test_validsecret456"
+        provider = RazorpayPaymentProvider(key_id=test_key_id, key_secret=test_key_secret)
+
+        order_id = "order_rzp_valid_002"
+        payment_id = "pay_rzp_valid_002"
+        inr_approved_campaign.payment_reference = order_id
+        inr_approved_campaign.save()
+
+        success, message, extra = provider.verify_payment(
+            inr_approved_campaign,
+            {
+                "razorpay_order_id": order_id,
+                "razorpay_payment_id": payment_id,
+                "razorpay_signature": "invalid_tampered_signature_hex",
+            },
+        )
+        assert success is False
+        assert message == "Invalid Razorpay payment signature."
+        assert "generated_signature" in extra
+        assert extra["provided_signature"] == "invalid_tampered_signature_hex"
+
+    def test_razorpay_verify_mismatched_order_id(self, inr_approved_campaign):
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+        test_key_id = "rzp_test_validkey123"
+        test_key_secret = "rzp_test_validsecret456"
+        provider = RazorpayPaymentProvider(key_id=test_key_id, key_secret=test_key_secret)
+
+        campaign_order_id = "order_rzp_expected_003"
+        inr_approved_campaign.payment_reference = campaign_order_id
+        inr_approved_campaign.save()
+
+        attacker_order_id = "order_rzp_attacker_999"
+        payment_id = "pay_rzp_test_003"
+        msg = f"{attacker_order_id}|{payment_id}".encode("utf-8")
+        attacker_sig = hmac.new(test_key_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+        # Attacker sends their own order ID and a valid signature for that order ID,
+        # but backend must reject because it doesn't match the campaign's active payment_reference.
+        success, message, extra = provider.verify_payment(
+            inr_approved_campaign,
+            {
+                "razorpay_order_id": attacker_order_id,
+                "razorpay_payment_id": payment_id,
+                "razorpay_signature": attacker_sig,
+            },
+        )
+        assert success is False
+        assert f"does not match the active session for order {inr_approved_campaign.id}" in message
+
+    def test_razorpay_verify_missing_payment_fields(self, inr_approved_campaign):
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+        provider = RazorpayPaymentProvider(key_id="rzp_test_validkey123", key_secret="rzp_test_validsecret456")
+        order_id = "order_rzp_valid_004"
+        inr_approved_campaign.payment_reference = order_id
+        inr_approved_campaign.save()
+
+        # Missing signature
+        s1, m1, _ = provider.verify_payment(
+            inr_approved_campaign,
+            {"razorpay_order_id": order_id, "razorpay_payment_id": "pay_123"},
+        )
+        assert s1 is False
+        assert "Missing razorpay_signature" in m1
+
+        # Missing payment id
+        s2, m2, _ = provider.verify_payment(
+            inr_approved_campaign,
+            {"razorpay_order_id": order_id, "razorpay_signature": "sig_123"},
+        )
+        assert s2 is False
+        assert "Missing razorpay_payment_id" in m2
+
+        # Missing order id
+        s3, m3, _ = provider.verify_payment(
+            inr_approved_campaign,
+            {"razorpay_payment_id": "pay_123", "razorpay_signature": "sig_123"},
+        )
+        assert s3 is False
+        assert "Missing razorpay_order_id" in m3
+
+    def test_razorpay_key_pair_mismatch_prevented(self):
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+        # Test key ID with live key secret
+        with pytest.raises(ValidationError, match="Razorpay configuration mismatch"):
+            RazorpayPaymentProvider(key_id="rzp_test_something123", key_secret="rzp_live_secret123456")
+
+        # Live key ID with test key secret
+        with pytest.raises(ValidationError, match="Razorpay configuration mismatch"):
+            RazorpayPaymentProvider(key_id="rzp_live_something123", key_secret="rzp_test_secret123456")
+

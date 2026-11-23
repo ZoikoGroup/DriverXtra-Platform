@@ -71,6 +71,7 @@ class AdvertisingOrderAdapter:
         self.payment_status = 'PENDING'
         self.created_at = campaign.created_at
         self.status = 'PENDING'
+        self.payment_reference = campaign.payment_reference or ''
 
 
 class AdvertisingCampaignService:
@@ -480,12 +481,16 @@ class AdvertisingCampaignService:
 
         session_data = provider.create_payment_session(order_adapter, return_url=return_url, cancel_url=cancel_url)
 
+        provider_order_id = session_data.get('provider_order_id') or session_data.get('order_id') or session_data.get('id') or ''
         campaign.status = CampaignStatusChoices.PAYMENT_PENDING
         campaign.payment_status = CampaignPaymentStatusChoices.PENDING
-        campaign.save(update_fields=['status', 'payment_status', 'updated_at'])
+        if provider_order_id:
+            campaign.payment_reference = provider_order_id
+        campaign.save(update_fields=['status', 'payment_status', 'payment_reference', 'updated_at'])
 
         return {
             "campaign_id": str(campaign.id),
+            "payment_id": str(campaign.id),
             "provider": session_data.get('provider', 'UNKNOWN'),
             "currency": campaign.currency,
             "amount_minor": campaign.total_budget_minor,

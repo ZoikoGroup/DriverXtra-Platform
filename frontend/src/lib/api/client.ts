@@ -3636,18 +3636,57 @@ export const api = {
       returnUrl?: string,
       cancelUrl?: string
     ): Promise<{
-      payment_id: string;
+      campaign_id?: string;
+      payment_id?: string;
       provider: string;
-      session_data: Record<string, unknown> & { checkout_url?: string; order_id?: string };
+      currency?: string;
+      amount_minor?: number;
+      session_data: Record<string, unknown> & {
+        checkout_url?: string;
+        order_id?: string;
+        provider_order_id?: string;
+        client_secret?: string;
+        publishable_key?: string;
+        is_test_mode?: boolean;
+      };
     }> {
       return apiRequest<{
-        payment_id: string;
+        campaign_id?: string;
+        payment_id?: string;
         provider: string;
-        session_data: Record<string, unknown> & { checkout_url?: string; order_id?: string };
+        currency?: string;
+        amount_minor?: number;
+        session_data: Record<string, unknown> & {
+          checkout_url?: string;
+          order_id?: string;
+          provider_order_id?: string;
+          client_secret?: string;
+          publishable_key?: string;
+          is_test_mode?: boolean;
+        };
       }>(`/marketplace/advertising/campaigns/${id}/payment-session/`, {
         method: "POST",
         requiresAuth: true,
         body: JSON.stringify({ return_url: returnUrl, cancel_url: cancelUrl }),
+      });
+    },
+
+    async confirmAdvertisingPayment(
+      id: string,
+      payload: Record<string, unknown>
+    ): Promise<{
+      detail: string;
+      payment_id?: string;
+      campaign: AdvertisingCampaign;
+    }> {
+      return apiRequest<{
+        detail: string;
+        payment_id?: string;
+        campaign: AdvertisingCampaign;
+      }>(`/marketplace/advertising/campaigns/${id}/payment-session/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ action: "confirm", payload }),
       });
     },
 
