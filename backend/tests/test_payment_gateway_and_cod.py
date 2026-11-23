@@ -1392,6 +1392,10 @@ def _production_payment_env(monkeypatch):
     monkeypatch.setattr(settings, 'DEBUG', False)
     monkeypatch.setattr(settings, 'IS_TESTING', False)
     monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', False)
+    monkeypatch.setattr(settings, 'RAZORPAY_KEY_ID', 'rzp_test_placeholder_key')
+    monkeypatch.setattr(settings, 'RAZORPAY_KEY_SECRET', 'rzp_test_placeholder_secret')
+    monkeypatch.setattr(settings, 'STRIPE_SECRET_KEY', 'sk_test_placeholder_secret_key')
+    monkeypatch.setattr(settings, 'STRIPE_PUBLISHABLE_KEY', 'pk_test_placeholder_key')
 
 
 def _method(methods, code):
