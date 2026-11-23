@@ -3787,12 +3787,20 @@ class AvailableCarriersView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        country = request.query_params.get('country', 'India')
-        from apps.marketplace.pricing import normalize_destination_country
+        country = request.query_params.get('country', '').strip()
+        from apps.marketplace.pricing import PriceCalculationError, normalize_destination_country
+        if not country:
+            return Response(
+                {"error": "A delivery country is required.", "code": "DELIVERY_COUNTRY_REQUIRED"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             country_iso, _ = normalize_destination_country(country)
-        except Exception:
-            country_iso = 'IN' if str(country).strip().upper() in ['IN', 'INDIA'] else 'GB'
+        except PriceCalculationError as exc:
+            return Response(
+                {"error": str(exc), "code": "UNSUPPORTED_DELIVERY_COUNTRY"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         carriers = get_available_carriers_for_country(country_iso)
         return Response({
             "country": country_iso,

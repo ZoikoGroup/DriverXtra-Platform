@@ -234,6 +234,11 @@ def test_com_008_regulated_skus_cannot_be_approved(maker, checker, overrides):
 
 @pytest.mark.django_db
 def test_gates_default_closed_and_absent_gates_are_closed(maker):
+    from platform_core.regional.specs import is_supported_country
+
+    # Regional facts do not activate a commercial capability.
+    assert is_supported_country('GB') is True
+    assert gates.is_gate_open('GB', 'VEHICLES', Cap.BINDING_QUOTE) is False
     gate = gates.create_gate({'country_code': 'gb', 'vertical': 'VEHICLES', 'capability': Cap.BINDING_QUOTE}, maker)
     assert (gate.country_code, gate.status, gate.is_open, gate.version) == ('GB', G.DESIGNED, False, 1)
     with pytest.raises(CommercialRuleViolation) as exc:

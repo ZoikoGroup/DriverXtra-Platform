@@ -36,15 +36,10 @@ class PaymentService:
 
     @staticmethod
     def normalize_country_code(country_str: Optional[str]) -> str:
-        """Normalizes free-text country string to ISO alpha-2 code."""
-        if not country_str:
-            return 'IN'
-        c = country_str.strip().upper()
-        if c in ('IN', 'INDIA', 'BHARAT'):
-            return 'IN'
-        if c in ('GB', 'UK', 'UNITED KINGDOM', 'GREAT BRITAIN', 'ENGLAND', 'SCOTLAND', 'WALES'):
-            return 'GB'
-        return c
+        """Use the regional alias mapping without assigning a country when input is absent."""
+        from platform_core.regional.validators import normalize_country_code
+
+        return normalize_country_code(country_str) or ''
 
     @classmethod
     def get_provider_for_currency_and_country(cls, currency: str, country: Optional[str] = None):

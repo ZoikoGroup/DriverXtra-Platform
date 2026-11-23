@@ -422,3 +422,43 @@ class TestEng03DeliveryCountryRequired:
         assert (order["currency"], order["payment_method"]) == ("GBP", payment_method)
         if payment_method == "ONLINE":
             assert res.json()["payment_session"]["provider"] == "STRIPE"
+
+
+def test_destination_country_and_currency_reuse_regional_registry():
+    from apps.marketplace.pricing import (
+        PriceCalculationError,
+        SUPPORTED_DESTINATION_CURRENCIES,
+        normalize_destination_country,
+        get_required_currency_for_country,
+    )
+    from platform_core.regional.specs import get_country_spec
+
+    assert SUPPORTED_DESTINATION_CURRENCIES == {
+        code: get_country_spec(code).default_currency.value
+        for code in SUPPORTED_DESTINATION_CURRENCIES
+    }
+    assert normalize_destination_country("IND") == ("IN", "India")
+    assert normalize_destination_country("GBR") == ("GB", "United Kingdom")
+    assert get_required_currency_for_country("England") == "GBP"
+    assert get_required_currency_for_country("Bharat") == "INR"
+
+    for missing in (None, "", "   "):
+        with pytest.raises(PriceCalculationError, match="delivery country is required"):
+            normalize_destination_country(missing)
+    with pytest.raises(PriceCalculationError, match="not supported"):
+        normalize_destination_country("United States")
+
+
+def test_available_carriers_requires_supported_explicit_country():
+    client = APIClient()
+    missing = client.get("/api/v1/marketplace/logistics/carriers/")
+    assert missing.status_code == status.HTTP_400_BAD_REQUEST
+    assert missing.data["code"] == "DELIVERY_COUNTRY_REQUIRED"
+
+    unsupported = client.get("/api/v1/marketplace/logistics/carriers/?country=United%20States")
+    assert unsupported.status_code == status.HTTP_400_BAD_REQUEST
+    assert unsupported.data["code"] == "UNSUPPORTED_DELIVERY_COUNTRY"
+
+    accepted = client.get("/api/v1/marketplace/logistics/carriers/?country=GBR")
+    assert accepted.status_code == status.HTTP_200_OK
+    assert accepted.data["country"] == "GB"
