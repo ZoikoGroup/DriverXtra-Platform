@@ -1,12 +1,17 @@
 from decimal import Decimal
 from typing import Dict, Any, Tuple, Optional
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from apps.marketplace.tax import quantize_currency, calculate_gst_breakdown
 from platform_core.tax.models_data import TaxTransactionContext, TaxLineInput
 from platform_core.tax.engine import TaxEngineService
 from platform_core.tax.choices import SupplierRegistrationState
 from platform_core.tax.supplier_resolver import resolve_marketplace_supplier_tax_context
+from platform_core.regional.specs import (
+    get_country_spec,
+)
+from platform_core.regional.validators import normalize_country_code, validate_country_code
 
 
 class PriceCalculationError(Exception):
@@ -18,31 +23,42 @@ class PriceCalculationError(Exception):
         self.listing_name = listing_name
 
 
+# Marketplace destination support is its own market decision. Keep its existing country
+# scope explicit, while sourcing each destination's default currency from regional facts.
+# Adding a country to the regional registry alone must not activate marketplace checkout.
+_MARKETPLACE_DESTINATION_COUNTRIES = ("IN", "GB")
 SUPPORTED_DESTINATION_CURRENCIES: Dict[str, str] = {
-    "IN": "INR",
-    "GB": "GBP",
+    country_code: get_country_spec(country_code).default_currency.value
+    for country_code in _MARKETPLACE_DESTINATION_COUNTRIES
 }
 
 
 def normalize_destination_country(country_str: Optional[str]) -> Tuple[str, str]:
     """
     Normalizes a destination country string to (country_code, canonical_name).
-    Currently supports India ('IN') and United Kingdom ('GB').
-    Raises PriceCalculationError if destination country is not supported.
+    Uses the regional registry for canonical country aliases and names. A destination
+    must be explicit; missing input is never interpreted as a default market.
+    Raises PriceCalculationError if destination country is missing or unsupported.
     """
-    if not country_str or not country_str.strip():
-        # Default destination is India
-        return "IN", "India"
+    if not isinstance(country_str, str) or not country_str.strip():
+        raise PriceCalculationError("A delivery country is required.")
 
-    raw = country_str.strip().upper()
-    if raw in ("IN", "INDIA", "BHARAT"):
-        return "IN", "India"
-    elif raw in ("GB", "UK", "UNITED KINGDOM", "GREAT BRITAIN", "ENGLAND", "SCOTLAND", "WALES", "NORTHERN IRELAND"):
-        return "GB", "United Kingdom"
-    else:
+    normalized = normalize_country_code(country_str)
+    try:
+        country_code = validate_country_code(normalized)
+    except DjangoValidationError as exc:
+        raise PriceCalculationError(
+            f"Delivery to '{country_str}' is not supported. DriverXtra currently supports delivery to India (INR) and the United Kingdom (GBP)."
+        ) from exc
+
+    # Regional support describes country facts; it does not itself activate marketplace.
+    if country_code not in SUPPORTED_DESTINATION_CURRENCIES:
         raise PriceCalculationError(
             f"Delivery to '{country_str}' is not supported. DriverXtra currently supports delivery to India (INR) and the United Kingdom (GBP)."
         )
+
+    spec = get_country_spec(country_code)
+    return country_code, spec.name
 
 
 def get_required_currency_for_country(country_str: Optional[str]) -> str:
