@@ -15,6 +15,199 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  technical-evidence:
+    name: Technical release evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install backend dependencies
+        id: backend_dependencies
+        continue-on-error: true
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Run backend tests
+        id: backend_tests
+        if: always() && steps.backend_dependencies.outcome == 'success'
+        working-directory: backend
+        shell: bash
+        run: |
+          set +e
+          python -m pytest
+          exit_code=$?
+          echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Install frontend dependencies
+        id: frontend_dependencies
+        continue-on-error: true
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        id: frontend_build
+        if: always() && steps.frontend_dependencies.outcome == 'success'
+        working-directory: frontend
+        shell: bash
+        run: |
+          set +e
+          npm run build
+          exit_code=$?
+          echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Write technical evidence report
+        id: evidence
+        if: always()
+        shell: bash
+        env:
+          BACKEND_DEPENDENCIES_OUTCOME: ${{ steps.backend_dependencies.outcome }}
+          BACKEND_TESTS_OUTCOME: ${{ steps.backend_tests.outcome }}
+          BACKEND_TESTS_EXIT_CODE: ${{ steps.backend_tests.outputs.exit_code }}
+          FRONTEND_DEPENDENCIES_OUTCOME: ${{ steps.frontend_dependencies.outcome }}
+          FRONTEND_BUILD_OUTCOME: ${{ steps.frontend_build.outcome }}
+          FRONTEND_BUILD_EXIT_CODE: ${{ steps.frontend_build.outputs.exit_code }}
+        run: |
+          primary_artifact_name="driverxtra-release-evidence-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
+          args=(
+            --requirement-ref "DX-GC-08"
+            --repository "${GITHUB_REPOSITORY}"
+            --repository-id "${GITHUB_REPOSITORY_ID:-}"
+            --commit-sha "${GITHUB_SHA}"
+            --environment "github-actions"
+            --run-id "${GITHUB_RUN_ID:-}"
+            --run-number "${GITHUB_RUN_NUMBER:-}"
+            --run-attempt "${GITHUB_RUN_ATTEMPT:-}"
+            --workflow-name "${GITHUB_WORKFLOW:-}"
+            --workflow-ref "${GITHUB_WORKFLOW_REF:-}"
+            --workflow-file-sha "${GITHUB_WORKFLOW_SHA:-}"
+            --test-command "python -m pytest"
+            --build-command "npm run build"
+            --artifact-name "${primary_artifact_name}"
+            --artifact-upload-status "NOT_ATTEMPTED"
+            --artifact-retention-days "90"
+            --output "release-evidence.json"
+            --fail-on-unsuccessful
+          )
+          args+=(--limitation "Full test/build logs are retained in this GitHub Actions run.")
+
+          if [[ "${BACKEND_TESTS_EXIT_CODE}" =~ ^[0-9]+$ ]]; then
+            args+=(--test-exit-code "${BACKEND_TESTS_EXIT_CODE}" --test-attempted)
+          elif [[ "${BACKEND_TESTS_OUTCOME}" == "failure" ]]; then
+            args+=(--test-failed)
+          elif [[ "${BACKEND_TESTS_OUTCOME}" == "success" ]]; then
+            args+=(--test-blocked --limitation "Backend test step completed without an exposed process exit code.")
+          elif [[ "${BACKEND_DEPENDENCIES_OUTCOME}" != "success" ]]; then
+            args+=(--test-blocked --limitation "Backend tests were blocked because dependency installation did not succeed.")
+          fi
+          if [[ "${BACKEND_DEPENDENCIES_OUTCOME}" != "success" ]]; then
+            args+=(--limitation "Backend dependency installation outcome: ${BACKEND_DEPENDENCIES_OUTCOME}.")
+          fi
+          if [[ "${BACKEND_TESTS_OUTCOME}" == "skipped" && "${BACKEND_DEPENDENCIES_OUTCOME}" == "success" ]]; then
+            args+=(--limitation "Backend test step was skipped by the workflow runner.")
+          fi
+
+          if [[ "${FRONTEND_BUILD_EXIT_CODE}" =~ ^[0-9]+$ ]]; then
+            args+=(--build-exit-code "${FRONTEND_BUILD_EXIT_CODE}" --build-attempted)
+          elif [[ "${FRONTEND_BUILD_OUTCOME}" == "failure" ]]; then
+            args+=(--build-failed)
+          elif [[ "${FRONTEND_BUILD_OUTCOME}" == "success" ]]; then
+            args+=(--build-blocked --limitation "Frontend build step completed without an exposed process exit code.")
+          elif [[ "${FRONTEND_DEPENDENCIES_OUTCOME}" != "success" ]]; then
+            args+=(--build-blocked --limitation "Frontend build was blocked because dependency installation did not succeed.")
+          fi
+          if [[ "${FRONTEND_DEPENDENCIES_OUTCOME}" != "success" ]]; then
+            args+=(--limitation "Frontend dependency installation outcome: ${FRONTEND_DEPENDENCIES_OUTCOME}.")
+          fi
+          if [[ "${FRONTEND_BUILD_OUTCOME}" == "skipped" && "${FRONTEND_DEPENDENCIES_OUTCOME}" == "success" ]]; then
+            args+=(--limitation "Frontend build step was skipped by the workflow runner.")
+          fi
+
+          python backend/platform_core/audit/release_evidence.py "${args[@]}"
+
+      - name: Upload initial technical evidence report
+        id: primary_upload
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: driverxtra-release-evidence-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: release-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Finalize technical evidence with upload metadata
+        id: finalize_evidence
+        if: always()
+        shell: bash
+        env:
+          PRIMARY_UPLOAD_OUTCOME: ${{ steps.primary_upload.outcome }}
+          PRIMARY_ARTIFACT_ID: ${{ steps.primary_upload.outputs.artifact-id }}
+          PRIMARY_ARTIFACT_DIGEST: ${{ steps.primary_upload.outputs.artifact-digest }}
+          PRIMARY_ARTIFACT_URL: ${{ steps.primary_upload.outputs.artifact-url }}
+        run: |
+          if [[ "${PRIMARY_UPLOAD_OUTCOME}" == "success" ]]; then
+            upload_status="SUCCEEDED"
+          elif [[ "${PRIMARY_UPLOAD_OUTCOME}" == "failure" ]]; then
+            upload_status="FAILED"
+          else
+            upload_status="UNKNOWN"
+          fi
+
+          python backend/platform_core/audit/release_evidence.py finalize \
+            --input "release-evidence.json" \
+            --output "release-evidence-final.json" \
+            --upload-status "${upload_status}" \
+            --artifact-name "driverxtra-release-evidence-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" \
+            --artifact-id "${PRIMARY_ARTIFACT_ID:-}" \
+            --artifact-digest "${PRIMARY_ARTIFACT_DIGEST:-}" \
+            --artifact-url "${PRIMARY_ARTIFACT_URL:-}" \
+            --retention-days 90 \
+            --fail-on-unsuccessful
+
+      - name: Upload finalized evidence JSON manifest
+        id: manifest_upload
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: driverxtra-release-evidence-manifest-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: release-evidence-final.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Fail evidence job when checks or artifact publication failed
+        if: always()
+        shell: bash
+        env:
+          EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
+          FINALIZE_OUTCOME: ${{ steps.finalize_evidence.outcome }}
+          PRIMARY_UPLOAD_OUTCOME: ${{ steps.primary_upload.outcome }}
+          MANIFEST_UPLOAD_OUTCOME: ${{ steps.manifest_upload.outcome }}
+        run: |
+          if [[ "${EVIDENCE_OUTCOME}" != "success" \
+             || "${FINALIZE_OUTCOME}" != "success" \
+             || "${PRIMARY_UPLOAD_OUTCOME}" != "success" \
+             || "${MANIFEST_UPLOAD_OUTCOME}" != "success" ]]; then
+            echo "Technical checks or evidence publication failed. See the finalized JSON when available."
+            exit 1
+          fi
+
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 45

@@ -846,13 +846,16 @@ class TestBug2PaymentVerificationAndIsolation:
 
     def test_server_simulated_payment_blocked_in_production(self, buyer_auth_client, in_part, monkeypatch):
         from django.conf import settings
-        monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', False)
-        monkeypatch.setattr(settings, 'DEBUG', False)
-        monkeypatch.setattr(settings, 'IS_TESTING', False)
-
+        # Create the order while a (test-mode) provider is available, then switch to production.
+        # ENG-01: checkout itself now refuses an online order when no provider can take payment,
+        # so the order must exist before the environment changes.
         payload = valid_india_shipping_payload(in_part.id, quantity=1)
         res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
         order_id = res.json()["order"]["id"]
+
+        monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', False)
+        monkeypatch.setattr(settings, 'DEBUG', False)
+        monkeypatch.setattr(settings, 'IS_TESTING', False)
 
         sim_res = buyer_auth_client.post(
             f"/api/v1/marketplace/orders/{order_id}/payment/simulate/",
@@ -1378,3 +1381,167 @@ class TestCompletePaymentSystemImplementation:
         )
         assert verify_res.status_code == status.HTTP_400_BAD_REQUEST
         assert "does not match the active session" in verify_res.json()["error"]
+
+
+# =============================================================================
+# ENG-01: FAIL-CLOSED PAYMENT-METHOD AND CURRENCY AVAILABILITY
+# =============================================================================
+
+def _production_payment_env(monkeypatch):
+    """Production-like environment: no test mode, placeholder (unconfigured) provider credentials."""
+    monkeypatch.setattr(settings, 'DEBUG', False)
+    monkeypatch.setattr(settings, 'IS_TESTING', False)
+    monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', False)
+
+
+def _method(methods, code):
+    return next(m for m in methods if m["code"] == code)
+
+
+class TestEng01FailClosedPaymentAvailability:
+    METHODS_URL = "/api/v1/marketplace/orders/payment-methods/"
+
+    # ---- provider capability is declared once, on the provider ----------------------------------
+    def test_providers_declare_supported_currencies(self):
+        from apps.marketplace.payments.stripe_provider import StripePaymentProvider
+        from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+        stripe, razorpay = StripePaymentProvider(), RazorpayPaymentProvider()
+        assert stripe.supports_currency("GBP") and stripe.supports_currency("gbp")
+        assert not stripe.supports_currency("USD") and not stripe.supports_currency("INR")
+        assert razorpay.supports_currency("INR")
+        assert not razorpay.supports_currency("GBP") and not razorpay.supports_currency("USD")
+
+    # ---- payment-methods endpoint ----------------------------------------------------------------
+    def test_us_usd_reports_no_available_method(self, api_client):
+        res = api_client.get(f"{self.METHODS_URL}?country=United%20States&currency=USD&amount=100.00")
+        assert res.status_code == status.HTTP_200_OK
+        methods = res.json()["payment_methods"]
+        online = _method(methods, "ONLINE")
+        assert online["is_available"] is False
+        assert online["reason_code"] == "CURRENCY_NOT_SUPPORTED"
+        cod = _method(methods, "COD")
+        assert cod["is_available"] is False
+        assert cod["reason_code"] == "MARKET_NOT_ENABLED"
+        assert not any(m["is_available"] for m in methods)
+
+    def test_us_destination_with_gbp_reports_market_not_enabled(self, api_client):
+        res = api_client.get(f"{self.METHODS_URL}?country=US&currency=GBP&amount=100.00")
+        online = _method(res.json()["payment_methods"], "ONLINE")
+        assert online["is_available"] is False
+        assert online["reason_code"] == "MARKET_NOT_ENABLED"
+
+    def test_uk_with_non_gbp_currency_is_not_available(self, api_client):
+        for currency in ("USD", "INR", "EUR"):
+            res = api_client.get(f"{self.METHODS_URL}?country=United%20Kingdom&currency={currency}&amount=100.00")
+            methods = res.json()["payment_methods"]
+            online = _method(methods, "ONLINE")
+            assert online["is_available"] is False, currency
+            assert online["reason_code"] == "CURRENCY_NOT_SUPPORTED", currency
+            assert not any(m["is_available"] for m in methods), currency
+
+    def test_uk_gbp_and_india_inr_unchanged(self, api_client):
+        uk = api_client.get(f"{self.METHODS_URL}?country=United%20Kingdom&currency=GBP&amount=250.00").json()
+        uk_online = _method(uk["payment_methods"], "ONLINE")
+        assert (uk_online["provider"], uk_online["is_available"], uk_online["reason_code"]) == ("STRIPE", True, None)
+        assert _method(uk["payment_methods"], "COD")["is_available"] is True
+
+        india = api_client.get(f"{self.METHODS_URL}?country=India&currency=INR&amount=5000.00").json()
+        in_online = _method(india["payment_methods"], "ONLINE")
+        assert (in_online["provider"], in_online["is_available"], in_online["reason_code"]) == ("RAZORPAY", True, None)
+        assert _method(india["payment_methods"], "COD")["is_available"] is True
+
+    def test_country_defaults_currency_from_destination_rules(self, api_client):
+        data = api_client.get(f"{self.METHODS_URL}?country=United%20Kingdom&amount=100.00").json()
+        assert data["currency"] == "GBP"
+        assert _method(data["payment_methods"], "ONLINE")["is_available"] is True
+
+    def test_missing_country_has_no_implicit_india(self, api_client):
+        for query in ("", "?currency=INR&amount=100.00", "?country=%20&currency=INR"):
+            data = api_client.get(f"{self.METHODS_URL}{query}").json()
+            assert data["country"] is None, query
+            for m in data["payment_methods"]:
+                assert m["is_available"] is False, query
+                assert m["reason_code"] == "MARKET_NOT_SPECIFIED", query
+
+    def test_unconfigured_provider_reported_unavailable_in_production(self, api_client, monkeypatch):
+        _production_payment_env(monkeypatch)
+        uk = api_client.get(f"{self.METHODS_URL}?country=United%20Kingdom&currency=GBP&amount=100.00").json()
+        online = _method(uk["payment_methods"], "ONLINE")
+        assert online["is_available"] is False
+        assert online["reason_code"] == "PROVIDER_NOT_CONFIGURED"
+        # COD policy is untouched by ENG-01: still governed by the existing COD settings.
+        assert _method(uk["payment_methods"], "COD")["is_available"] is True
+
+    def test_cod_threshold_reason_code(self, api_client):
+        data = api_client.get(f"{self.METHODS_URL}?country=United%20Kingdom&currency=GBP&amount=750.00").json()
+        cod = _method(data["payment_methods"], "COD")
+        assert cod["is_available"] is False
+        assert cod["reason_code"] == "COD_NOT_ELIGIBLE"
+        assert "exceeds the maximum" in cod["reason"]
+
+    # ---- checkout guard --------------------------------------------------------------------------
+    def _assert_rejected_without_side_effects(self, res, listing, stock_before, reason_code):
+        assert res.status_code == status.HTTP_400_BAD_REQUEST, res.content
+        body = res.json()
+        assert body["code"] == "PAYMENT_METHOD_UNAVAILABLE"
+        assert body["reason_code"] == reason_code
+        assert Order.objects.count() == 0
+        assert PaymentTransaction.objects.count() == 0
+        listing.refresh_from_db()
+        assert listing.stock_quantity == stock_before
+
+    def test_uk_online_checkout_rejected_when_stripe_unavailable(self, buyer_auth_client, uk_part, monkeypatch):
+        _production_payment_env(monkeypatch)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/",
+                                     valid_uk_shipping_payload(uk_part.id, quantity=2), format="json")
+        self._assert_rejected_without_side_effects(res, uk_part, 10, "PROVIDER_NOT_CONFIGURED")
+
+    def test_india_online_checkout_rejected_when_razorpay_unavailable(self, buyer_auth_client, in_part, monkeypatch):
+        _production_payment_env(monkeypatch)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/",
+                                     valid_india_shipping_payload(in_part.id, quantity=1), format="json")
+        self._assert_rejected_without_side_effects(res, in_part, 10, "PROVIDER_NOT_CONFIGURED")
+
+    def test_us_destination_checkout_rejected_without_order(self, buyer_auth_client, uk_part):
+        payload = valid_uk_shipping_payload(uk_part.id, currency="USD", shipping_country="United States")
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        assert res.status_code == status.HTTP_400_BAD_REQUEST
+        assert Order.objects.count() == 0
+        uk_part.refresh_from_db()
+        assert uk_part.stock_quantity == 10
+
+    def test_cod_checkout_unaffected_when_online_unavailable(self, buyer_auth_client, uk_part, monkeypatch):
+        _production_payment_env(monkeypatch)
+        payload = valid_uk_shipping_payload(uk_part.id, quantity=1, payment_method="COD")
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        assert res.status_code == status.HTTP_201_CREATED, res.content
+        assert res.json()["order"]["payment_method"] == "COD"
+
+    def test_checkout_preview_reports_unavailable_without_blocking(self, buyer_auth_client, uk_part, monkeypatch):
+        _production_payment_env(monkeypatch)
+        payload = valid_uk_shipping_payload(uk_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/calculate/", payload, format="json")
+        assert res.status_code == status.HTTP_200_OK
+        online = _method(res.json()["available_payment_methods"], "ONLINE")
+        assert online["is_available"] is False
+        assert online["reason_code"] == "PROVIDER_NOT_CONFIGURED"
+        assert Order.objects.count() == 0
+
+    def test_test_mode_online_checkout_still_succeeds(self, buyer_auth_client, uk_part):
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/",
+                                     valid_uk_shipping_payload(uk_part.id, quantity=1), format="json")
+        assert res.status_code == status.HTTP_201_CREATED, res.content
+        assert res.json()["payment_session"]["provider"] == "STRIPE"
+
+    # ---- payment-session creation (already fail-closed; regression) ------------------------------
+    def test_payment_session_creation_fails_closed_for_unready_provider(self, buyer_auth_client, uk_part, monkeypatch):
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/",
+                                     valid_uk_shipping_payload(uk_part.id, quantity=1), format="json")
+        assert res.status_code == status.HTTP_201_CREATED
+        order_id = res.json()["order"]["id"]
+        transactions_before = PaymentTransaction.objects.count()
+
+        _production_payment_env(monkeypatch)
+        session_res = buyer_auth_client.post(f"/api/v1/marketplace/orders/{order_id}/payment/create/", {}, format="json")
+        assert session_res.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert PaymentTransaction.objects.count() == transactions_before

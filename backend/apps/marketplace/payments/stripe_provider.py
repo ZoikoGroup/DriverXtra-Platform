@@ -21,6 +21,7 @@ class StripePaymentProvider(BasePaymentProvider):
     All monetary amounts are strictly represented in integer pence (minor units).
     """
     provider_name = 'STRIPE'
+    supported_currencies = frozenset({'GBP'})
 
     def __init__(self):
         self.publishable_key = getattr(settings, 'STRIPE_PUBLISHABLE_KEY', 'pk_test_placeholder_key')
@@ -65,7 +66,7 @@ class StripePaymentProvider(BasePaymentProvider):
         If genuine Stripe credentials are configured, registers the PaymentIntent via Stripe API.
         In test mode or mock settings, creates a deterministic test PaymentIntent.
         """
-        if order.currency != 'GBP':
+        if not self.supports_currency(order.currency):
             raise ValueError(f"Stripe UK provider only supports GBP transactions; received '{order.currency}'.")
 
         amount_pence = self._to_pence(order.total_amount)

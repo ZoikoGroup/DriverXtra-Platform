@@ -24,6 +24,7 @@ class RazorpayPaymentProvider(BasePaymentProvider):
     All monetary amounts are strictly represented in integer paise.
     """
     provider_name = 'RAZORPAY'
+    supported_currencies = frozenset({'INR'})
 
     _cached_methods: Optional[Dict[str, Any]] = None
     _cached_methods_time: float = 0.0
@@ -155,7 +156,7 @@ class RazorpayPaymentProvider(BasePaymentProvider):
         In isolated test mode with placeholder keys, generates a deterministic test order ID.
         In production without configured credentials, raises a descriptive RuntimeError.
         """
-        if order.currency != 'INR':
+        if not self.supports_currency(order.currency):
             raise ValueError(f"Razorpay provider only supports INR transactions; received '{order.currency}'.")
 
         amount_paise = self._to_paise(order.total_amount)
