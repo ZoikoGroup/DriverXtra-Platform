@@ -115,9 +115,11 @@ def test_migration_graph_order():
     loader = MigrationLoader(None, ignore_no_migrations=True)
     m12 = loader.disk_migrations[('identity', '0012_assign_unassigned_staff_verification_officer')]
     m13 = loader.disk_migrations[('identity', '0013_staffprofile_staff_role_protect')]
+    m14 = loader.disk_migrations[('identity', '0014_add_advertising_permissions')]
     assert ('identity', '0011_user_session_version') in m12.dependencies
     assert ('identity', '0012_assign_unassigned_staff_verification_officer') in m13.dependencies
-    assert loader.graph.leaf_nodes('identity') == [('identity', '0013_staffprofile_staff_role_protect')]
+    assert ('identity', '0013_staffprofile_staff_role_protect') in m14.dependencies
+    assert loader.graph.leaf_nodes('identity') == [('identity', '0014_add_advertising_permissions')]
 
 
 @pytest.mark.django_db

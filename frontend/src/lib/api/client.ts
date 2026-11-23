@@ -3488,6 +3488,287 @@ export const api = {
         }
       );
     },
+
+    // Phase 7.1: Dealer Bulk Uploads
+    async submitBulkUpload(formData: FormData): Promise<BulkUploadJob> {
+      return apiRequest<BulkUploadJob>("/marketplace/bulk-upload/", {
+        method: "POST",
+        requiresAuth: true,
+        body: formData,
+      });
+    },
+
+    async listBulkUploadJobs(params?: BulkUploadListParams): Promise<PaginatedBulkUploadJobs> {
+      const query = new URLSearchParams();
+      if (params?.upload_type) query.set("upload_type", params.upload_type);
+      if (params?.status) query.set("status", params.status);
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.page_size) query.set("page_size", String(params.page_size));
+      const qs = query.toString();
+      return apiRequest<PaginatedBulkUploadJobs>(`/marketplace/bulk-upload/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getBulkUploadJob(id: string): Promise<BulkUploadJob> {
+      return apiRequest<BulkUploadJob>(`/marketplace/bulk-upload/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getBulkUploadJobErrors(id: string, params?: BulkUploadErrorListParams): Promise<PaginatedBulkUploadRowErrors> {
+      const query = new URLSearchParams();
+      if (params?.is_resolved !== undefined) query.set("is_resolved", String(params.is_resolved));
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.page_size) query.set("page_size", String(params.page_size));
+      const qs = query.toString();
+      return apiRequest<PaginatedBulkUploadRowErrors>(`/marketplace/bulk-upload/${id}/errors/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async exportBulkUploadJobErrors(id: string): Promise<Blob> {
+      return apiRequestBlob(`/marketplace/bulk-upload/${id}/export-errors/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async retryBulkUploadJob(id: string): Promise<{ detail: string; job_id: string; unresolved_errors: number }> {
+      return apiRequest<{ detail: string; job_id: string; unresolved_errors: number }>(`/marketplace/bulk-upload/${id}/retry/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async downloadBulkUploadTemplate(uploadType: "vehicles" | "spare_parts" | string): Promise<Blob> {
+      return apiRequestBlob(`/marketplace/bulk-upload/templates/${uploadType}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    // Phase 7.2: Sponsored Listings & Advertising
+    async getAdvertisingQuote(data: {
+      currency: string;
+      duration_days?: number;
+      package_code?: string;
+      target_country?: string;
+    }): Promise<CampaignPricingQuote> {
+      return apiRequest<CampaignPricingQuote>("/marketplace/advertising/pricing-quote/", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+
+    async listAdvertisingCampaigns(params?: {
+      status?: string;
+      campaign_type?: string;
+      organisation?: string;
+      all?: boolean;
+    }): Promise<AdvertisingCampaign[]> {
+      const query = new URLSearchParams();
+      if (params?.status) query.set("status", params.status);
+      if (params?.campaign_type) query.set("campaign_type", params.campaign_type);
+      if (params?.organisation) query.set("organisation", params.organisation);
+      if (params?.all) query.set("all", "true");
+      const qs = query.toString();
+      return apiRequest<AdvertisingCampaign[]>(`/marketplace/advertising/campaigns/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async createAdvertisingCampaign(data: {
+      title: string;
+      description?: string;
+      campaign_type: CampaignType;
+      target_country: string;
+      currency: string;
+      package_code: string;
+      duration_days?: number;
+      start_date?: string | null;
+      listing_ids: string[];
+      organisation?: string | null;
+      submit_for_review?: boolean;
+    }): Promise<AdvertisingCampaign> {
+      return apiRequest<AdvertisingCampaign>("/marketplace/advertising/campaigns/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async getAdvertisingCampaign(id: string): Promise<AdvertisingCampaign> {
+      return apiRequest<AdvertisingCampaign>(`/marketplace/advertising/campaigns/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async updateAdvertisingCampaign(id: string, data: Partial<AdvertisingCampaign>): Promise<AdvertisingCampaign> {
+      return apiRequest<AdvertisingCampaign>(`/marketplace/advertising/campaigns/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async deleteAdvertisingCampaign(id: string): Promise<void> {
+      return apiRequest<void>(`/marketplace/advertising/campaigns/${id}/`, {
+        method: "DELETE",
+        requiresAuth: true,
+      });
+    },
+
+    async submitAdvertisingCampaign(id: string): Promise<{ detail: string; campaign: AdvertisingCampaign }> {
+      return apiRequest<{ detail: string; campaign: AdvertisingCampaign }>(`/marketplace/advertising/campaigns/${id}/submit/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async getAdvertisingPaymentSession(
+      id: string,
+      returnUrl?: string,
+      cancelUrl?: string
+    ): Promise<{
+      payment_id: string;
+      provider: string;
+      session_data: Record<string, unknown> & { checkout_url?: string; order_id?: string };
+    }> {
+      return apiRequest<{
+        payment_id: string;
+        provider: string;
+        session_data: Record<string, unknown> & { checkout_url?: string; order_id?: string };
+      }>(`/marketplace/advertising/campaigns/${id}/payment-session/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ return_url: returnUrl, cancel_url: cancelUrl }),
+      });
+    },
+
+    async pauseAdvertisingCampaign(id: string): Promise<AdvertisingCampaign> {
+      return apiRequest<AdvertisingCampaign>(`/marketplace/advertising/campaigns/${id}/pause/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async resumeAdvertisingCampaign(id: string): Promise<AdvertisingCampaign> {
+      return apiRequest<AdvertisingCampaign>(`/marketplace/advertising/campaigns/${id}/resume/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async cancelAdvertisingCampaign(id: string, reason?: string): Promise<{ detail: string; refund_amount_minor: number; campaign: AdvertisingCampaign }> {
+      return apiRequest<{ detail: string; refund_amount_minor: number; campaign: AdvertisingCampaign }>(`/marketplace/advertising/campaigns/${id}/cancel/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
+      });
+    },
+
+    async getAdvertisingCampaignAnalytics(id: string): Promise<CampaignAnalytics> {
+      return apiRequest<CampaignAnalytics>(`/marketplace/advertising/campaigns/${id}/analytics/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getSponsoredFeed(type: "VEHICLES" | "SPARE_PARTS", country: string = "GB", limit: number = 2): Promise<SponsoredFeedItem[]> {
+      const query = new URLSearchParams({ type, country, limit: String(limit) });
+      return apiRequest<SponsoredFeedItem[]>(`/marketplace/advertising/sponsored-feed/?${query.toString()}`, {
+        method: "GET",
+      });
+    },
+
+    async trackAdvertisingImpression(sponsoredListingId: string, sessionId: string, referrer?: string): Promise<{ recorded: boolean; duplicate: boolean }> {
+      return apiRequest<{ recorded: boolean; duplicate: boolean }>("/marketplace/advertising/track-impression/", {
+        method: "POST",
+        body: JSON.stringify({
+          sponsored_listing_id: sponsoredListingId,
+          session_id: sessionId,
+          referrer: referrer || (typeof window !== "undefined" ? window.location.href : ""),
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : "",
+        }),
+      });
+    },
+
+    async trackAdvertisingClick(sponsoredListingId: string, sessionId: string, destinationUrl?: string): Promise<{ recorded: boolean; duplicate: boolean }> {
+      return apiRequest<{ recorded: boolean; duplicate: boolean }>("/marketplace/advertising/track-click/", {
+        method: "POST",
+        body: JSON.stringify({
+          sponsored_listing_id: sponsoredListingId,
+          session_id: sessionId,
+          destination_url: destinationUrl || "",
+        }),
+      });
+    },
+
+    // Admin Advertising APIs
+    async adminListAdvertisingCampaigns(params?: {
+      status?: string;
+      campaign_type?: string;
+      country?: string;
+      search?: string;
+    }): Promise<AdvertisingCampaign[]> {
+      const query = new URLSearchParams();
+      if (params?.status) query.set("status", params.status);
+      if (params?.campaign_type) query.set("campaign_type", params.campaign_type);
+      if (params?.country) query.set("country", params.country);
+      if (params?.search) query.set("search", params.search);
+      const qs = query.toString();
+      return apiRequest<AdvertisingCampaign[]>(`/marketplace/advertising/admin/campaigns/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async adminGetAdvertisingCampaign(id: string): Promise<AdvertisingCampaign> {
+      return apiRequest<AdvertisingCampaign>(`/marketplace/advertising/admin/campaigns/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async adminReviewAdvertisingCampaign(id: string, action: "APPROVE" | "REJECT", rejectionReason?: string, notes?: string): Promise<{ detail: string; campaign: AdvertisingCampaign }> {
+      return apiRequest<{ detail: string; campaign: AdvertisingCampaign }>(`/marketplace/advertising/admin/campaigns/${id}/review/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({
+          action,
+          rejection_reason: rejectionReason || "",
+          notes: notes || "",
+        }),
+      });
+    },
+
+    async adminPauseAdvertisingCampaign(id: string): Promise<AdvertisingCampaign> {
+      return apiRequest<AdvertisingCampaign>(`/marketplace/advertising/admin/campaigns/${id}/pause/`, {
+        method: "POST",
+        requiresAuth: true,
+      });
+    },
+
+    async adminTerminateAdvertisingCampaign(id: string, reason?: string): Promise<{ detail: string; refund_amount_minor: number; campaign: AdvertisingCampaign }> {
+      return apiRequest<{ detail: string; refund_amount_minor: number; campaign: AdvertisingCampaign }>(`/marketplace/advertising/admin/campaigns/${id}/terminate/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify({ reason }),
+      });
+    },
+
+    async adminGetAdvertisingOverview(): Promise<AdminAdvertisingOverview> {
+      return apiRequest<AdminAdvertisingOverview>("/marketplace/advertising/admin/overview/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
   },
 
   notifications: {
@@ -7504,4 +7785,261 @@ export interface CommercialPlansResponse {
     }>;
   }>;
   disclosure: string;
+}
+
+// ==========================================
+// Phase 7.1: Bulk Upload Types
+// ==========================================
+
+export interface BulkUploadJob {
+  id: string;
+  seller?: string | null;
+  seller_name?: string | null;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  upload_type: "VEHICLES" | "SPARE_PARTS";
+  status: "PENDING" | "PARSING" | "PROCESSING" | "COMPLETED" | "PARTIALLY_FAILED" | "FAILED";
+  duplicate_policy: "SKIP" | "FAIL_ROW";
+  filename: string;
+  file_size_bytes: number;
+  total_rows: number;
+  processed_rows: number;
+  successful_rows: number;
+  failed_rows: number;
+  duplicate_rows: number;
+  progress_percentage: number;
+  is_finished: boolean;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_summary?: string;
+  created_at: string;
+}
+
+export interface BulkUploadRowError {
+  id: string;
+  job: string;
+  row_number: number;
+  field_name: string;
+  error_code: string;
+  error_message: string;
+  raw_data: Record<string, string>;
+  is_resolved: boolean;
+  created_at: string;
+}
+
+export interface PaginatedBulkUploadJobs {
+  count: number;
+  next?: string | null;
+  previous?: string | null;
+  results: BulkUploadJob[];
+}
+
+export interface PaginatedBulkUploadRowErrors {
+  count: number;
+  next?: string | null;
+  previous?: string | null;
+  results: BulkUploadRowError[];
+}
+
+export interface BulkUploadListParams {
+  upload_type?: "VEHICLES" | "SPARE_PARTS" | string;
+  status?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface BulkUploadErrorListParams {
+  is_resolved?: boolean;
+  page?: number;
+  page_size?: number;
+}
+
+// =============================================================================
+// PHASE 7.2: SPONSORED LISTINGS & ADVERTISING TYPES
+// =============================================================================
+
+export type CampaignType = "VEHICLES" | "SPARE_PARTS";
+
+export type CampaignStatus =
+  | "DRAFT"
+  | "PENDING_APPROVAL"
+  | "APPROVED"
+  | "PAYMENT_PENDING"
+  | "SCHEDULED"
+  | "ACTIVE"
+  | "PAUSED"
+  | "COMPLETED"
+  | "REJECTED"
+  | "CANCELLED";
+
+export type CampaignPaymentStatus =
+  | "UNPAID"
+  | "PENDING"
+  | "PAID"
+  | "FAILED"
+  | "REFUND_PENDING"
+  | "PARTIALLY_REFUNDED"
+  | "REFUNDED";
+
+export interface SponsoredListingItem {
+  id: string;
+  campaign: string;
+  target_type: CampaignType;
+  vehicle_listing?: string | null;
+  part_listing?: string | null;
+  bid_weight: number;
+  impression_count: number;
+  click_count: number;
+  ctr_percentage: number;
+  is_active: boolean;
+  created_at: string;
+  listing_title: string;
+  listing_price?: string | null;
+  listing_currency: string;
+  listing_image?: string | null;
+  listing_status: string;
+}
+
+export interface CampaignPaymentRecord {
+  id: string;
+  provider: string;
+  gateway_reference: string;
+  gateway_payment_id: string;
+  amount_minor: number;
+  currency: string;
+  payment_status: CampaignPaymentStatus;
+  paid_at?: string | null;
+  refund_amount_minor: number;
+  refunded_at?: string | null;
+  created_at: string;
+}
+
+export interface AdvertisingCampaign {
+  id: string;
+  seller: string;
+  seller_email: string;
+  seller_name: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  title: string;
+  description: string;
+  campaign_type: CampaignType;
+  campaign_type_display: string;
+  status: CampaignStatus;
+  status_display: string;
+  payment_status: CampaignPaymentStatus;
+  payment_status_display: string;
+  currency: string;
+  target_country: string;
+  package_code: string;
+  duration_days: number;
+  start_date: string;
+  end_date: string;
+  total_budget_minor: number;
+  spent_amount_minor: number;
+  daily_rate_minor: number;
+  net_amount_minor: number;
+  tax_amount_minor: number;
+  tax_rate_percent: string;
+  tax_regime: string;
+  sac_code: string;
+  total_impressions: number;
+  total_clicks: number;
+  ctr_percentage: number;
+  remaining_budget_minor: number;
+  listings_count: number;
+  sponsored_listings: SponsoredListingItem[];
+  payments: CampaignPaymentRecord[];
+  approval_notes?: string | null;
+  rejection_reason?: string | null;
+  approved_by?: string | null;
+  approved_by_email?: string | null;
+  approved_at?: string | null;
+  rejected_at?: string | null;
+  payment_reference?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CampaignPricingQuote {
+  package_code: string;
+  duration_days: number;
+  currency: string;
+  net_amount_minor: number;
+  tax_amount_minor: number;
+  total_amount_minor: number;
+  daily_rate_minor: number;
+  tax_rate_percent: number;
+  tax_regime: string;
+  sac_code: string;
+  country: string;
+}
+
+export interface CampaignAnalytics {
+  campaign_id: string;
+  title: string;
+  status: CampaignStatus;
+  currency: string;
+  total_budget_minor: number;
+  spent_amount_minor: number;
+  total_impressions: number;
+  total_clicks: number;
+  click_through_rate_pct: number;
+  daily_metrics: {
+    date: string;
+    impressions: number;
+    clicks: number;
+    ctr_pct: number;
+    spend_minor: number;
+  }[];
+  listings_metrics: {
+    sponsored_listing_id: string;
+    listing_id: string;
+    target_type: CampaignType;
+    title: string;
+    impressions: number;
+    clicks: number;
+    ctr_pct: number;
+    is_active: boolean;
+  }[];
+}
+
+export interface SponsoredItemListing {
+  id: string;
+  title?: string;
+  name?: string;
+  make?: string;
+  make_name?: string;
+  model?: string;
+  year?: number;
+  mileage?: number;
+  price?: number;
+  currency?: string;
+  seller_name?: string;
+  organisation_name?: string;
+  part?: { name?: string; part_number?: string };
+  part_category?: string;
+  primary_image_url?: string;
+  images?: Array<string | { image?: string; url?: string }>;
+  [key: string]: unknown;
+}
+
+export interface SponsoredFeedItem {
+  sponsored_listing_id: string;
+  campaign_id: string;
+  target_type: CampaignType;
+  is_sponsored: boolean;
+  badge_label: string;
+  listing: SponsoredItemListing;
+}
+
+export interface AdminAdvertisingOverview {
+  total_campaigns: number;
+  active_campaigns: number;
+  pending_approval: number;
+  scheduled_campaigns: number;
+  total_revenue_minor: number;
+  total_impressions: number;
+  total_clicks: number;
+  overall_ctr_percent: number;
 }
