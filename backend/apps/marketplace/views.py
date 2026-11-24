@@ -592,6 +592,17 @@ class MarketplacePartListView(generics.ListAPIView):
             serializer_context['fits_vehicle_variant'] = target_variant
             serializer_context['fits_vehicle_no_variant'] = no_variant
 
+        if self.request.user and self.request.user.is_authenticated:
+            from apps.marketplace.b2b_pricing_service import DealerPricingService
+            eligibility = DealerPricingService.evaluate_dealer_eligibility(user=self.request.user)
+            serializer_context['_dealer_eligibility'] = eligibility
+            is_eligible, _, org, profile, tier = eligibility
+            if is_eligible:
+                serializer_context['_dealer_rules_pool'] = DealerPricingService.get_rules_for_entity(
+                    organisation=org,
+                    tier=tier,
+                )
+
         if page is not None:
             serializer = self.get_serializer(page, many=True, context=serializer_context)
             response = self.get_paginated_response(serializer.data)
@@ -654,6 +665,17 @@ class MarketplacePartDetailView(generics.RetrieveAPIView):
             serializer_context['fits_vehicle'] = True
             serializer_context['fits_vehicle_variant'] = target_variant
             serializer_context['fits_vehicle_no_variant'] = no_variant
+
+        if self.request.user and self.request.user.is_authenticated:
+            from apps.marketplace.b2b_pricing_service import DealerPricingService
+            eligibility = DealerPricingService.evaluate_dealer_eligibility(user=self.request.user)
+            serializer_context['_dealer_eligibility'] = eligibility
+            is_eligible, _, org, profile, tier = eligibility
+            if is_eligible:
+                serializer_context['_dealer_rules_pool'] = DealerPricingService.get_rules_for_entity(
+                    organisation=org,
+                    tier=tier,
+                )
 
         serializer = self.get_serializer(instance, context=serializer_context)
         return Response(serializer.data)

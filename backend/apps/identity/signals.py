@@ -34,7 +34,9 @@ _STATUS_FIELDS = {'status', 'is_active'}
 def _connect():
     from apps.identity.models import User
 
-    @receiver(pre_save, sender=User, dispatch_uid='identity_user_detect_account_disable')
+    # weak=False: these receivers are local functions; with Django's default weak references they
+    # would be garbage-collected once _connect() returns (only DEBUG=True kept them alive).
+    @receiver(pre_save, sender=User, dispatch_uid='identity_user_detect_account_disable', weak=False)
     def detect_account_disable(sender, instance, raw=False, update_fields=None, **kwargs):
         instance._revoke_sessions_after_save = False
         if raw or instance._state.adding or instance.pk is None:
@@ -48,7 +50,7 @@ def _connect():
         if is_account_usable(SimpleNamespace(**previous)) and not is_account_usable(instance):
             instance._revoke_sessions_after_save = True
 
-    @receiver(post_save, sender=User, dispatch_uid='identity_user_revoke_sessions_on_disable')
+    @receiver(post_save, sender=User, dispatch_uid='identity_user_revoke_sessions_on_disable', weak=False)
     def revoke_sessions_on_disable(sender, instance, created=False, raw=False, **kwargs):
         if raw or created or not getattr(instance, '_revoke_sessions_after_save', False):
             return

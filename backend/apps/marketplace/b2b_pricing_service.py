@@ -289,6 +289,38 @@ class DealerPricingService:
     # -------------------------------------------------------------------------
 
     @classmethod
+    def get_rules_for_entity(
+        cls,
+        organisation: Optional[Organisation] = None,
+        tier: Optional[DealerTier] = None,
+        currency: Optional[str] = None,
+    ) -> List[DealerPricingRule]:
+        """
+        Fetches all active rules matching the entity context (organisation, tier, general).
+        Useful for batch evaluations and preventing N+1 queries on catalog views.
+        """
+        now = timezone.now()
+        rules_qs = DealerPricingRule.objects.filter(
+            is_active=True,
+        ).filter(
+            models.Q(start_date__isnull=True) | models.Q(start_date__lte=now)
+        ).filter(
+            models.Q(end_date__isnull=True) | models.Q(end_date__gte=now)
+        )
+        if currency:
+            rules_qs = rules_qs.filter(models.Q(currency='') | models.Q(currency__iexact=currency))
+
+        entity_q = models.Q(organisation__isnull=True, dealer_tier__isnull=True)
+        if organisation:
+            entity_q |= models.Q(organisation=organisation)
+        if tier:
+            entity_q |= models.Q(dealer_tier=tier)
+
+        return list(rules_qs.filter(entity_q).select_related(
+            'organisation', 'dealer_tier', 'part_listing', 'vehicle_listing', 'category'
+        ).order_by('-priority', 'id'))
+
+    @classmethod
     def get_applicable_rules(
         cls,
         listing: Union[SparePartListing, VehicleListing],
@@ -296,6 +328,7 @@ class DealerPricingService:
         organisation: Optional[Organisation] = None,
         tier: Optional[DealerTier] = None,
         currency: Optional[str] = None,
+        rules_pool: Optional[List[DealerPricingRule]] = None,
     ) -> List[DealerPricingRule]:
         """
         Queries all active, currently effective pricing rules matching the listing, quantity, and context.
@@ -305,6 +338,49 @@ class DealerPricingService:
         is_vehicle = isinstance(listing, VehicleListing)
 
         item_currency = (currency or getattr(listing, 'currency', 'GBP') or '').strip().upper()
+
+        if rules_pool is not None:
+            matching = []
+            for r in rules_pool:
+                if not r.is_active:
+                    continue
+                if r.min_quantity > quantity:
+                    continue
+                if r.max_quantity is not None and r.max_quantity < quantity:
+                    continue
+                if r.start_date and r.start_date > now:
+                    continue
+                if r.end_date and r.end_date < now:
+                    continue
+                if r.currency and r.currency.upper() != item_currency:
+                    continue
+
+                # Entity match
+                is_entity_match = (
+                    (r.organisation_id is None and r.dealer_tier_id is None)
+                    or (organisation and r.organisation_id == organisation.id)
+                    or (tier and r.dealer_tier_id == tier.id)
+                )
+                if not is_entity_match:
+                    continue
+
+                # Target match
+                if is_part:
+                    part_match = (
+                        (r.part_listing_id is None and r.category_id is None and r.vehicle_listing_id is None)
+                        or (r.part_listing_id == listing.id)
+                        or (r.part_listing_id is None and getattr(listing, 'category_id', None) and r.category_id == listing.category_id)
+                    )
+                    if part_match:
+                        matching.append(r)
+                elif is_vehicle:
+                    vehicle_match = (
+                        (r.part_listing_id is None and r.category_id is None and r.vehicle_listing_id is None)
+                        or (r.vehicle_listing_id == listing.id)
+                    )
+                    if vehicle_match:
+                        matching.append(r)
+            return matching
 
         rules_qs = DealerPricingRule.objects.filter(
             is_active=True,
@@ -351,6 +427,7 @@ class DealerPricingService:
         tier: Optional[DealerTier] = None,
         currency: Optional[str] = None,
         discount_cap: Optional[Decimal] = None,
+        rules_pool: Optional[List[DealerPricingRule]] = None,
     ) -> Tuple[Optional[DealerPricingRule], int, Decimal, Decimal]:
         """
         Evaluates applicable pricing rules using authoritative precedence:
@@ -376,6 +453,7 @@ class DealerPricingService:
             organisation=organisation,
             tier=tier,
             currency=currency,
+            rules_pool=rules_pool,
         )
 
         # Classify rules into precedence buckets
@@ -459,6 +537,7 @@ class DealerPricingService:
         organisation_id: Optional[Union[str, Organisation]] = None,
         destination_currency: Optional[str] = None,
         destination_country: Optional[str] = None,
+        rules_pool: Optional[List[DealerPricingRule]] = None,
     ) -> Dict[str, Any]:
         """
         Calculates authoritative pricing for an item, taking into account dealer eligibility,
@@ -524,6 +603,7 @@ class DealerPricingService:
             organisation=org,
             tier=tier,
             currency=target_currency,
+            rules_pool=rules_pool,
         )
 
         # 4. Resolve Best Rule & Precedence
@@ -535,6 +615,7 @@ class DealerPricingService:
             tier=tier,
             currency=target_currency,
             discount_cap=custom_cap,
+            rules_pool=rules_pool,
         )
 
         # Calculate discount percentage relative to retail unit price

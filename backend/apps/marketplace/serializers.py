@@ -952,10 +952,28 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
         if not request or not request.user or not request.user.is_authenticated:
             return None
         from apps.marketplace.b2b_pricing_service import DealerPricingService
-        is_eligible, _, org, profile, tier = DealerPricingService.evaluate_dealer_eligibility(user=request.user)
+
+        cached_eligibility = self.context.get('_dealer_eligibility')
+        if cached_eligibility is None:
+            cached_eligibility = DealerPricingService.evaluate_dealer_eligibility(user=request.user)
+            self.context['_dealer_eligibility'] = cached_eligibility
+
+        is_eligible, _, org, profile, tier = cached_eligibility
         if not is_eligible:
             return None
-        calc = DealerPricingService.calculate_item_price(listing=obj, quantity=1, user=request.user, organisation_id=org)
+
+        rules_pool = self.context.get('_dealer_rules_pool')
+        if rules_pool is None:
+            rules_pool = DealerPricingService.get_rules_for_entity(organisation=org, tier=tier)
+            self.context['_dealer_rules_pool'] = rules_pool
+
+        calc = DealerPricingService.calculate_item_price(
+            listing=obj,
+            quantity=1,
+            user=request.user,
+            organisation_id=org,
+            rules_pool=rules_pool,
+        )
         return {
             "is_eligible": True,
             "tier": calc['applied_tier'],

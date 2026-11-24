@@ -168,6 +168,39 @@ class TestAccountStatusEnforcement:
         assert _get_me(new_tokens['access']).status_code == status.HTTP_200_OK
         assert _refresh(new_tokens['refresh']).status_code == status.HTTP_200_OK
 
+    @pytest.mark.parametrize('disable', ['suspend', 'deactivate'])
+    def test_revocation_receivers_survive_gc_and_audit_revocation(self, buyer_user, disable):
+        """Regression: the receivers are local functions in apps.identity.signals. Registered weakly
+        they were garbage-collected when settings were imported with DEBUG=False, so suspension
+        silently stopped blacklisting tokens. The strong-reference check holds regardless of DEBUG."""
+        import gc
+        import weakref
+        from django.db.models.signals import post_save, pre_save
+        from platform_core.audit.models import AuditLog
+        from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        gc.collect()
+        for signal, uid in ((pre_save, 'identity_user_detect_account_disable'),
+                            (post_save, 'identity_user_revoke_sessions_on_disable')):
+            refs = [ref for key, ref, *_ in signal.receivers if key[0] == uid]
+            assert len(refs) == 1 and not isinstance(refs[0], weakref.ReferenceType), uid
+
+        RefreshToken.for_user(buyer_user)
+        RefreshToken.for_user(buyer_user)
+        if disable == 'suspend':
+            buyer_user.status = AccountStatusChoices.SUSPENDED
+            buyer_user.save(update_fields=['status', 'updated_at'])
+        else:
+            buyer_user.is_active = False
+            buyer_user.save()
+
+        assert BlacklistedToken.objects.filter(token__user=buyer_user).count() == 2
+        audit = AuditLog.objects.get(event_type='auth.sessions.revoked', resource_id=str(buyer_user.id))
+        assert audit.action == 'auth:sessions.revoke_on_account_disable'
+        assert audit.resource_type == 'User'
+        assert audit.metadata['revoked_refresh_tokens'] == 2
+
     def test_unrelated_update_fields_save_does_not_revoke_sessions(self, api_client, buyer_user):
         from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
         tokens = _login_tokens(api_client, buyer_user.email)
