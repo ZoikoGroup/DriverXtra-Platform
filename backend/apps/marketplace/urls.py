@@ -156,6 +156,20 @@ from apps.marketplace.views import (
     AdminAdvertisingOverviewView,
     AdvertisingPaymentWebhookView,
 )
+from apps.marketplace.b2b_views import (
+    DealerTierListCreateView,
+    DealerPricingRuleListCreateView,
+    DealerPricingRuleDetailView,
+    DealerEligibilityStatusView,
+    DealerOrganisationTierAssignView,
+    B2BPriceQuoteView,
+    ListingVolumeDiscountsView,
+    DealerApplicationSubmitView,
+    DealerApplicationMeView,
+    AdminDealerApplicationListView,
+    AdminDealerApplicationDetailView,
+    AdminDealerApplicationReviewView,
+)
 
 urlpatterns = [
     # 0. Media / Image Uploads
@@ -370,5 +384,21 @@ urlpatterns = [
     path('advertising/admin/campaigns/<uuid:id>/terminate/', AdminAdvertisingCampaignTerminateView.as_view(), name='marketplace-advertising-admin-campaign-terminate'),
     path('advertising/admin/overview/', AdminAdvertisingOverviewView.as_view(), name='marketplace-advertising-admin-overview'),
     path('advertising/webhook/<str:provider>/', AdvertisingPaymentWebhookView.as_view(), name='marketplace-advertising-webhook'),
+
+    # Phase 7.3: Dealer B2B Pricing and Volume Discounts
+    path('b2b/tiers/', DealerTierListCreateView.as_view(), name='marketplace-b2b-tiers'),
+    path('b2b/pricing-rules/', DealerPricingRuleListCreateView.as_view(), name='marketplace-b2b-pricing-rules'),
+    path('b2b/pricing-rules/<uuid:pk>/', DealerPricingRuleDetailView.as_view(), name='marketplace-b2b-pricing-rule-detail'),
+    path('b2b/dealer-status/', DealerEligibilityStatusView.as_view(), name='marketplace-b2b-dealer-status'),
+    path('b2b/organisations/<uuid:pk>/tier/', DealerOrganisationTierAssignView.as_view(), name='marketplace-b2b-org-tier-assign'),
+    path('b2b/quote/', B2BPriceQuoteView.as_view(), name='marketplace-b2b-price-quote'),
+    path('b2b/listings/<uuid:pk>/volume-discounts/', ListingVolumeDiscountsView.as_view(), name='marketplace-b2b-listing-volume-discounts'),
+
+    # Phase 7.1: Dealer Onboarding, Verification Applications & Admin Review
+    path('b2b/applications/', DealerApplicationSubmitView.as_view(), name='marketplace-b2b-applications'),
+    path('b2b/applications/me/', DealerApplicationMeView.as_view(), name='marketplace-b2b-applications-me'),
+    path('b2b/admin/applications/', AdminDealerApplicationListView.as_view(), name='marketplace-b2b-admin-applications'),
+    path('b2b/admin/applications/<uuid:pk>/', AdminDealerApplicationDetailView.as_view(), name='marketplace-b2b-admin-application-detail'),
+    path('b2b/admin/applications/<uuid:pk>/review/', AdminDealerApplicationReviewView.as_view(), name='marketplace-b2b-admin-application-review'),
 ]
 

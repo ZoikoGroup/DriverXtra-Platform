@@ -20,6 +20,10 @@ import {
   CommercialQuote,
   CommercialQuotePreview,
   OutboxEventRecord,
+  DealerTier,
+  DealerPricingRule,
+  DealerOrganisationProfile,
+  DealerApplicationReviewPayload,
 } from "@/lib/api/client";
 import {
   CURRENCY_EXPONENTS,
@@ -47,6 +51,13 @@ import {
   AlertCircle,
   Loader2,
   History,
+  Trash2,
+  Building2,
+  CheckCircle2,
+  Clock,
+  Search,
+  Award,
+  AlertTriangle,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -83,7 +94,7 @@ const CATALOGUE_TRANSITIONS: Record<string, string[]> = {
 const PROFILE_TRANSITIONS: Record<string, string[]> = { DRAFT: ["APPROVED", "RETIRED"], APPROVED: ["RETIRED"], RETIRED: [] };
 const EVIDENCE_STEPS = new Set(["LEGALLY_REVIEWED", "PARTNER_VERIFIED", "FINANCE_SIGNED", "TECHNICAL_REHEARSED"]);
 
-type PanelId = "skus" | "rates" | "profiles" | "gates" | "preview" | "quotes" | "outbox";
+type PanelId = "skus" | "rates" | "profiles" | "gates" | "b2b_rules" | "preview" | "quotes" | "outbox";
 
 // ---------------------------------------------------------------------------
 // Shared helpers & small components
@@ -1139,6 +1150,1055 @@ function OutboxPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 7.3: B2B Pricing Rules & Dealer Tiers Panel
+// ---------------------------------------------------------------------------
+
+function B2BRulesPanel() {
+  const [tiers, setTiers] = useState<DealerTier[]>([]);
+  const [rules, setRules] = useState<DealerPricingRule[]>([]);
+  const [applications, setApplications] = useState<DealerOrganisationProfile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Subtab navigation: applications | rules | tiers
+  const [b2bSubTab, setB2bSubTab] = useState<"applications" | "rules" | "tiers">("applications");
+  const [appStatusFilter, setAppStatusFilter] = useState<string>("PENDING");
+  const [appSearch, setAppSearch] = useState<string>("");
+
+  // Review Application Modal State
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [selectedApp, setSelectedApp] = useState<DealerOrganisationProfile | null>(null);
+  const [reviewAction, setReviewAction] = useState<"APPROVE" | "REJECT">("APPROVE");
+  const [reviewTier, setReviewTier] = useState("STANDARD");
+  const [reviewRejectionReason, setReviewRejectionReason] = useState("");
+  const [reviewAdminNotes, setReviewAdminNotes] = useState("");
+  const [reviewCustomCap, setReviewCustomCap] = useState("");
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewSuccess, setReviewSuccess] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+
+  // Create rule modal state
+  const [addRuleOpen, setAddRuleOpen] = useState(false);
+  const [ruleName, setRuleName] = useState("");
+  const [ruleDesc, setRuleDesc] = useState("");
+  const [ruleType, setRuleType] = useState<"PERCENTAGE_DISCOUNT" | "FIXED_PRICE">("PERCENTAGE_DISCOUNT");
+  const [targetScope, setTargetScope] = useState<"TIER" | "ORGANISATION" | "GENERAL">("TIER");
+  const [selectedTier, setSelectedTier] = useState("SILVER");
+  const [targetOrgId, setTargetOrgId] = useState("");
+  const [discountPct, setDiscountPct] = useState("10");
+  const [fixedPrice, setFixedPrice] = useState("");
+  const [minQty, setMinQty] = useState("1");
+  const [maxQty, setMaxQty] = useState("");
+  const [priority, setPriority] = useState("100");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [savingRule, setSavingRule] = useState(false);
+  const [ruleActionError, setRuleActionError] = useState<string | null>(null);
+
+  // Assign tier modal state
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [assignOrgId, setAssignOrgId] = useState("");
+  const [assignTier, setAssignTier] = useState("GOLD");
+  const [assignCustomCap, setAssignCustomCap] = useState("");
+  const [assignNotes, setAssignNotes] = useState("");
+  const [assignSuccess, setAssignSuccess] = useState<string | null>(null);
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const [assigning, setAssigning] = useState(false);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [tiersData, rulesData, appsData] = await Promise.all([
+        api.marketplace.getDealerTiers(),
+        api.marketplace.getDealerPricingRules(),
+        api.marketplace.getAdminDealerApplications({
+          status: appStatusFilter === "ALL" ? undefined : appStatusFilter,
+          search: appSearch.trim() || undefined,
+        }),
+      ]);
+      setTiers(tiersData);
+      setRules(rulesData);
+      setApplications(appsData);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [appStatusFilter, appSearch]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleOpenReview = (app: DealerOrganisationProfile) => {
+    setSelectedApp(app);
+    setReviewAction("APPROVE");
+    setReviewTier(app.dealer_tier?.tier_code || app.dealer_tier_code || app.tier || "STANDARD");
+    setReviewRejectionReason(app.rejection_reason || "");
+    setReviewAdminNotes("");
+    setReviewCustomCap(app.custom_discount_cap ? String(app.custom_discount_cap) : "");
+    setReviewError(null);
+    setReviewSuccess(null);
+    setReviewOpen(true);
+  };
+
+  const handleReviewSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedApp) return;
+    setReviewing(true);
+    setReviewError(null);
+
+    if (reviewAction === "REJECT" && !reviewRejectionReason.trim()) {
+      setReviewError("A rejection reason is required when rejecting a dealer application.");
+      setReviewing(false);
+      return;
+    }
+
+    try {
+      const payload: DealerApplicationReviewPayload = {
+        action: reviewAction,
+        tier_code: reviewAction === "APPROVE" ? reviewTier : undefined,
+        rejection_reason: reviewAction === "REJECT" ? reviewRejectionReason.trim() : undefined,
+        admin_notes: reviewAdminNotes.trim() || undefined,
+        custom_discount_cap: reviewCustomCap ? parseFloat(reviewCustomCap) : undefined,
+      };
+
+      const res = await api.marketplace.reviewDealerApplication(selectedApp.id, payload);
+      setReviewSuccess(
+        reviewAction === "APPROVE"
+          ? `Successfully approved ${res.organisation_name} for ${res.tier_details?.name || reviewTier} tier.`
+          : `Dealer application for ${res.organisation_name} has been rejected.`
+      );
+      setReviewOpen(false);
+      loadData();
+    } catch (err) {
+      setReviewError(errorText(err));
+    } finally {
+      setReviewing(false);
+    }
+  };
+
+  const handleCreateRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingRule(true);
+    setRuleActionError(null);
+    try {
+      const payload: Partial<DealerPricingRule> = {
+        name: ruleName.trim(),
+        description: ruleDesc.trim() || undefined,
+        rule_type: ruleType,
+        min_quantity: parseInt(minQty, 10) || 1,
+        priority: parseInt(priority, 10) || 100,
+        is_active: true,
+      };
+
+      if (ruleType === "PERCENTAGE_DISCOUNT") {
+        payload.discount_percentage = parseFloat(discountPct) || 0;
+      } else {
+        payload.fixed_price = fixedPrice.trim();
+        payload.discount_percentage = 0;
+      }
+
+      if (maxQty.trim()) {
+        payload.max_quantity = parseInt(maxQty, 10);
+      }
+
+      if (targetScope === "TIER") {
+        payload.dealer_tier = selectedTier;
+      } else if (targetScope === "ORGANISATION") {
+        payload.organisation = targetOrgId.trim();
+      }
+
+      if (startDate) payload.start_date = toIso(startDate);
+      if (endDate) payload.end_date = toIso(endDate);
+
+      await api.marketplace.createDealerPricingRule(payload);
+      setAddRuleOpen(false);
+      setRuleName("");
+      setRuleDesc("");
+      loadData();
+    } catch (err) {
+      setRuleActionError(errorText(err));
+    } finally {
+      setSavingRule(false);
+    }
+  };
+
+  const handleDeleteRule = async (id: string) => {
+    if (!window.confirm("Are you sure you want to deactivate and remove this pricing rule?")) return;
+    try {
+      await api.marketplace.deleteDealerPricingRule(id);
+      loadData();
+    } catch (err) {
+      setError(errorText(err));
+    }
+  };
+
+  const handleAssignTier = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAssigning(true);
+    setAssignError(null);
+    setAssignSuccess(null);
+    try {
+      const cap = assignCustomCap.trim() ? parseFloat(assignCustomCap) : undefined;
+      const res = await api.marketplace.assignDealerTier(assignOrgId.trim(), {
+        tier: assignTier,
+        custom_discount_cap: cap,
+        notes: assignNotes.trim() || undefined,
+      });
+      setAssignSuccess(`Successfully assigned ${res.dealer_tier?.name || assignTier} tier to organisation.`);
+      setAssignOrgId("");
+      setAssignNotes("");
+      setAssignCustomCap("");
+    } catch (err) {
+      setAssignError(errorText(err));
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h3 className="text-base font-black text-slate-950">Dealer B2B Control Plane</h3>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Manage dealer onboarding applications, tier assignments, and B2B pricing rules (Phase 7.1).
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={loadData}
+            className="h-8 px-3 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 flex items-center gap-1"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Refresh
+          </button>
+          <button
+            onClick={() => {
+              setAssignSuccess(null);
+              setAssignError(null);
+              setAssignOpen(true);
+            }}
+            className="h-8 px-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-xs font-bold hover:bg-amber-100 flex items-center gap-1"
+          >
+            <Building2 className="w-3.5 h-3.5 text-amber-600" /> Assign Dealer Tier
+          </button>
+          <button
+            onClick={() => {
+              setRuleActionError(null);
+              setAddRuleOpen(true);
+            }}
+            className="h-8 px-3 rounded-lg bg-slate-950 text-white text-xs font-bold flex items-center gap-1 hover:bg-slate-800"
+          >
+            <Plus className="w-3.5 h-3.5" /> Add Pricing Rule
+          </button>
+        </div>
+      </div>
+
+      {/* Subtab Navigation */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+        <button
+          onClick={() => setB2bSubTab("applications")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors ${
+            b2bSubTab === "applications"
+              ? "bg-slate-950 text-white"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <Building2 className="w-3.5 h-3.5" /> Dealer Applications
+          {applications.filter((a) => a.status === "PENDING").length > 0 && (
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-black bg-amber-400 text-slate-950">
+              {applications.filter((a) => a.status === "PENDING").length}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setB2bSubTab("rules")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors ${
+            b2bSubTab === "rules"
+              ? "bg-slate-950 text-white"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <Percent className="w-3.5 h-3.5" /> Pricing & Volume Rules ({rules.length})
+        </button>
+        <button
+          onClick={() => setB2bSubTab("tiers")}
+          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2 transition-colors ${
+            b2bSubTab === "tiers"
+              ? "bg-slate-950 text-white"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <Award className="w-3.5 h-3.5" /> Dealer Tiers ({tiers.length})
+        </button>
+      </div>
+
+      <ErrorBanner message={error} onRetry={loadData} />
+      {reviewSuccess && (
+        <div className="p-3 rounded-xl border border-emerald-200 bg-emerald-50 text-xs text-emerald-900 flex items-center justify-between">
+          <span>{reviewSuccess}</span>
+          <button onClick={() => setReviewSuccess(null)} className="text-emerald-700 hover:text-emerald-900 text-xs font-bold">
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* 1. Dealer Applications Subtab */}
+      {b2bSubTab === "applications" && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+              {["PENDING", "ACTIVE", "REJECTED", "SUSPENDED", "ALL"].map((st) => (
+                <button
+                  key={st}
+                  onClick={() => setAppStatusFilter(st)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold uppercase transition-colors ${
+                    appStatusFilter === st
+                      ? "bg-amber-500 text-white shadow-xs"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  {st}
+                </button>
+              ))}
+            </div>
+            <div className="relative w-full sm:w-64">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search organisations..."
+                value={appSearch}
+                onChange={(e) => setAppSearch(e.target.value)}
+                className="w-full h-8 pl-8 pr-3 border border-slate-200 rounded-lg text-xs focus:outline-none focus:border-amber-500"
+              />
+            </div>
+          </div>
+
+          <TableShell loading={loading} empty={!applications.length}>
+            <table className="w-full">
+              <thead>
+                <tr>
+                  <th className={th}>Organisation</th>
+                  <th className={th}>Status</th>
+                  <th className={th}>Tier</th>
+                  <th className={th}>Business Details</th>
+                  <th className={th}>Contact</th>
+                  <th className={th}>Submitted / Verified</th>
+                  <th className={`${th} text-right`}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {applications.map((app) => {
+                  const data = app.application_data || {};
+                  return (
+                    <tr key={app.id}>
+                      <td className={td}>
+                        <div className="font-bold text-slate-900">{app.organisation_name || "Unknown Organisation"}</div>
+                        <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                          <span>{app.organisation_country || "GB"}</span>
+                          <span>•</span>
+                          <span>{app.organisation.slice(0, 8)}...</span>
+                        </div>
+                      </td>
+                      <td className={td}>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                            app.status === "ACTIVE"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : app.status === "PENDING"
+                              ? "bg-amber-100 text-amber-800"
+                              : app.status === "REJECTED"
+                              ? "bg-rose-100 text-rose-800"
+                              : "bg-slate-100 text-slate-600"
+                          }`}
+                        >
+                          {app.status}
+                        </span>
+                      </td>
+                      <td className={td}>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono font-bold text-slate-800">
+                            {app.dealer_tier?.name || app.dealer_tier_code || app.tier || "None"}
+                          </span>
+                          {app.tier_details && (
+                            <span className="text-[10px] text-amber-600 font-bold">
+                              (-{Number(app.tier_details.baseline_discount_percentage)}%)
+                            </span>
+                          )}
+                        </div>
+                        {app.custom_discount_cap != null && (
+                          <div className="text-[10px] text-slate-400">Cap: {app.custom_discount_cap}%</div>
+                        )}
+                      </td>
+                      <td className={td}>
+                        <div className="text-xs text-slate-700">
+                          {data.company_registration_number ? (
+                            <div>Reg: <span className="font-mono">{data.company_registration_number}</span></div>
+                          ) : (
+                            <span className="text-slate-400 italic">No Reg #</span>
+                          )}
+                          {data.tax_id && <div>Tax: <span className="font-mono">{data.tax_id}</span></div>}
+                          {data.website_url && (
+                            <a
+                              href={data.website_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[10px] text-blue-600 hover:underline block truncate max-w-[150px]"
+                            >
+                              {data.website_url}
+                            </a>
+                          )}
+                        </div>
+                      </td>
+                      <td className={td}>
+                        <div className="text-xs text-slate-700">
+                          {data.contact_email && <div>{data.contact_email}</div>}
+                          {data.contact_phone && <div className="text-slate-500 font-mono">{data.contact_phone}</div>}
+                        </div>
+                      </td>
+                      <td className={td}>
+                        <div className="text-[10px] text-slate-500">
+                          <div>Applied: {data.submitted_at ? formatDate(data.submitted_at) : formatDate(app.created_at)}</div>
+                          {app.verified_at && (
+                            <div className="text-emerald-700 font-bold">
+                              Verified: {formatDate(app.verified_at)}
+                              {app.verified_by_name ? ` by ${app.verified_by_name}` : ""}
+                            </div>
+                          )}
+                          {app.status === "REJECTED" && app.rejection_reason && (
+                            <div className="text-rose-600 line-clamp-1" title={app.rejection_reason}>
+                              Reason: {app.rejection_reason}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td className={`${td} text-right`}>
+                        <button
+                          onClick={() => handleOpenReview(app)}
+                          className="px-2.5 py-1 rounded bg-slate-950 text-white text-xs font-bold hover:bg-slate-800"
+                        >
+                          {app.status === "PENDING" ? "Review & Verify" : "Manage"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </TableShell>
+        </div>
+      )}
+
+      {/* 2. Rules Subtab */}
+      {b2bSubTab === "rules" && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+              Active Pricing & Volume Break Rules ({rules.length})
+            </span>
+            <span className="text-[11px] text-slate-500">
+              Evaluated by strict precedence: Org Product &gt; Org Category &gt; Tier &gt; Quantity Break &gt; Retail
+            </span>
+          </div>
+          <TableShell loading={loading} empty={!rules.length}>
+            <table className="w-full">
+              <thead>
+                <tr>
+                  <th className={th}>Rule Name</th>
+                  <th className={th}>Rule Type</th>
+                  <th className={th}>Scope / Target</th>
+                  <th className={th}>MOQ / Range</th>
+                  <th className={th}>Benefit</th>
+                  <th className={th}>Priority</th>
+                  <th className={th}>Status</th>
+                  <th className={th}>Validity</th>
+                  <th className={`${th} text-right`}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rules.map((r) => (
+                  <tr key={r.id}>
+                    <td className={td}>
+                      <div className="font-bold text-slate-900">{r.name}</div>
+                      {r.description && <div className="text-[10px] text-slate-400">{r.description}</div>}
+                    </td>
+                    <td className={td}>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          r.rule_type === "PERCENTAGE_DISCOUNT"
+                            ? "bg-amber-100 text-amber-900"
+                            : "bg-blue-100 text-blue-900"
+                        }`}
+                      >
+                        {r.rule_type === "PERCENTAGE_DISCOUNT" ? "Percentage Discount" : "Fixed Contract Price"}
+                      </span>
+                    </td>
+                    <td className={td}>
+                      {r.organisation ? (
+                        <div>
+                          <span className="font-bold text-purple-700">Organisation</span>
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            {r.organisation_name || r.organisation.slice(0, 8)}
+                          </div>
+                        </div>
+                      ) : r.dealer_tier ? (
+                        <div>
+                          <span className="font-bold text-slate-800">Tier: {r.tier_name || r.dealer_tier}</span>
+                        </div>
+                      ) : (
+                        <span className="text-slate-500">All Verified Dealers</span>
+                      )}
+                    </td>
+                    <td className={td}>
+                      <div className="font-mono text-xs">
+                        Min: <strong className="text-slate-900">{r.min_quantity}</strong>
+                        {r.max_quantity ? ` - Max: ${r.max_quantity}` : " +"}
+                      </div>
+                    </td>
+                    <td className={td}>
+                      {r.rule_type === "PERCENTAGE_DISCOUNT" ? (
+                        <span className="font-black text-amber-600">-{Number(r.discount_percentage)}%</span>
+                      ) : (
+                        <span className="font-black text-blue-600">
+                          {r.currency || "£"} {Number(r.fixed_price || 0).toFixed(2)}
+                        </span>
+                      )}
+                    </td>
+                    <td className={td}>
+                      <span className="font-mono font-bold text-slate-700">{r.priority}</span>
+                    </td>
+                    <td className={td}>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                          r.is_active ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-500"
+                        }`}
+                      >
+                        {r.is_active ? "Active" : "Disabled"}
+                      </span>
+                    </td>
+                    <td className={td}>
+                      <div className="text-[10px] text-slate-500">
+                        {r.start_date || r.end_date
+                          ? `${formatDate(r.start_date)} → ${formatDate(r.end_date)}`
+                          : "Always Valid"}
+                      </div>
+                    </td>
+                    <td className={`${td} text-right`}>
+                      <button
+                        onClick={() => handleDeleteRule(r.id)}
+                        className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                        title="Deactivate rule"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableShell>
+        </div>
+      )}
+
+      {/* 3. Dealer Tiers Subtab */}
+      {b2bSubTab === "tiers" && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+              Configured Dealer Tiers ({tiers.length})
+            </span>
+            <span className="text-[11px] text-slate-500">Tier rules cascade to verified member organisations</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            {tiers.map((t) => (
+              <div
+                key={t.id || t.tier_code}
+                className="p-3.5 rounded-xl border border-slate-200 bg-white shadow-xs flex flex-col justify-between"
+              >
+                <div>
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-xs font-black text-slate-900">{t.tier_code}</span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                        t.is_active ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-500"
+                      }`}
+                    >
+                      {t.is_active ? "Active" : "Inactive"}
+                    </span>
+                  </div>
+                  <div className="text-xs font-medium text-slate-600 mt-1">{t.name}</div>
+                </div>
+                <div className="mt-3 pt-2 border-t border-slate-100 flex items-baseline justify-between">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase">Baseline Discount</span>
+                  <span className="text-sm font-black text-amber-600">{Number(t.baseline_discount_percentage)}%</span>
+                </div>
+              </div>
+            ))}
+            {tiers.length === 0 && !loading && (
+              <div className="col-span-full py-4 text-center text-xs text-slate-400">No dealer tiers configured yet.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Assign Tier Modal */}
+      {assignOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 border border-slate-200 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h4 className="text-sm font-black text-slate-950 flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-amber-500" /> Assign Dealer Tier to Organisation
+              </h4>
+              <button onClick={() => setAssignOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {assignError && <div className="p-2 rounded bg-rose-50 text-rose-800 text-xs">{assignError}</div>}
+            {assignSuccess && <div className="p-2 rounded bg-emerald-50 text-emerald-800 text-xs">{assignSuccess}</div>}
+
+            <form onSubmit={handleAssignTier} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Organisation UUID / ID *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. 550e8400-e29b-41d4-a716-446655440000"
+                  value={assignOrgId}
+                  onChange={(e) => setAssignOrgId(e.target.value)}
+                  className="w-full h-9 px-3 border border-slate-200 rounded-lg font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Dealer Tier *</label>
+                <select
+                  value={assignTier}
+                  onChange={(e) => setAssignTier(e.target.value)}
+                  className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                >
+                  {tiers.map((t) => (
+                    <option key={t.tier_code} value={t.tier_code}>
+                      {t.name} ({Number(t.baseline_discount_percentage)}% discount)
+                    </option>
+                  ))}
+                  <option value="CUSTOM">CUSTOM (Bespoke Contract)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Custom Maximum Discount Cap (%)</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.5"
+                  placeholder="Optional safety ceiling (e.g. 25)"
+                  value={assignCustomCap}
+                  onChange={(e) => setAssignCustomCap(e.target.value)}
+                  className="w-full h-9 px-3 border border-slate-200 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Internal Verification Notes</label>
+                <textarea
+                  rows={2}
+                  placeholder="e.g. Franchised dealership agreement verified on 2026-11-23"
+                  value={assignNotes}
+                  onChange={(e) => setAssignNotes(e.target.value)}
+                  className="w-full p-2 border border-slate-200 rounded-lg"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAssignOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg font-bold text-slate-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={assigning}
+                  className="px-4 py-1.5 bg-slate-950 text-white rounded-lg font-black hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {assigning ? "Saving..." : "Save Assignment"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add Pricing Rule Modal */}
+      {addRuleOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 border border-slate-200 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h4 className="text-sm font-black text-slate-950 flex items-center gap-2">
+                <Plus className="w-4 h-4 text-amber-500" /> Create B2B Pricing Rule
+              </h4>
+              <button onClick={() => setAddRuleOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {ruleActionError && <div className="p-2 rounded bg-rose-50 text-rose-800 text-xs">{ruleActionError}</div>}
+
+            <form onSubmit={handleCreateRule} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Rule Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Gold Tier Brake Components 15% Volume Discount"
+                  value={ruleName}
+                  onChange={(e) => setRuleName(e.target.value)}
+                  className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Description</label>
+                <input
+                  type="text"
+                  placeholder="Optional administrative summary"
+                  value={ruleDesc}
+                  onChange={(e) => setRuleDesc(e.target.value)}
+                  className="w-full h-9 px-3 border border-slate-200 rounded-lg"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Rule Type *</label>
+                  <select
+                    value={ruleType}
+                    onChange={(e) => setRuleType(e.target.value as "PERCENTAGE_DISCOUNT" | "FIXED_PRICE")}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                  >
+                    <option value="PERCENTAGE_DISCOUNT">Percentage Discount (%)</option>
+                    <option value="FIXED_PRICE">Fixed Contract Price</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Target Scope *</label>
+                  <select
+                    value={targetScope}
+                    onChange={(e) => setTargetScope(e.target.value as "TIER" | "ORGANISATION" | "GENERAL")}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                  >
+                    <option value="TIER">By Dealer Tier</option>
+                    <option value="ORGANISATION">By Specific Organisation</option>
+                    <option value="GENERAL">All Verified Dealers (General Volume Break)</option>
+                  </select>
+                </div>
+              </div>
+
+              {targetScope === "TIER" && (
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Select Dealer Tier</label>
+                  <select
+                    value={selectedTier}
+                    onChange={(e) => setSelectedTier(e.target.value)}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                  >
+                    {tiers.map((t) => (
+                      <option key={t.tier_code} value={t.tier_code}>
+                        {t.name} ({t.tier_code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {targetScope === "ORGANISATION" && (
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Target Organisation UUID *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Enter organisation UUID"
+                    value={targetOrgId}
+                    onChange={(e) => setTargetOrgId(e.target.value)}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg font-mono"
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                {ruleType === "PERCENTAGE_DISCOUNT" ? (
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">Discount Percentage (%) *</label>
+                    <input
+                      type="number"
+                      required
+                      min="0.1"
+                      max="100"
+                      step="0.1"
+                      value={discountPct}
+                      onChange={(e) => setDiscountPct(e.target.value)}
+                      className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">Fixed Trade Price *</label>
+                    <input
+                      type="number"
+                      required
+                      min="0.01"
+                      step="0.01"
+                      placeholder="e.g. 149.99"
+                      value={fixedPrice}
+                      onChange={(e) => setFixedPrice(e.target.value)}
+                      className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Evaluation Priority *</label>
+                  <input
+                    type="number"
+                    required
+                    value={priority}
+                    onChange={(e) => setPriority(e.target.value)}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Minimum Order Qty (MOQ) *</label>
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={minQty}
+                    onChange={(e) => setMinQty(e.target.value)}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Maximum Qty (Optional Break)</label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 49"
+                    value={maxQty}
+                    onChange={(e) => setMaxQty(e.target.value)}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Valid From (Optional)</label>
+                  <input
+                    type="datetime-local"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg text-slate-600"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Valid Until (Optional)</label>
+                  <input
+                    type="datetime-local"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="w-full h-9 px-3 border border-slate-200 rounded-lg text-slate-600"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAddRuleOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg font-bold text-slate-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingRule}
+                  className="px-4 py-1.5 bg-slate-950 text-white rounded-lg font-black hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {savingRule ? "Saving..." : "Create Rule"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Review Dealer Application Modal */}
+      {reviewOpen && selectedApp && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 border border-slate-200 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h4 className="text-sm font-black text-slate-950 flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-amber-500" /> Review Dealer Application
+              </h4>
+              <button onClick={() => setReviewOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Application Overview */}
+            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-900 text-sm">{selectedApp.organisation_name}</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                  selectedApp.status === "ACTIVE" ? "bg-emerald-100 text-emerald-800" :
+                  selectedApp.status === "PENDING" ? "bg-amber-100 text-amber-800" :
+                  selectedApp.status === "REJECTED" ? "bg-rose-100 text-rose-800" : "bg-slate-100 text-slate-600"
+                }`}>
+                  Current: {selectedApp.status}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-slate-600">
+                <div>Country: <b>{selectedApp.organisation_country || "GB"}</b></div>
+                <div>Company Reg #: <b>{selectedApp.application_data?.company_registration_number || "N/A"}</b></div>
+                <div>Tax ID / VAT: <b>{selectedApp.application_data?.tax_id || "N/A"}</b></div>
+                <div>Contact Email: <b>{selectedApp.application_data?.contact_email || "N/A"}</b></div>
+                <div>Contact Phone: <b>{selectedApp.application_data?.contact_phone || "N/A"}</b></div>
+                <div>Website: <b>{selectedApp.application_data?.website_url || "N/A"}</b></div>
+              </div>
+              {selectedApp.application_data?.applicant_notes && (
+                <div className="pt-2 border-t border-slate-200 text-slate-700">
+                  <span className="font-bold block text-slate-500 text-[10px] uppercase">Applicant Note:</span>
+                  {selectedApp.application_data.applicant_notes}
+                </div>
+              )}
+            </div>
+
+            {reviewError && <div className="p-2 rounded bg-rose-50 text-rose-800 text-xs">{reviewError}</div>}
+
+            <form onSubmit={handleReviewSubmit} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1.5">Verification Decision *</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setReviewAction("APPROVE")}
+                    className={`p-3 rounded-xl border text-center font-bold flex items-center justify-center gap-2 transition-all ${
+                      reviewAction === "APPROVE"
+                        ? "border-emerald-500 bg-emerald-50 text-emerald-900 ring-2 ring-emerald-500/20"
+                        : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    Approve Application
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReviewAction("REJECT")}
+                    className={`p-3 rounded-xl border text-center font-bold flex items-center justify-center gap-2 transition-all ${
+                      reviewAction === "REJECT"
+                        ? "border-rose-500 bg-rose-50 text-rose-900 ring-2 ring-rose-500/20"
+                        : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    <X className="w-4 h-4 text-rose-600" />
+                    Reject Application
+                  </button>
+                </div>
+              </div>
+
+              {reviewAction === "APPROVE" && (
+                <>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">Assign Dealer Tier *</label>
+                    <select
+                      value={reviewTier}
+                      onChange={(e) => setReviewTier(e.target.value)}
+                      className="w-full h-9 px-3 border border-slate-200 rounded-lg font-bold"
+                    >
+                      {tiers.map((t) => (
+                        <option key={t.tier_code} value={t.tier_code}>
+                          {t.name} ({t.tier_code}) - {Number(t.baseline_discount_percentage)}% baseline discount
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">Custom Maximum Discount Cap (%)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.5"
+                      placeholder="Optional safety ceiling (e.g. 25)"
+                      value={reviewCustomCap}
+                      onChange={(e) => setReviewCustomCap(e.target.value)}
+                      className="w-full h-9 px-3 border border-slate-200 rounded-lg"
+                    />
+                  </div>
+                </>
+              )}
+
+              {reviewAction === "REJECT" && (
+                <div>
+                  <label className="block font-bold text-rose-700 mb-1">Rejection Reason (Required) *</label>
+                  <textarea
+                    required
+                    rows={3}
+                    placeholder="State clearly why this dealership application is rejected..."
+                    value={reviewRejectionReason}
+                    onChange={(e) => setReviewRejectionReason(e.target.value)}
+                    className="w-full p-2 border border-rose-300 rounded-lg bg-rose-50/30 text-rose-950 focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Internal Admin Notes (Optional)</label>
+                <textarea
+                  rows={2}
+                  placeholder="Internal verification remarks or audit log notes..."
+                  value={reviewAdminNotes}
+                  onChange={(e) => setReviewAdminNotes(e.target.value)}
+                  className="w-full p-2 border border-slate-200 rounded-lg"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setReviewOpen(false)}
+                  className="px-3 py-1.5 border border-slate-200 rounded-lg font-bold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={reviewing}
+                  className={`px-4 py-1.5 text-white rounded-lg font-black transition-colors disabled:opacity-50 ${
+                    reviewAction === "APPROVE" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-rose-600 hover:bg-rose-700"
+                  }`}
+                >
+                  {reviewing ? "Processing..." : reviewAction === "APPROVE" ? "Confirm Approval" : "Confirm Rejection"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Shell
 // ---------------------------------------------------------------------------
 
@@ -1147,6 +2207,7 @@ const PANELS: Array<{ id: PanelId; label: string; icon: React.ComponentType<{ cl
   { id: "rates", label: "Rate Schedules", icon: Percent },
   { id: "profiles", label: "Role Profiles", icon: Users },
   { id: "gates", label: "Country Gates", icon: Globe2 },
+  { id: "b2b_rules", label: "Dealer B2B Rules & Tiers", icon: Percent },
   { id: "preview", label: "Quote Preview", icon: Calculator },
   { id: "quotes", label: "Quotes", icon: FileText },
   { id: "outbox", label: "Event Outbox", icon: Radio },
@@ -1199,6 +2260,7 @@ export default function CommercialAdminView() {
       {panel === "rates" && <RatePanel openTransition={openTransition} />}
       {panel === "profiles" && <RoleProfilePanel openTransition={openTransition} />}
       {panel === "gates" && <GatePanel openTransition={openTransition} />}
+      {panel === "b2b_rules" && <B2BRulesPanel />}
       {panel === "preview" && <PreviewPanel />}
       {panel === "quotes" && <QuotesPanel />}
       {panel === "outbox" && <OutboxPanel />}

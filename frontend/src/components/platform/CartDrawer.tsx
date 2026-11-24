@@ -173,6 +173,9 @@ interface CalculatedItem {
   hsn_code?: string;
   gst_rate: string;
   unit_price: string;
+  retail_unit_price?: string;
+  discount_amount?: string;
+  pricing_tier?: string;
   quantity: number;
   taxable_amount: string;
   cgst_amount: string;
@@ -192,6 +195,9 @@ interface AuthoritativeCalculation {
   currency: string;
   place_of_supply?: string;
   seller_state?: string;
+  total_discount_amount?: string;
+  is_dealer_order?: boolean;
+  pricing_tier?: string;
   items: CalculatedItem[];
 }
 
@@ -936,6 +942,9 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
         currency: String(res.currency || destCurrency),
         place_of_supply: String(res.place_of_supply || shippingForm.shipping_state),
         seller_state: String(res.seller_state || ""),
+        total_discount_amount: res.total_discount_amount ? String(res.total_discount_amount) : undefined,
+        is_dealer_order: Boolean(res.is_dealer_order),
+        pricing_tier: res.pricing_tier ? String(res.pricing_tier) : undefined,
         items: itemsList,
       };
 
@@ -1746,6 +1755,11 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                         </h5>
                         <p className="text-[11px] text-slate-500">
                           {ci.quantity} × {calculation.currency} {Number(ci.unit_price).toFixed(2)}
+                          {ci.discount_amount && Number(ci.discount_amount) > 0 && (
+                            <span className="text-emerald-600 font-bold ml-1.5">
+                              (Save {calculation.currency} {Number(ci.discount_amount).toFixed(2)} B2B trade discount)
+                            </span>
+                          )}
                         </p>
                       </div>
 
@@ -1775,6 +1789,15 @@ export default function CartDrawer({ isOpen, onClose, onNavigate }: CartDrawerPr
                 </div>
 
                 <div className="space-y-1.5 text-xs text-slate-300">
+                  {calculation.total_discount_amount && Number(calculation.total_discount_amount) > 0 && (
+                    <div className="flex justify-between text-emerald-400 font-bold bg-emerald-950/40 px-2 py-1 rounded-lg border border-emerald-800/40">
+                      <span>B2B Trade Discount ({calculation.pricing_tier || "DEALER"}):</span>
+                      <span className="font-mono">
+                        - {calculation.currency} {Number(calculation.total_discount_amount).toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+
                   <div className="flex justify-between">
                     <span>Taxable Value (Before GST):</span>
                     <span className="font-mono text-white">

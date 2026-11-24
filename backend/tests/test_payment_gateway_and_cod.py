@@ -1316,22 +1316,6 @@ class TestCompletePaymentSystemImplementation:
         monkeypatch.setattr(settings, "RAZORPAY_KEY_ID", "rzp_test_real_live_mock_key")
         monkeypatch.setattr(settings, "RAZORPAY_KEY_SECRET", "rzp_test_real_live_mock_secret")
 
-        provider = RazorpayPaymentProvider()
-        assert provider.is_configured is True
-
-        payload = valid_india_shipping_payload(in_part.id, quantity=1)
-        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
-        order = Order.objects.get(id=res.json()["order"]["id"])
-
-        mock_response_body = json.dumps({
-            "id": "order_live_rzp_mocked_987654",
-            "entity": "order",
-            "amount": int(round(order.total_amount * 100)),
-            "currency": "INR",
-            "status": "created",
-            "receipt": f"rcpt_{order.order_number}",
-        }).encode("utf-8")
-
         class MockHTTPResponse(io.BytesIO):
             def __enter__(self):
                 return self
@@ -1339,13 +1323,40 @@ class TestCompletePaymentSystemImplementation:
                 pass
 
         def mock_urlopen(req, timeout=10):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "methods" in url:
+                methods_data = json.dumps({
+                    "entity": "methods",
+                    "card": True,
+                    "upi": True,
+                    "netbanking": True,
+                    "wallet": True,
+                }).encode("utf-8")
+                return MockHTTPResponse(methods_data)
             assert req.get_method() == "POST"
-            assert "https://api.razorpay.com/v1/orders" in req.full_url
+            assert "https://api.razorpay.com/v1/orders" in url
             assert "Basic " in req.headers.get("Authorization")
-            return MockHTTPResponse(mock_response_body)
+            body = json.loads(req.data.decode("utf-8")) if hasattr(req, "data") and req.data else {}
+            resp_data = {
+                "id": "order_live_rzp_mocked_987654",
+                "entity": "order",
+                "amount": body.get("amount", int(round(in_part.price * 100))),
+                "currency": body.get("currency", "INR"),
+                "status": "created",
+                "receipt": body.get("receipt", "rcpt_mock"),
+            }
+            return MockHTTPResponse(json.dumps(resp_data).encode("utf-8"))
 
         monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
+        provider = RazorpayPaymentProvider()
+        assert provider.is_configured is True
+
+        payload = valid_india_shipping_payload(in_part.id, quantity=1)
+        res = buyer_auth_client.post("/api/v1/marketplace/orders/checkout/", payload, format="json")
+        order = Order.objects.get(id=res.json()["order"]["id"])
+
+        order.payment_reference = ""
         session = provider.create_payment_session(order)
         assert session["provider_order_id"] == "order_live_rzp_mocked_987654"
         assert session["currency"] == "INR"
@@ -1381,6 +1392,10 @@ def _production_payment_env(monkeypatch):
     monkeypatch.setattr(settings, 'DEBUG', False)
     monkeypatch.setattr(settings, 'IS_TESTING', False)
     monkeypatch.setattr(settings, 'PAYMENT_TEST_MODE', False)
+    monkeypatch.setattr(settings, 'RAZORPAY_KEY_ID', 'rzp_test_placeholder_key')
+    monkeypatch.setattr(settings, 'RAZORPAY_KEY_SECRET', 'rzp_test_placeholder_secret')
+    monkeypatch.setattr(settings, 'STRIPE_SECRET_KEY', 'sk_test_placeholder_secret_key')
+    monkeypatch.setattr(settings, 'STRIPE_PUBLISHABLE_KEY', 'pk_test_placeholder_key')
 
 
 def _method(methods, code):

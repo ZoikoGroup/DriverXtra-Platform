@@ -18,7 +18,21 @@ class BasePaymentProvider(ABC):
     @property
     def is_ready(self) -> bool:
         """True when the provider can create real or permitted test sessions in this environment."""
-        return bool(getattr(self, 'is_configured', False) or getattr(self, 'test_mode', False))
+        if getattr(self, 'test_mode', False):
+            return True
+
+        if not getattr(self, 'is_configured', False):
+            return False
+
+        # In production (test_mode=False), test credentials (rzp_test_..., sk_test_...) cannot process live payments
+        clean_key = getattr(self, 'key_id', '') or getattr(self, 'publishable_key', '') or ''
+        clean_secret = getattr(self, 'key_secret', '') or getattr(self, 'secret_key', '') or ''
+        clean_key = clean_key.strip().lower()
+        clean_secret = clean_secret.strip().lower()
+        if clean_key.startswith(('rzp_test_', 'pk_test_')) or clean_secret.startswith(('rzp_test_', 'sk_test_')):
+            return False
+
+        return True
 
     @abstractmethod
     def create_payment_session(

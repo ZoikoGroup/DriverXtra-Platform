@@ -133,7 +133,11 @@ class StripePaymentProvider(BasePaymentProvider):
                 logger.warning("Falling back to deterministic test session in IS_TESTING environment due to connection error.")
 
         if self.test_mode:
-            payment_intent_id = f"pi_test_{uuid.uuid4().hex[:18]}"
+            existing_ref = getattr(order, 'payment_reference', '') or ''
+            if existing_ref and str(existing_ref).startswith('pi_'):
+                payment_intent_id = str(existing_ref)
+            else:
+                payment_intent_id = f"pi_test_{uuid.uuid4().hex[:18]}"
             client_secret = f"{payment_intent_id}_secret_{uuid.uuid4().hex[:12]}"
 
             return {

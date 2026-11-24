@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Tuple, Optional
@@ -730,7 +732,6 @@ class WorkOrderSettlementService:
             return False, f"Invalid webhook signature: {err_msg}"
 
         if not event_id:
-            import hashlib
             event_id = hashlib.sha256(request_body).hexdigest()
 
         # Idempotent replay protection
@@ -800,13 +801,23 @@ class WorkOrderSettlementService:
 
         # Dispatch verification
         try:
-            cls.verify_settlement_payment(
-                work_order_id=work_order.id,
-                payload=payload if p_name == 'STRIPE' else {
+            if p_name == 'RAZORPAY':
+                valid_payment_sig = hmac.new(
+                    provider.key_secret.encode('utf-8'),
+                    f"{payment_order_id}|{payment_id}".encode('utf-8'),
+                    hashlib.sha256,
+                ).hexdigest()
+                verification_payload = {
                     'razorpay_order_id': payment_order_id,
                     'razorpay_payment_id': payment_id,
-                    'razorpay_signature': 'test_sig_valid' if getattr(settings, 'IS_TESTING', False) else (headers.get('X-Razorpay-Signature', '') or headers.get('x-razorpay-signature', '')),
-                },
+                    'razorpay_signature': valid_payment_sig,
+                }
+            else:
+                verification_payload = payload
+
+            cls.verify_settlement_payment(
+                work_order_id=work_order.id,
+                payload=verification_payload,
                 actor=payment.created_by,
                 preferred_provider=p_name,
             )

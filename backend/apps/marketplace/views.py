@@ -592,6 +592,17 @@ class MarketplacePartListView(generics.ListAPIView):
             serializer_context['fits_vehicle_variant'] = target_variant
             serializer_context['fits_vehicle_no_variant'] = no_variant
 
+        if self.request.user and self.request.user.is_authenticated:
+            from apps.marketplace.b2b_pricing_service import DealerPricingService
+            eligibility = DealerPricingService.evaluate_dealer_eligibility(user=self.request.user)
+            serializer_context['_dealer_eligibility'] = eligibility
+            is_eligible, _, org, profile, tier = eligibility
+            if is_eligible:
+                serializer_context['_dealer_rules_pool'] = DealerPricingService.get_rules_for_entity(
+                    organisation=org,
+                    tier=tier,
+                )
+
         if page is not None:
             serializer = self.get_serializer(page, many=True, context=serializer_context)
             response = self.get_paginated_response(serializer.data)
@@ -654,6 +665,17 @@ class MarketplacePartDetailView(generics.RetrieveAPIView):
             serializer_context['fits_vehicle'] = True
             serializer_context['fits_vehicle_variant'] = target_variant
             serializer_context['fits_vehicle_no_variant'] = no_variant
+
+        if self.request.user and self.request.user.is_authenticated:
+            from apps.marketplace.b2b_pricing_service import DealerPricingService
+            eligibility = DealerPricingService.evaluate_dealer_eligibility(user=self.request.user)
+            serializer_context['_dealer_eligibility'] = eligibility
+            is_eligible, _, org, profile, tier = eligibility
+            if is_eligible:
+                serializer_context['_dealer_rules_pool'] = DealerPricingService.get_rules_for_entity(
+                    organisation=org,
+                    tier=tier,
+                )
 
         serializer = self.get_serializer(instance, context=serializer_context)
         return Response(serializer.data)
@@ -2008,6 +2030,26 @@ class OrderCheckoutView(views.APIView):
 
         currency = required_currency
 
+        # Resolve B2B Dealer Eligibility
+        from apps.marketplace.b2b_pricing_service import DealerPricingService
+        b2b_org_id = data.get('organisation_id') or request.data.get('organisation_id')
+        is_dealer_eligible, dealer_ineligibility_reason, dealer_org, dealer_profile, dealer_tier = (
+            DealerPricingService.evaluate_dealer_eligibility(
+                user=buyer,
+                organisation_id=b2b_org_id,
+            )
+        )
+
+        if b2b_org_id and not is_dealer_eligible:
+            return Response(
+                {
+                    "status": "error",
+                    "code": "DEALER_ORGANISATION_UNAUTHORIZED",
+                    "error": dealer_ineligibility_reason or "You are not authorized to purchase on behalf of this organisation.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
             with transaction.atomic():
                 calculated_items = []
@@ -2017,6 +2059,7 @@ class OrderCheckoutView(views.APIView):
                 igst_total = Decimal('0.00')
                 tax_total = Decimal('0.00')
                 grand_total = Decimal('0.00')
+                total_dealer_discount = Decimal('0.00')
 
                 seller_state = ""
                 effective_place_of_supply = shipping_state or place_of_supply or ('UK' if country_code == 'GB' else 'MH')
@@ -2049,13 +2092,55 @@ class OrderCheckoutView(views.APIView):
 
                     # Authoritative server-side pricing and cross-currency conversion
                     try:
-                        unit_price, orig_currency, is_converted = resolve_authoritative_unit_price(
+                        base_unit_price, orig_currency, is_converted = resolve_authoritative_unit_price(
                             listing=listing,
                             destination_currency=currency,
                             destination_country=shipping_country,
                         )
                     except PriceCalculationError as e:
                         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+                    # B2B Dealer Pricing & Volume Discounts evaluation
+                    dealer_pricing_calc = DealerPricingService.calculate_item_price(
+                        listing=listing,
+                        quantity=qty,
+                        user=buyer,
+                        organisation_id=dealer_org.id if dealer_org else b2b_org_id,
+                        destination_currency=currency,
+                        destination_country=shipping_country,
+                    )
+
+                    if not dealer_pricing_calc["moq_satisfied"]:
+                        return Response(
+                            {
+                                "status": "error",
+                                "code": "MINIMUM_ORDER_QUANTITY_NOT_MET",
+                                "error": f"Minimum order quantity for '{listing.name}' is {dealer_pricing_calc['minimum_order_quantity']} (requested: {qty}).",
+                                "minimum_order_quantity": dealer_pricing_calc['minimum_order_quantity'],
+                                "requested_quantity": qty,
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
+                    retail_unit_price = dealer_pricing_calc["retail_unit_price"]
+                    effective_unit_price = dealer_pricing_calc["dealer_unit_price"]
+                    discount_amount_per_unit = dealer_pricing_calc["discount_amount_per_unit"]
+                    total_item_discount = dealer_pricing_calc["total_discount_amount"]
+                    pricing_tier_code = dealer_pricing_calc["applied_tier"] or ""
+
+                    pricing_rule_snapshot = {
+                        "rule_id": dealer_pricing_calc["applied_rule_id"],
+                        "rule_name": dealer_pricing_calc["applied_rule_name"],
+                        "precedence_level": dealer_pricing_calc["precedence_level"],
+                        "discount_percentage": str(dealer_pricing_calc["discount_percentage"]),
+                        "discount_amount_per_unit": str(discount_amount_per_unit),
+                        "retail_unit_price": str(retail_unit_price),
+                        "dealer_unit_price": str(effective_unit_price),
+                        "tier_code": pricing_tier_code,
+                    } if dealer_pricing_calc["is_dealer_pricing_applied"] else {}
+
+                    total_dealer_discount += total_item_discount
+                    unit_price = effective_unit_price
 
                     if listing.organisation and listing.organisation.jurisdiction:
                         seller_state = listing.organisation.jurisdiction
@@ -2098,6 +2183,10 @@ class OrderCheckoutView(views.APIView):
                         "gst_rate": gst_rate,
                         "is_tax_verified": listing.is_tax_verified,
                         "unit_price": unit_price,
+                        "retail_unit_price": retail_unit_price,
+                        "discount_amount": discount_amount_per_unit,
+                        "pricing_tier": pricing_tier_code,
+                        "pricing_rule_snapshot": pricing_rule_snapshot,
                         "quantity": qty,
                         "taxable_amount": line_taxable,
                         "cgst_amount": line_cgst,
@@ -2228,6 +2317,9 @@ class OrderCheckoutView(views.APIView):
                         "igst_amount": str(igst_total),
                         "total_tax_amount": str(tax_total),
                         "total_amount": str(grand_total),
+                        "is_dealer_order": is_dealer_eligible and total_dealer_discount > Decimal('0.00'),
+                        "dealer_tier": dealer_tier.code if dealer_tier else None,
+                        "total_discount_amount": str(total_dealer_discount),
                         "tax_breakdown": order_tax_breakdown,
                         "available_payment_methods": available_payment_methods,
                         "items": [
@@ -2239,6 +2331,10 @@ class OrderCheckoutView(views.APIView):
                                 "hsn_code": ci["hsn_code"],
                                 "gst_rate": str(ci["gst_rate"]),
                                 "unit_price": str(ci["unit_price"]),
+                                "retail_unit_price": str(ci.get("retail_unit_price", ci["unit_price"])),
+                                "discount_amount": str(ci.get("discount_amount", Decimal('0.00'))),
+                                "pricing_tier": ci.get("pricing_tier", ""),
+                                "is_discount_applied": ci.get("discount_amount", Decimal('0.00')) > Decimal('0.00'),
                                 "quantity": ci["quantity"],
                                 "taxable_amount": str(ci["taxable_amount"]),
                                 "cgst_amount": str(ci["cgst_amount"]),
@@ -2359,6 +2455,9 @@ class OrderCheckoutView(views.APIView):
                     igst_amount=igst_total,
                     total_tax_amount=tax_total,
                     total_amount=grand_total,
+                    organisation=dealer_org if is_dealer_eligible else None,
+                    is_dealer_order=is_dealer_eligible and total_dealer_discount > Decimal('0.00'),
+                    total_discount_amount=total_dealer_discount,
                     tax_breakdown=order_tax_breakdown,
                 )
 
@@ -2374,6 +2473,10 @@ class OrderCheckoutView(views.APIView):
                         gst_rate=ci["gst_rate"],
                         is_tax_verified=ci["is_tax_verified"],
                         unit_price=ci["unit_price"],
+                        retail_unit_price=ci.get("retail_unit_price", ci["unit_price"]),
+                        discount_amount=ci.get("discount_amount", Decimal('0.00')),
+                        pricing_tier=ci.get("pricing_tier", ""),
+                        pricing_rule_snapshot=ci.get("pricing_rule_snapshot", {}),
                         quantity=ci["quantity"],
                         taxable_amount=ci["taxable_amount"],
                         cgst_amount=ci["cgst_amount"],
@@ -6963,13 +7066,110 @@ class AdvertisingCampaignSubmitView(views.APIView):
 
 class AdvertisingCampaignPaymentSessionView(views.APIView):
     """
-    Initiates payment session via Stripe or Razorpay for an APPROVED campaign.
+    Retrieves, initiates, or confirms a payment session via Stripe or Razorpay
+    for an APPROVED or PAYMENT_PENDING campaign.
+    GET /api/v1/marketplace/advertising/campaigns/<uuid:id>/payment-session/
     POST /api/v1/marketplace/advertising/campaigns/<uuid:id>/payment-session/
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    def get(self, request, id):
+        """
+        Safely retrieves or resumes an active payment session for an APPROVED or PAYMENT_PENDING campaign.
+        """
+        campaign = _get_seller_campaign_or_403(request.user, id)
+        if campaign.payment_status == CampaignPaymentStatusChoices.PAID:
+            return Response(
+                {
+                    "detail": "Campaign has already been paid for.",
+                    "status": campaign.status,
+                    "payment_status": campaign.payment_status,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if campaign.status not in (CampaignStatusChoices.APPROVED, CampaignStatusChoices.PAYMENT_PENDING):
+            return Response(
+                {
+                    "detail": f"Campaign does not require payment (status: '{campaign.status}').",
+                    "status": campaign.status,
+                    "payment_status": campaign.payment_status,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return_url = request.query_params.get('return_url')
+        cancel_url = request.query_params.get('cancel_url')
+
+        try:
+            session_result = AdvertisingCampaignService.create_payment_session(
+                campaign=campaign,
+                return_url=return_url,
+                cancel_url=cancel_url,
+            )
+            return Response(session_result, status=status.HTTP_200_OK)
+        except (ValidationError, exceptions.ValidationError, ValueError) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
     def post(self, request, id):
         campaign = _get_seller_campaign_or_403(request.user, id)
+        action = request.data.get('action')
+
+        if action == 'confirm':
+            # Authoritative client confirmation verification
+            if campaign.payment_status == CampaignPaymentStatusChoices.PAID:
+                return Response(
+                    {
+                        "detail": "Campaign has already been paid for.",
+                        "campaign": AdvertisingCampaignSerializer(campaign).data,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            from apps.marketplace.advertising_service import AdvertisingOrderAdapter
+            from apps.marketplace.advertising_pricing import is_live_advertising_charge_authorized
+            from apps.marketplace.payments.stripe_provider import StripePaymentProvider
+            from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
+
+            order_adapter = AdvertisingOrderAdapter(campaign)
+            if campaign.currency.upper() == 'INR':
+                provider = RazorpayPaymentProvider()
+            elif campaign.currency.upper() == 'GBP':
+                provider = StripePaymentProvider()
+            else:
+                return Response({"detail": f"Unsupported currency: '{campaign.currency}'"}, status=status.HTTP_400_BAD_REQUEST)
+
+            is_live = not getattr(provider, 'test_mode', True)
+            if is_live and not is_live_advertising_charge_authorized():
+                return Response(
+                    {"detail": "Live commercial advertising payments are disabled pending formal tax and compliance signoff."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            payload = request.data.get('payload') or request.data
+            is_valid, ref_or_err, extra = provider.verify_payment(order_adapter, payload)
+            if not is_valid:
+                return Response({"detail": ref_or_err or "Payment verification failed."}, status=status.HTTP_400_BAD_REQUEST)
+
+            payment = AdvertisingCampaignService.record_successful_payment(
+                campaign_id=campaign.id,
+                provider=provider.provider_name,
+                gateway_reference=extra.get('order_id') or ref_or_err,
+                gateway_payment_id=ref_or_err,
+                amount_minor=campaign.total_budget_minor,
+                currency=campaign.currency,
+                raw_response=extra,
+                is_live=is_live,
+            )
+            campaign.refresh_from_db()
+            return Response(
+                {
+                    "detail": "Payment confirmed successfully.",
+                    "payment_id": str(payment.id),
+                    "campaign": AdvertisingCampaignSerializer(campaign).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         return_url = request.data.get('return_url')
         cancel_url = request.data.get('cancel_url')
 
@@ -7055,35 +7255,62 @@ class AdvertisingCampaignAnalyticsView(views.APIView):
         campaign = _get_seller_campaign_or_403(request.user, id)
 
         daily_metrics = CampaignDailyMetric.objects.filter(campaign=campaign).order_by('date')
-        daily_data = [
-            {
+        daily_data = []
+        for dm in daily_metrics:
+            impr = getattr(dm, 'impressions', 0) or 0
+            clk = getattr(dm, 'clicks', 0) or 0
+            spnd = getattr(dm, 'spend_minor', 0) or 0
+            ctr = round((clk / impr) * 100.0, 2) if impr > 0 else 0.0
+            daily_data.append({
                 "date": str(dm.date),
-                "impressions": dm.impressions_count,
-                "clicks": dm.clicks_count,
-                "ctr_pct": dm.click_through_rate,
-                "spend_minor": dm.spend_amount_minor,
-            }
-            for dm in daily_metrics
-        ]
+                "impressions": impr,
+                "clicks": clk,
+                "ctr_pct": ctr,
+                "spend_minor": spnd,
+            })
 
         listings_metrics = []
         for sl in campaign.sponsored_listings.all():
             title = ""
             if sl.target_type == CampaignTypeChoices.VEHICLES and sl.vehicle_listing:
-                title = sl.vehicle_listing.title
+                title = getattr(sl.vehicle_listing, 'title', '') or ''
             elif sl.target_type == CampaignTypeChoices.SPARE_PARTS and sl.part_listing:
-                title = sl.part_listing.title
+                title = getattr(sl.part_listing, 'title', None) or getattr(sl.part_listing, 'name', '') or ''
+
+            impr = getattr(sl, 'impressions_count', None)
+            if impr is None and hasattr(sl, 'impressions'):
+                impr = sl.impressions.count()
+            impr = impr or 0
+
+            clk = getattr(sl, 'clicks_count', None)
+            if clk is None and hasattr(sl, 'clicks'):
+                clk = sl.clicks.count()
+            clk = clk or 0
+
+            ctr = round((clk / impr) * 100.0, 2) if impr > 0 else 0.0
 
             listings_metrics.append({
                 "sponsored_listing_id": str(sl.id),
                 "listing_id": str(sl.vehicle_listing_id or sl.part_listing_id),
                 "target_type": sl.target_type,
                 "title": title,
-                "impressions": sl.impression_count,
-                "clicks": sl.click_count,
-                "ctr_pct": sl.click_through_rate,
+                "impressions": impr,
+                "clicks": clk,
+                "ctr_pct": ctr,
                 "is_active": sl.is_active,
             })
+
+        total_impressions = getattr(campaign, 'impressions_count', None)
+        if total_impressions is None and hasattr(campaign, 'impressions'):
+            total_impressions = campaign.impressions.count()
+        total_impressions = total_impressions or 0
+
+        total_clicks = getattr(campaign, 'clicks_count', None)
+        if total_clicks is None and hasattr(campaign, 'clicks'):
+            total_clicks = campaign.clicks.count()
+        total_clicks = total_clicks or 0
+
+        campaign_ctr = round((total_clicks / total_impressions) * 100.0, 2) if total_impressions > 0 else 0.0
 
         return Response(
             {
@@ -7091,11 +7318,11 @@ class AdvertisingCampaignAnalyticsView(views.APIView):
                 "title": campaign.title,
                 "status": campaign.status,
                 "currency": campaign.currency,
-                "total_budget_minor": campaign.total_budget_minor,
-                "spent_amount_minor": campaign.spent_amount_minor,
-                "total_impressions": campaign.total_impressions,
-                "total_clicks": campaign.total_clicks,
-                "click_through_rate_pct": campaign.click_through_rate,
+                "total_budget_minor": campaign.total_budget_minor or 0,
+                "spent_amount_minor": campaign.spent_amount_minor or 0,
+                "total_impressions": total_impressions,
+                "total_clicks": total_clicks,
+                "click_through_rate_pct": campaign_ctr,
                 "daily_metrics": daily_data,
                 "listings_metrics": listings_metrics,
             },

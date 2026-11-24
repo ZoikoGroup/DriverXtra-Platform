@@ -54,6 +54,7 @@ import {
   ThumbsUp,
   Flag,
   Megaphone,
+  Percent,
 } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 
@@ -1983,6 +1984,30 @@ export default function MarketplaceBrowseView({
                           </div>
 
                           <div className="pt-2 border-t border-slate-100 space-y-1">
+                            {p.dealer_pricing?.is_dealer && (
+                              <div className="p-2 rounded-xl bg-amber-50 border border-amber-200/80 mb-2 space-y-1">
+                                <div className="flex items-center justify-between text-[10px] font-black text-amber-900">
+                                  <span className="flex items-center gap-1">
+                                    <Percent className="w-3 h-3 text-amber-600" />
+                                    <span>B2B Trade Price ({p.dealer_pricing.tier || "DEALER"})</span>
+                                  </span>
+                                  <span className="text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-black text-[9px]">
+                                    -{p.dealer_pricing.discount_percentage}% OFF
+                                  </span>
+                                </div>
+                                <div className="flex items-baseline justify-between text-xs">
+                                  <span className="text-slate-500 text-[10px]">Trade Unit:</span>
+                                  <span className="font-mono font-black text-slate-900">
+                                    ₹{Number(p.dealer_pricing.dealer_unit_price || p.price).toFixed(2)}
+                                  </span>
+                                </div>
+                                {p.dealer_pricing.min_quantity && p.dealer_pricing.min_quantity > 1 ? (
+                                  <div className="text-[9px] text-amber-800 font-bold">
+                                    MOQ: Min {p.dealer_pricing.min_quantity} units
+                                  </div>
+                                ) : null}
+                              </div>
+                            )}
                             <div className="flex items-baseline justify-between text-xs text-slate-600">
                               <span>Part price:</span>
                               <div className="flex items-baseline gap-1.5">
@@ -2585,6 +2610,53 @@ export default function MarketplaceBrowseView({
                 </div>
               );
             })()}
+
+            {selectedPart.dealer_pricing?.is_dealer && (
+              <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-400/40 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-400 text-slate-950">
+                      B2B Trade Member
+                    </span>
+                    <span className="text-xs font-bold text-slate-900">
+                      {selectedPart.dealer_pricing.tier || "DEALER"} Tier
+                    </span>
+                  </div>
+                  <span className="text-xs font-black text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                    -{selectedPart.dealer_pricing.discount_percentage}% Trade Discount
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between pt-1">
+                  <div>
+                    <span className="text-[10px] text-slate-500 block uppercase font-bold">Standard Retail</span>
+                    <span className="font-mono text-xs text-slate-400 line-through">
+                      ₹{Number(selectedPart.price).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] text-amber-700 block uppercase font-bold">Your Trade Price (excl. GST)</span>
+                    <span className="font-mono text-lg font-black text-slate-950">
+                      ₹{Number(selectedPart.dealer_pricing.dealer_unit_price || selectedPart.price).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+                {selectedPart.dealer_pricing.volume_breaks && selectedPart.dealer_pricing.volume_breaks.length > 0 && (
+                  <div className="pt-2 border-t border-amber-200/60">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 block mb-1">
+                      Volume Breaks
+                    </span>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs">
+                      {selectedPart.dealer_pricing.volume_breaks.map((b, idx) => (
+                        <div key={idx} className="p-1.5 rounded-lg bg-white/80 border border-amber-200/80 text-[11px]">
+                          <div className="font-bold text-slate-800">{b.min_quantity}{b.max_quantity ? `-${b.max_quantity}` : "+"} units</div>
+                          <div className="text-amber-700 font-black">₹{Number(b.unit_price).toFixed(2)} (-{b.discount_percentage}%)</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="grid grid-cols-3 gap-3 text-xs">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
