@@ -840,6 +840,7 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
     gst_amount = serializers.SerializerMethodField(read_only=True)
     total_price = serializers.SerializerMethodField(read_only=True)
     tax_breakdown = serializers.SerializerMethodField(read_only=True)
+    dealer_pricing = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = SparePartListing
@@ -863,6 +864,7 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             'gst_amount',
             'total_price',
             'tax_breakdown',
+            'dealer_pricing',
             'currency',
             'country_prices',
             'stock_quantity',
@@ -943,6 +945,26 @@ class SparePartListingPublicSerializer(serializers.ModelSerializer):
             "status": "UNKNOWN",
             "qualifications": "No confirmed compatibility record found for this part and vehicle variant.",
             "source": "NONE",
+        }
+
+    def get_dealer_pricing(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return None
+        from apps.marketplace.b2b_pricing_service import DealerPricingService
+        is_eligible, _, org, profile, tier = DealerPricingService.evaluate_dealer_eligibility(user=request.user)
+        if not is_eligible:
+            return None
+        calc = DealerPricingService.calculate_item_price(listing=obj, quantity=1, user=request.user, organisation_id=org)
+        return {
+            "is_eligible": True,
+            "tier": calc['applied_tier'],
+            "tier_name": calc['applied_tier_name'],
+            "dealer_unit_price": str(calc['dealer_unit_price']),
+            "discount_percentage": str(calc['discount_percentage']),
+            "discount_amount_per_unit": str(calc['discount_amount_per_unit']),
+            "is_discount_applied": calc['is_dealer_pricing_applied'],
+            "minimum_order_quantity": calc['minimum_order_quantity'],
         }
 
     def to_representation(self, instance):
@@ -1230,6 +1252,10 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'igst_amount',
             'tax_amount',
             'total_amount',
+            'retail_unit_price',
+            'discount_amount',
+            'pricing_tier',
+            'pricing_rule_snapshot',
             'is_reviewed',
             'review',
         ]
@@ -1384,6 +1410,9 @@ class OrderSerializer(serializers.ModelSerializer):
             'igst_amount',
             'total_tax_amount',
             'total_amount',
+            'organisation',
+            'is_dealer_order',
+            'total_discount_amount',
             'tax_breakdown',
             'items',
             'shipments',
@@ -1639,6 +1668,7 @@ class CheckoutPayloadSerializer(serializers.Serializer):
         default=None,
     )
     idempotency_key = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    organisation_id = serializers.UUIDField(required=False, allow_null=True, default=None)
 
 
 class PaymentVerifyPayloadSerializer(serializers.Serializer):

@@ -23,6 +23,10 @@ import {
   HsnClassificationOption,
   VehicleEnquiry,
   VehicleEnquiryStatus,
+  DealerPricingRule,
+  DealerEligibilityStatus,
+  B2BPriceQuote,
+  B2BListingVolumeDiscounts,
 } from "@/lib/api/client";
 import { useAuth } from "@/lib/prototype-auth/auth-context";
 import ListingPhotoManager from "./ListingPhotoManager";
@@ -57,12 +61,26 @@ import {
   Check,
   Lock,
   Megaphone,
+  Percent,
+  Calculator,
+  BadgePercent,
 } from "lucide-react";
 
 export default function SellerInventoryView() {
   const { user } = useAuth();
-  const [activeSection, setActiveSection] = useState<"vehicles" | "parts" | "applications" | "enquiries">("vehicles");
+  const [activeSection, setActiveSection] = useState<"vehicles" | "parts" | "applications" | "enquiries" | "b2b_pricing">("vehicles");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
+
+  // Phase 7.3: B2B Pricing & Volume Discounts State
+  const [dealerStatus, setDealerStatus] = useState<DealerEligibilityStatus | null>(null);
+  const [dealerPricingRules, setDealerPricingRules] = useState<DealerPricingRule[]>([]);
+  const [b2bLoading, setB2bLoading] = useState(false);
+  const [quotePartId, setQuotePartId] = useState<string>("");
+  const [quoteQuantity, setQuoteQuantity] = useState<string>("10");
+  const [quoteResult, setQuoteResult] = useState<B2BPriceQuote | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState<boolean>(false);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [volumeDiscounts, setVolumeDiscounts] = useState<B2BListingVolumeDiscounts | null>(null);
 
   // Vehicle Enquiries state
   const [enquiries, setEnquiries] = useState<VehicleEnquiry[]>([]);
@@ -593,6 +611,32 @@ export default function SellerInventoryView() {
           setEnquiriesLoading(false);
         }
       });
+    } else if (activeSection === "b2b_pricing") {
+      Promise.resolve().then(() => {
+        if (!ignore) {
+          setB2bLoading(true);
+        }
+      });
+      Promise.all([
+        api.marketplace.getDealerStatus(),
+        api.marketplace.getDealerPricingRules(),
+        api.marketplace.listMyParts("APPROVED"),
+      ]).then(([statusData, rulesData, partsData]) => {
+        if (!ignore) {
+          setDealerStatus(statusData);
+          setDealerPricingRules(rulesData);
+          if (partsData && partsData.length > 0) {
+            setParts(partsData);
+            setQuotePartId(partsData[0].id);
+          }
+          setB2bLoading(false);
+        }
+      }).catch((err) => {
+        if (!ignore) {
+          console.error("Failed to load dealer B2B data", err);
+          setB2bLoading(false);
+        }
+      });
     }
     return () => {
       ignore = true;
@@ -657,6 +701,31 @@ export default function SellerInventoryView() {
       }));
     } finally {
       setReplyingEnquiryId(null);
+    }
+  };
+
+  const handleCalculateB2BQuote = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!quotePartId) return;
+    setQuoteLoading(true);
+    setQuoteError(null);
+    try {
+      const qty = parseInt(quoteQuantity, 10) || 1;
+      const [quote, breaks] = await Promise.all([
+        api.marketplace.getB2BPriceQuote({
+          listing_id: quotePartId,
+          listing_type: "PART",
+          quantity: qty,
+          organisation_id: dealerStatus?.organisation_id || undefined,
+        }),
+        api.marketplace.getListingVolumeDiscounts(quotePartId),
+      ]);
+      setQuoteResult(quote);
+      setVolumeDiscounts(breaks);
+    } catch (err: unknown) {
+      setQuoteError(err instanceof Error ? err.message : "Failed to calculate B2B quote.");
+    } finally {
+      setQuoteLoading(false);
     }
   };
 
@@ -1372,6 +1441,20 @@ export default function SellerInventoryView() {
               </span>
             )}
           </button>
+          <button
+            onClick={() => {
+              setActiveSection("b2b_pricing");
+              setStatusFilter("ALL");
+            }}
+            className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+              activeSection === "b2b_pricing"
+                ? "bg-white text-slate-900 shadow-sm"
+                : "text-slate-500 hover:text-slate-900"
+            }`}
+          >
+            <Percent className="w-3.5 h-3.5 text-amber-500" />
+            <span>B2B Pricing & Discounts</span>
+          </button>
         </div>
 
         {/* Status Pills */}
@@ -1396,7 +1479,7 @@ export default function SellerInventoryView() {
               </button>
             ))}
           </div>
-        ) : activeSection !== "applications" ? (
+        ) : activeSection !== "applications" && activeSection !== "b2b_pricing" ? (
           <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto text-xs pb-1 sm:pb-0">
             {(activeSection === "parts"
               ? ["ALL", "LOW_STOCK", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED", "DRAFT"]
@@ -2632,6 +2715,369 @@ export default function SellerInventoryView() {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* =========================================================================
+          PHASE 7.3: B2B TRADE PRICING & VOLUME DISCOUNTS SECTION
+      ========================================================================= */}
+      {activeSection === "b2b_pricing" && (
+        <div className="space-y-6">
+          {/* Top Status Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">
+                Verified Dealership Standing
+              </span>
+              <div className="flex items-center gap-2 mt-2">
+                <Building2 className="w-5 h-5 text-amber-500" />
+                <div className="truncate">
+                  <div className="font-black text-slate-900 text-sm truncate">
+                    {dealerStatus?.organisation_name || "Franchised Dealership"}
+                  </div>
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 mt-0.5">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                    {dealerStatus?.is_eligible ? "Verified B2B Member" : "Standard Buyer"}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">
+                Assigned Dealer Tier
+              </span>
+              <div className="flex items-baseline justify-between mt-2">
+                <span className="text-xl font-black text-slate-900">{dealerStatus?.tier || "STANDARD"}</span>
+                <span className="text-xs font-black text-amber-600 bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200">
+                  {dealerStatus?.baseline_discount_percentage || 0}% Baseline
+                </span>
+              </div>
+              <div className="text-[10px] text-slate-400 mt-1">
+                {dealerStatus?.custom_discount_cap
+                  ? `Max Safety Cap: ${dealerStatus.custom_discount_cap}%`
+                  : "No discount ceiling applied"}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">
+                Precedence Rule Engine
+              </span>
+              <div className="text-xs font-bold text-slate-800 mt-2 flex items-center gap-1">
+                <ShieldAlert className="w-4 h-4 text-purple-600 shrink-0" />
+                <span>5-Tier Strict Hierarchy</span>
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Org Product &gt; Org Category &gt; Tier &gt; Quantity Break &gt; Retail
+              </p>
+            </div>
+
+            <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs">
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">
+                Statutory Tax Protection
+              </span>
+              <div className="text-xs font-bold text-slate-800 mt-2 flex items-center gap-1">
+                <BadgePercent className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Net Trade Taxable Base</span>
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Discounts apply prior to GST/VAT calculation, ensuring statutory compliance.
+              </p>
+            </div>
+          </div>
+
+          {/* Pricing Rules & Volume Discount Rates */}
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
+                    Contract Terms & Volume Breaks
+                  </span>
+                  <span className="text-xs text-slate-500">• B2B Trade Pricing</span>
+                </div>
+                <h3 className="text-lg font-black text-slate-950 mt-1">
+                  Active B2B Pricing Rules & Volume Discounts
+                </h3>
+              </div>
+              <span className="text-xs text-slate-400 font-medium">
+                {dealerPricingRules.length} Rule{dealerPricingRules.length === 1 ? "" : "s"} Applicable
+              </span>
+            </div>
+
+            {b2bLoading ? (
+              <div className="py-12 flex items-center justify-center gap-2 text-slate-400 text-xs">
+                <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                <span>Loading trade pricing terms...</span>
+              </div>
+            ) : dealerPricingRules.length === 0 ? (
+              <div className="py-12 text-center text-xs text-slate-500">
+                <Percent className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                <p className="font-bold text-slate-700">Baseline Tier Pricing Active</p>
+                <p className="text-slate-400 mt-1">
+                  Your dealership receives the standard {dealerStatus?.baseline_discount_percentage || 0}% discount
+                  associated with your {dealerStatus?.tier || "STANDARD"} tier.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 text-[10px] font-black uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                    <tr>
+                      <th className="p-3 pl-6">Rule / Scope</th>
+                      <th className="p-3">Type</th>
+                      <th className="p-3">Min Qty (MOQ)</th>
+                      <th className="p-3">Max Qty</th>
+                      <th className="p-3">Discount / Price</th>
+                      <th className="p-3">Priority</th>
+                      <th className="p-3 pr-6">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {dealerPricingRules.map((r) => (
+                      <tr key={r.id} className="hover:bg-slate-50/60">
+                        <td className="p-3 pl-6">
+                          <div className="font-bold text-slate-900">{r.name}</div>
+                          {r.description && <div className="text-[10px] text-slate-400">{r.description}</div>}
+                          {r.organisation && (
+                            <span className="text-[10px] font-bold text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded">
+                              Org-Specific Contract
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              r.rule_type === "PERCENTAGE_DISCOUNT"
+                                ? "bg-amber-100 text-amber-900"
+                                : "bg-blue-100 text-blue-900"
+                            }`}
+                          >
+                            {r.rule_type === "PERCENTAGE_DISCOUNT" ? "Percentage Discount" : "Fixed Trade Price"}
+                          </span>
+                        </td>
+                        <td className="p-3 font-mono font-bold text-slate-900">
+                          {r.min_quantity} unit{r.min_quantity === 1 ? "" : "s"}
+                        </td>
+                        <td className="p-3 font-mono text-slate-600">
+                          {r.max_quantity ? `${r.max_quantity} units` : "Uncapped"}
+                        </td>
+                        <td className="p-3">
+                          {r.rule_type === "PERCENTAGE_DISCOUNT" ? (
+                            <span className="font-black text-amber-600">-{Number(r.discount_percentage)}%</span>
+                          ) : (
+                            <span className="font-black text-blue-600">
+                              {r.currency || "£"} {Number(r.fixed_price || 0).toFixed(2)}
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3 font-mono text-slate-500">{r.priority}</td>
+                        <td className="p-3 pr-6">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              r.is_active ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-500"
+                            }`}
+                          >
+                            {r.is_active ? "Active" : "Inactive"}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Interactive B2B Price & Quote Simulator */}
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-5">
+            <div>
+              <div className="flex items-center gap-2">
+                <Calculator className="w-4 h-4 text-amber-500" />
+                <h3 className="text-base font-black text-slate-950">Real-Time B2B Price & Tax Calculator</h3>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Select a listed spare part and order quantity to verify applicable trade discounts, MOQ satisfaction,
+                and statutory pre-tax deductions.
+              </p>
+            </div>
+
+            <form onSubmit={handleCalculateB2BQuote} className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Select Spare Part</label>
+                {parts.length > 0 ? (
+                  <select
+                    value={quotePartId}
+                    onChange={(e) => setQuotePartId(e.target.value)}
+                    className="w-full h-10 px-3 border border-slate-200 rounded-xl text-xs font-bold"
+                  >
+                    {parts.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.currency || "£"} {Number(p.price).toFixed(2)})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder="Enter listing UUID"
+                    value={quotePartId}
+                    onChange={(e) => setQuotePartId(e.target.value)}
+                    className="w-full h-10 px-3 border border-slate-200 rounded-xl text-xs font-mono"
+                  />
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Order Quantity (Units)</label>
+                <input
+                  type="number"
+                  min="1"
+                  required
+                  value={quoteQuantity}
+                  onChange={(e) => setQuoteQuantity(e.target.value)}
+                  className="w-full h-10 px-3 border border-slate-200 rounded-xl text-xs font-black"
+                />
+              </div>
+
+              <div className="flex items-end">
+                <button
+                  type="submit"
+                  disabled={quoteLoading || !quotePartId}
+                  className="w-full h-10 px-4 bg-slate-950 hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
+                >
+                  {quoteLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Computing Quote...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Calculator className="w-4 h-4 text-amber-400" />
+                      <span>Compute Trade Quote</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            {quoteError && (
+              <div className="p-3 bg-rose-50 text-rose-800 text-xs rounded-xl border border-rose-200 flex items-center gap-2">
+                <XCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                <span>{quoteError}</span>
+              </div>
+            )}
+
+            {quoteResult && (
+              <div className="mt-4 p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-200">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black text-slate-900">
+                      Quote Result for {quoteResult.requested_quantity} Unit{quoteResult.requested_quantity === 1 ? "" : "s"}
+                    </span>
+                    {quoteResult.is_dealer_pricing_applied ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-300">
+                        B2B Trade Pricing Applied ({quoteResult.effective_discount_percentage}% Savings)
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200 text-slate-700">
+                        Standard Retail Price Applied
+                      </span>
+                    )}
+                  </div>
+                  {!quoteResult.moq_satisfied && (
+                    <span className="px-2.5 py-1 rounded-xl text-xs font-black bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                      MOQ Warning: Minimum {quoteResult.moq} units required
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+                  <div>
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold">Retail Unit Price</span>
+                    <span className="font-mono text-slate-500 line-through">
+                      {quoteResult.currency} {Number(quoteResult.retail_unit_price).toFixed(2)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold">Trade Unit Price</span>
+                    <span className="font-mono text-base font-black text-slate-900">
+                      {quoteResult.currency} {Number(quoteResult.dealer_unit_price).toFixed(2)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold">Total Discount Savings</span>
+                    <span className="font-mono text-emerald-600 font-black">
+                      -{quoteResult.currency} {Number(quoteResult.total_discount).toFixed(2)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[10px] uppercase font-bold">Net Pre-Tax Total</span>
+                    <span className="font-mono text-base font-black text-amber-700">
+                      {quoteResult.currency} {Number(quoteResult.total_net_price).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {quoteResult.tax_estimate && (
+                  <div className="pt-3 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between text-xs text-slate-600 gap-2">
+                    <div>
+                      <span>Taxable Base: </span>
+                      <strong className="text-slate-900">
+                        {quoteResult.currency} {Number(quoteResult.tax_estimate.taxable_amount).toFixed(2)}
+                      </strong>
+                      <span className="mx-2">•</span>
+                      <span>Statutory Tax ({quoteResult.tax_estimate.tax_rate}%): </span>
+                      <strong className="text-slate-900">
+                        {quoteResult.currency} {Number(quoteResult.tax_estimate.total_tax_amount).toFixed(2)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="font-bold">Total with Tax: </span>
+                      <strong className="text-slate-950 text-sm font-black">
+                        {quoteResult.currency} {Number(quoteResult.tax_estimate.estimated_total_with_tax).toFixed(2)}
+                      </strong>
+                    </div>
+                  </div>
+                )}
+
+                {/* Volume Breaks Schedule */}
+                {volumeDiscounts && volumeDiscounts.volume_breaks.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-slate-200">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-2">
+                      Stepped Quantity Discount Schedule
+                    </span>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {volumeDiscounts.volume_breaks.map((b, idx) => (
+                        <div
+                          key={idx}
+                          className={`p-2.5 rounded-xl border text-xs ${
+                            quoteResult.requested_quantity >= b.min_quantity &&
+                            (!b.max_quantity || quoteResult.requested_quantity <= b.max_quantity)
+                              ? "border-amber-400 bg-amber-50/80 shadow-xs"
+                              : "border-slate-200 bg-white"
+                          }`}
+                        >
+                          <div className="font-bold text-slate-900">
+                            {b.min_quantity}
+                            {b.max_quantity ? ` - ${b.max_quantity}` : "+"} units
+                          </div>
+                          <div className="text-amber-600 font-black mt-0.5">
+                            -{Number(b.discount_percentage)}% ({volumeDiscounts.currency} {Number(b.unit_price).toFixed(2)}/unit)
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">
+                            Save {volumeDiscounts.currency} {Number(b.savings_per_unit).toFixed(2)}/unit
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

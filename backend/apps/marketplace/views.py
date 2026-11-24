@@ -2008,6 +2008,26 @@ class OrderCheckoutView(views.APIView):
 
         currency = required_currency
 
+        # Resolve B2B Dealer Eligibility
+        from apps.marketplace.b2b_pricing_service import DealerPricingService
+        b2b_org_id = data.get('organisation_id') or request.data.get('organisation_id')
+        is_dealer_eligible, dealer_ineligibility_reason, dealer_org, dealer_profile, dealer_tier = (
+            DealerPricingService.evaluate_dealer_eligibility(
+                user=buyer,
+                organisation_id=b2b_org_id,
+            )
+        )
+
+        if b2b_org_id and not is_dealer_eligible:
+            return Response(
+                {
+                    "status": "error",
+                    "code": "DEALER_ORGANISATION_UNAUTHORIZED",
+                    "error": dealer_ineligibility_reason or "You are not authorized to purchase on behalf of this organisation.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
             with transaction.atomic():
                 calculated_items = []
@@ -2017,6 +2037,7 @@ class OrderCheckoutView(views.APIView):
                 igst_total = Decimal('0.00')
                 tax_total = Decimal('0.00')
                 grand_total = Decimal('0.00')
+                total_dealer_discount = Decimal('0.00')
 
                 seller_state = ""
                 effective_place_of_supply = shipping_state or place_of_supply or ('UK' if country_code == 'GB' else 'MH')
@@ -2049,13 +2070,55 @@ class OrderCheckoutView(views.APIView):
 
                     # Authoritative server-side pricing and cross-currency conversion
                     try:
-                        unit_price, orig_currency, is_converted = resolve_authoritative_unit_price(
+                        base_unit_price, orig_currency, is_converted = resolve_authoritative_unit_price(
                             listing=listing,
                             destination_currency=currency,
                             destination_country=shipping_country,
                         )
                     except PriceCalculationError as e:
                         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+                    # B2B Dealer Pricing & Volume Discounts evaluation
+                    dealer_pricing_calc = DealerPricingService.calculate_item_price(
+                        listing=listing,
+                        quantity=qty,
+                        user=buyer,
+                        organisation_id=dealer_org.id if dealer_org else b2b_org_id,
+                        destination_currency=currency,
+                        destination_country=shipping_country,
+                    )
+
+                    if not dealer_pricing_calc["moq_satisfied"]:
+                        return Response(
+                            {
+                                "status": "error",
+                                "code": "MINIMUM_ORDER_QUANTITY_NOT_MET",
+                                "error": f"Minimum order quantity for '{listing.name}' is {dealer_pricing_calc['minimum_order_quantity']} (requested: {qty}).",
+                                "minimum_order_quantity": dealer_pricing_calc['minimum_order_quantity'],
+                                "requested_quantity": qty,
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
+                    retail_unit_price = dealer_pricing_calc["retail_unit_price"]
+                    effective_unit_price = dealer_pricing_calc["dealer_unit_price"]
+                    discount_amount_per_unit = dealer_pricing_calc["discount_amount_per_unit"]
+                    total_item_discount = dealer_pricing_calc["total_discount_amount"]
+                    pricing_tier_code = dealer_pricing_calc["applied_tier"] or ""
+
+                    pricing_rule_snapshot = {
+                        "rule_id": dealer_pricing_calc["applied_rule_id"],
+                        "rule_name": dealer_pricing_calc["applied_rule_name"],
+                        "precedence_level": dealer_pricing_calc["precedence_level"],
+                        "discount_percentage": str(dealer_pricing_calc["discount_percentage"]),
+                        "discount_amount_per_unit": str(discount_amount_per_unit),
+                        "retail_unit_price": str(retail_unit_price),
+                        "dealer_unit_price": str(effective_unit_price),
+                        "tier_code": pricing_tier_code,
+                    } if dealer_pricing_calc["is_dealer_pricing_applied"] else {}
+
+                    total_dealer_discount += total_item_discount
+                    unit_price = effective_unit_price
 
                     if listing.organisation and listing.organisation.jurisdiction:
                         seller_state = listing.organisation.jurisdiction
@@ -2098,6 +2161,10 @@ class OrderCheckoutView(views.APIView):
                         "gst_rate": gst_rate,
                         "is_tax_verified": listing.is_tax_verified,
                         "unit_price": unit_price,
+                        "retail_unit_price": retail_unit_price,
+                        "discount_amount": discount_amount_per_unit,
+                        "pricing_tier": pricing_tier_code,
+                        "pricing_rule_snapshot": pricing_rule_snapshot,
                         "quantity": qty,
                         "taxable_amount": line_taxable,
                         "cgst_amount": line_cgst,
@@ -2228,6 +2295,9 @@ class OrderCheckoutView(views.APIView):
                         "igst_amount": str(igst_total),
                         "total_tax_amount": str(tax_total),
                         "total_amount": str(grand_total),
+                        "is_dealer_order": is_dealer_eligible and total_dealer_discount > Decimal('0.00'),
+                        "dealer_tier": dealer_tier.code if dealer_tier else None,
+                        "total_discount_amount": str(total_dealer_discount),
                         "tax_breakdown": order_tax_breakdown,
                         "available_payment_methods": available_payment_methods,
                         "items": [
@@ -2239,6 +2309,10 @@ class OrderCheckoutView(views.APIView):
                                 "hsn_code": ci["hsn_code"],
                                 "gst_rate": str(ci["gst_rate"]),
                                 "unit_price": str(ci["unit_price"]),
+                                "retail_unit_price": str(ci.get("retail_unit_price", ci["unit_price"])),
+                                "discount_amount": str(ci.get("discount_amount", Decimal('0.00'))),
+                                "pricing_tier": ci.get("pricing_tier", ""),
+                                "is_discount_applied": ci.get("discount_amount", Decimal('0.00')) > Decimal('0.00'),
                                 "quantity": ci["quantity"],
                                 "taxable_amount": str(ci["taxable_amount"]),
                                 "cgst_amount": str(ci["cgst_amount"]),
@@ -2359,6 +2433,9 @@ class OrderCheckoutView(views.APIView):
                     igst_amount=igst_total,
                     total_tax_amount=tax_total,
                     total_amount=grand_total,
+                    organisation=dealer_org if is_dealer_eligible else None,
+                    is_dealer_order=is_dealer_eligible and total_dealer_discount > Decimal('0.00'),
+                    total_discount_amount=total_dealer_discount,
                     tax_breakdown=order_tax_breakdown,
                 )
 
@@ -2374,6 +2451,10 @@ class OrderCheckoutView(views.APIView):
                         gst_rate=ci["gst_rate"],
                         is_tax_verified=ci["is_tax_verified"],
                         unit_price=ci["unit_price"],
+                        retail_unit_price=ci.get("retail_unit_price", ci["unit_price"]),
+                        discount_amount=ci.get("discount_amount", Decimal('0.00')),
+                        pricing_tier=ci.get("pricing_tier", ""),
+                        pricing_rule_snapshot=ci.get("pricing_rule_snapshot", {}),
                         quantity=ci["quantity"],
                         taxable_amount=ci["taxable_amount"],
                         cgst_amount=ci["cgst_amount"],

@@ -3808,6 +3808,132 @@ export const api = {
         requiresAuth: true,
       });
     },
+
+    // -------------------------------------------------------------------------
+    // Phase 7.3: Dealer B2B Pricing and Volume Discounts
+    // -------------------------------------------------------------------------
+    async getDealerStatus(organisationId?: string): Promise<DealerEligibilityStatus> {
+      const qs = organisationId ? `?organisation_id=${encodeURIComponent(organisationId)}` : "";
+      return apiRequest<DealerEligibilityStatus>(`/marketplace/b2b/dealer-status/${qs}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getDealerTiers(): Promise<DealerTier[]> {
+      return apiRequest<DealerTier[]>("/marketplace/b2b/tiers/", {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async createDealerTier(data: Partial<DealerTier>): Promise<DealerTier> {
+      return apiRequest<DealerTier>("/marketplace/b2b/tiers/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async getDealerPricingRules(params?: { organisation_id?: string; tier?: string; rule_type?: string }): Promise<DealerPricingRule[]> {
+      const query = new URLSearchParams();
+      if (params?.organisation_id) query.set("organisation_id", params.organisation_id);
+      if (params?.tier) query.set("tier", params.tier);
+      if (params?.rule_type) query.set("rule_type", params.rule_type);
+      const qs = query.toString();
+      return apiRequest<DealerPricingRule[]>(`/marketplace/b2b/pricing-rules/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async createDealerPricingRule(data: Partial<DealerPricingRule>): Promise<DealerPricingRule> {
+      return apiRequest<DealerPricingRule>("/marketplace/b2b/pricing-rules/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async updateDealerPricingRule(id: string, data: Partial<DealerPricingRule>): Promise<DealerPricingRule> {
+      return apiRequest<DealerPricingRule>(`/marketplace/b2b/pricing-rules/${id}/`, {
+        method: "PATCH",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async deleteDealerPricingRule(id: string): Promise<void> {
+      return apiRequest<void>(`/marketplace/b2b/pricing-rules/${id}/`, {
+        method: "DELETE",
+        requiresAuth: true,
+      });
+    },
+
+    async assignDealerTier(organisationId: string, data: { tier: string; notes?: string; custom_discount_cap?: number }): Promise<DealerOrganisationProfile> {
+      return apiRequest<DealerOrganisationProfile>(`/marketplace/b2b/organisations/${organisationId}/tier/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async submitDealerApplication(data: DealerApplicationSubmitPayload): Promise<DealerOrganisationProfile> {
+      return apiRequest<DealerOrganisationProfile>("/marketplace/b2b/applications/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async getMyDealerApplication(organisationId?: string): Promise<{ has_application: boolean; organisation_id?: string; organisation_name?: string; application: DealerOrganisationProfile | null; message?: string }> {
+      const qs = organisationId ? `?organisation_id=${organisationId}` : "";
+      return apiRequest<{ has_application: boolean; organisation_id?: string; organisation_name?: string; application: DealerOrganisationProfile | null; message?: string }>(`/marketplace/b2b/applications/me/${qs}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getAdminDealerApplications(params?: { status?: string; search?: string }): Promise<DealerOrganisationProfile[]> {
+      const query = new URLSearchParams();
+      if (params?.status) query.set("status", params.status);
+      if (params?.search) query.set("search", params.search);
+      const qs = query.toString();
+      return apiRequest<DealerOrganisationProfile[]>(`/marketplace/b2b/admin/applications/${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async getAdminDealerApplicationDetail(id: string): Promise<DealerOrganisationProfile> {
+      return apiRequest<DealerOrganisationProfile>(`/marketplace/b2b/admin/applications/${id}/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
+
+    async reviewDealerApplication(id: string, data: DealerApplicationReviewPayload): Promise<DealerOrganisationProfile> {
+      return apiRequest<DealerOrganisationProfile>(`/marketplace/b2b/admin/applications/${id}/review/`, {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(data),
+      });
+    },
+
+    async getB2BPriceQuote(payload: { listing_id: string; listing_type: "PART" | "VEHICLE"; quantity: number; organisation_id?: string }): Promise<B2BPriceQuote> {
+      return apiRequest<B2BPriceQuote>("/marketplace/b2b/quote/", {
+        method: "POST",
+        requiresAuth: true,
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getListingVolumeDiscounts(listingId: string): Promise<B2BListingVolumeDiscounts> {
+      return apiRequest<B2BListingVolumeDiscounts>(`/marketplace/b2b/listings/${listingId}/volume-discounts/`, {
+        method: "GET",
+        requiresAuth: true,
+      });
+    },
   },
 
   notifications: {
@@ -5327,6 +5453,16 @@ export interface MarketplaceVehicleListing {
   reviewed_by_name?: string | null;
   rejection_reason?: string;
   admin_notes?: string;
+  dealer_pricing?: {
+    is_dealer: boolean;
+    tier?: string;
+    retail_price?: string;
+    dealer_unit_price?: string;
+    discount_percentage?: number;
+    discount_amount?: string;
+    min_quantity?: number;
+    volume_breaks?: B2BVolumeBreak[];
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -5776,6 +5912,16 @@ export interface MarketplacePartListing {
   reviewed_by_name?: string | null;
   rejection_reason?: string;
   admin_notes?: string;
+  dealer_pricing?: {
+    is_dealer: boolean;
+    tier?: string;
+    retail_price?: string;
+    dealer_unit_price?: string;
+    discount_percentage?: number;
+    discount_amount?: string;
+    min_quantity?: number;
+    volume_breaks?: B2BVolumeBreak[];
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -8082,3 +8228,162 @@ export interface AdminAdvertisingOverview {
   total_clicks: number;
   overall_ctr_percent: number;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7.3: Dealer B2B Pricing & Volume Discount Types
+// ---------------------------------------------------------------------------
+
+export interface DealerTier {
+  id: string;
+  tier_code: "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "CUSTOM" | string;
+  name: string;
+  description?: string;
+  baseline_discount_percentage: number;
+  priority: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DealerOrganisationProfile {
+  id: string;
+  organisation: string;
+  organisation_name: string;
+  organisation_slug?: string;
+  organisation_country?: string;
+  organisation_jurisdiction?: string;
+  organisation_type?: string;
+  tier?: string | null;
+  tier_details?: DealerTier | null;
+  dealer_tier?: DealerTier;
+  dealer_tier_code?: string;
+  is_verified_dealer?: boolean;
+  status: "PENDING" | "ACTIVE" | "SUSPENDED" | "REJECTED";
+  verified_at?: string | null;
+  verified_by?: string | null;
+  verified_by_name?: string;
+  custom_discount_cap?: number | null;
+  notes?: string;
+  rejection_reason?: string;
+  application_data?: {
+    company_registration_number?: string;
+    tax_id?: string;
+    website_url?: string;
+    contact_email?: string;
+    contact_phone?: string;
+    applicant_notes?: string;
+    requested_tier?: string;
+    submitted_by_name?: string;
+    submitted_at?: string;
+    rejection_reason?: string;
+    admin_notes?: string;
+    reviewed_by_name?: string;
+    reviewed_at?: string;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DealerApplicationSubmitPayload {
+  organisation_id?: string;
+  company_registration_number?: string;
+  tax_id?: string;
+  website_url?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  notes?: string;
+  requested_tier?: string;
+}
+
+export interface DealerApplicationReviewPayload {
+  action: "APPROVE" | "REJECT";
+  tier_code?: string;
+  rejection_reason?: string;
+  admin_notes?: string;
+  custom_discount_cap?: number;
+}
+
+export interface DealerPricingRule {
+  id: string;
+  name: string;
+  description?: string;
+  organisation?: string | null;
+  organisation_name?: string | null;
+  dealer_tier?: string | null;
+  tier_name?: string | null;
+  rule_type: "PERCENTAGE_DISCOUNT" | "FIXED_PRICE";
+  discount_percentage: number;
+  fixed_price?: string | null;
+  part_listing?: string | null;
+  vehicle_listing?: string | null;
+  category?: string | null;
+  category_name?: string | null;
+  min_quantity: number;
+  max_quantity?: number | null;
+  priority: number;
+  is_active: boolean;
+  currency?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface B2BVolumeBreak {
+  min_quantity: number;
+  max_quantity: number | null;
+  unit_price: string;
+  discount_percentage: number;
+  savings_per_unit: string;
+  total_price: string;
+}
+
+export interface B2BListingVolumeDiscounts {
+  listing_id: string;
+  listing_type: "PART" | "VEHICLE";
+  retail_price: string;
+  currency: string;
+  volume_breaks: B2BVolumeBreak[];
+}
+
+export interface B2BPriceQuote {
+  listing_id: string;
+  listing_type: "PART" | "VEHICLE";
+  requested_quantity: number;
+  retail_unit_price: string;
+  dealer_unit_price: string;
+  discount_per_unit: string;
+  total_discount: string;
+  total_net_price: string;
+  effective_discount_percentage: number;
+  currency: string;
+  is_dealer_pricing_applied: boolean;
+  tier_applied?: string | null;
+  rule_applied?: {
+    id: string;
+    name: string;
+    rule_type: string;
+    discount_percentage: number;
+    fixed_price: string | null;
+    priority: number;
+  } | null;
+  moq: number;
+  moq_satisfied: boolean;
+  tax_estimate?: {
+    taxable_amount: string;
+    total_tax_amount: string;
+    estimated_total_with_tax: string;
+    tax_rate: string;
+  } | null;
+}
+
+export interface DealerEligibilityStatus {
+  is_eligible: boolean;
+  organisation_id?: string | null;
+  organisation_name?: string | null;
+  tier?: string | null;
+  baseline_discount_percentage?: number | null;
+  status?: string | null;
+  custom_discount_cap?: number | null;
+}
+

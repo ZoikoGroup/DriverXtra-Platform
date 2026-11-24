@@ -648,6 +648,27 @@ class Order(BaseUUIDModel):
         help_text="Immutable statutory tax calculation snapshot.",
     )
 
+    # B2B Dealer Order Fields
+    organisation = models.ForeignKey(
+        'organisations.Organisation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='b2b_orders',
+        help_text="Dealer organisation under which this order was transacted.",
+    )
+    is_dealer_order = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True if this order received verified B2B dealer pricing.",
+    )
+    total_discount_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Total B2B dealer and volume discount savings across all items.",
+    )
+
     class Meta:
         verbose_name = 'Order'
         verbose_name_plural = 'Orders'
@@ -668,6 +689,7 @@ class Order(BaseUUIDModel):
                     'igst_amount',
                     'total_tax_amount',
                     'total_amount',
+                    'total_discount_amount',
                     'currency',
                 ]
                 for f in financial_fields:
@@ -696,6 +718,7 @@ class Order(BaseUUIDModel):
                     'igst_amount',
                     'total_tax_amount',
                     'total_amount',
+                    'total_discount_amount',
                     'currency',
                     'tax_breakdown',
                 }
@@ -748,7 +771,7 @@ class OrderItem(BaseUUIDModel):
     is_tax_verified = models.BooleanField(default=True)
 
     # Line item financial snapshot
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)  # Price before GST
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)  # Effective unit price before GST
     quantity = models.PositiveIntegerField(default=1)
     taxable_amount = models.DecimalField(max_digits=12, decimal_places=2)  # unit_price * quantity
     cgst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
@@ -756,6 +779,32 @@ class OrderItem(BaseUUIDModel):
     igst_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    # B2B Dealer Pricing Snapshot Fields
+    retail_unit_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Standard retail unit price at purchase time before any dealer discount.",
+    )
+    discount_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Per-unit discount deducted from retail unit price for B2B dealer orders.",
+    )
+    pricing_tier = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+        help_text="Applied dealer tier code (e.g. STANDARD, SILVER, GOLD, PLATINUM).",
+    )
+    pricing_rule_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Immutable snapshot of the applied B2B dealer pricing rule at order placement.",
+    )
 
     class Meta:
         verbose_name = 'Order Item'
@@ -774,6 +823,7 @@ class OrderItem(BaseUUIDModel):
                     'unit_price', 'quantity', 'taxable_amount',
                     'cgst_amount', 'sgst_amount', 'igst_amount',
                     'tax_amount', 'total_amount', 'gst_rate', 'hsn_code',
+                    'retail_unit_price', 'discount_amount',
                 ]
                 for f in financial_fields:
                     if getattr(self, f) != getattr(db_instance, f):
@@ -791,6 +841,7 @@ class OrderItem(BaseUUIDModel):
                     'unit_price', 'quantity', 'taxable_amount',
                     'cgst_amount', 'sgst_amount', 'igst_amount',
                     'tax_amount', 'total_amount', 'gst_rate', 'hsn_code',
+                    'retail_unit_price', 'discount_amount',
                 }
                 intersected = set(update_fields).intersection(financial_fields)
                 if intersected:
@@ -3287,5 +3338,366 @@ class CampaignDailyMetric(BaseUUIDModel):
     @property
     def ctr(self) -> float:
         return self.click_through_rate
+
+
+# =============================================================================
+# PHASE 7.3: DEALER B2B PRICING AND VOLUME DISCOUNT SYSTEM
+# =============================================================================
+
+
+class DealerTierChoices(models.TextChoices):
+    STANDARD = 'STANDARD', 'Standard Dealer'
+    SILVER = 'SILVER', 'Silver Dealer'
+    GOLD = 'GOLD', 'Gold Dealer'
+    PLATINUM = 'PLATINUM', 'Platinum Dealer'
+    CUSTOM = 'CUSTOM', 'Custom Dealer Tier'
+
+
+class DealerOrganisationStatusChoices(models.TextChoices):
+    PENDING = 'PENDING', 'Pending Verification'
+    ACTIVE = 'ACTIVE', 'Active Verified Dealer'
+    SUSPENDED = 'SUSPENDED', 'Suspended'
+    REJECTED = 'REJECTED', 'Rejected'
+
+
+class DealerPricingRuleTypeChoices(models.TextChoices):
+    PERCENTAGE_DISCOUNT = 'PERCENTAGE_DISCOUNT', 'Percentage Discount'
+    FIXED_PRICE = 'FIXED_PRICE', 'Fixed Dealer Price'
+
+
+class DealerTier(BaseUUIDModel):
+    """Configurable dealer pricing tiers with default discount and precedence ranking."""
+
+    code = models.CharField(
+        max_length=50,
+        unique=True,
+        db_index=True,
+        help_text="Unique tier code (e.g. STANDARD, SILVER, GOLD, PLATINUM).",
+    )
+    name = models.CharField(
+        max_length=100,
+        help_text="Human-readable tier label.",
+    )
+    description = models.TextField(
+        blank=True,
+        default='',
+        help_text="Tier eligibility criteria or commercial description.",
+    )
+    default_discount_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Default baseline discount percentage (0-100) applied if no specific rule matches.",
+    )
+    priority = models.PositiveIntegerField(
+        default=0,
+        help_text="Tier ranking priority (higher number denotes higher tier privileges).",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Controls whether this tier is actively evaluated.",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_dealer_tiers',
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_dealer_tiers',
+    )
+
+    class Meta:
+        verbose_name = 'Dealer Tier'
+        verbose_name_plural = 'Dealer Tiers'
+        ordering = ['-priority', 'code']
+
+    def __str__(self):
+        return f"{self.name} ({self.code}) - {self.default_discount_percentage}% baseline"
+
+
+class DealerOrganisationProfile(BaseUUIDModel):
+    """Connects an Organisation to its verified B2B dealer standing, assigned tier, and custom limits."""
+
+    organisation = models.OneToOneField(
+        'organisations.Organisation',
+        on_delete=models.CASCADE,
+        related_name='dealer_profile',
+        help_text="Target dealership organisation.",
+    )
+    tier = models.ForeignKey(
+        DealerTier,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='dealer_organisations',
+        help_text="Assigned dealer pricing tier.",
+    )
+    is_verified_dealer = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Indicates whether dealer verification has been completed by staff.",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=DealerOrganisationStatusChoices.choices,
+        default=DealerOrganisationStatusChoices.ACTIVE,
+        db_index=True,
+        help_text="Lifecycle state of the dealer B2B trading relationship.",
+    )
+    custom_discount_cap = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Optional safety cap on maximum aggregate discount percentage allowed for this dealer.",
+    )
+    notes = models.TextField(
+        blank=True,
+        default='',
+        help_text="Internal staff notes, trade references, or credit agreement summaries.",
+    )
+    verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when dealer status was formally verified.",
+    )
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='verified_dealer_profiles',
+        help_text="Staff user who reviewed and verified this dealer organisation.",
+    )
+
+    class Meta:
+        verbose_name = 'Dealer Organisation Profile'
+        verbose_name_plural = 'Dealer Organisation Profiles'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        tier_name = self.tier.name if self.tier else 'Unassigned'
+        return f"DealerProfile {self.organisation.name} [{tier_name}] - {self.status}"
+
+    @property
+    def is_eligible(self) -> bool:
+        """True when the organisation is active, verified, not suspended or rejected, with an active tier."""
+        return (
+            self.is_verified_dealer
+            and self.status == DealerOrganisationStatusChoices.ACTIVE
+            and self.organisation.is_active
+            and bool(self.tier and self.tier.is_active)
+        )
+
+    @property
+    def rejection_reason(self) -> str:
+        """Returns the mandatory rejection reason if the application was rejected."""
+        data = self.get_application_data()
+        if data.get('rejection_reason'):
+            return data['rejection_reason']
+        if self.notes and '[REJECTED:' in self.notes:
+            return self.notes.split('[REJECTED:', 1)[1].split(']', 1)[0].strip()
+        return ''
+
+    def get_application_data(self) -> dict:
+        """Parses and returns structured business and review metadata from notes."""
+        if not self.notes:
+            return {}
+        try:
+            import json
+            parsed = json.loads(self.notes)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        return {'notes': self.notes}
+
+
+class DealerPricingRule(BaseUUIDModel):
+    """
+    Configurable B2B dealer pricing rule supporting:
+    - Organisation-specific pricing overrides
+    - Category and product-specific rules
+    - Tier-level rules
+    - Quantity breaks (volume discounts with min/max quantities)
+    - Effective date ranges and priorities
+    """
+
+    name = models.CharField(
+        max_length=200,
+        help_text="Descriptive rule label (e.g. 'Bosch Brake Pads Gold Tier 15% off' or 'Wholesale Spark Plugs 20+ units').",
+    )
+    rule_type = models.CharField(
+        max_length=30,
+        choices=DealerPricingRuleTypeChoices.choices,
+        default=DealerPricingRuleTypeChoices.PERCENTAGE_DISCOUNT,
+        help_text="Whether this rule applies a percentage discount off retail or a fixed dealer price.",
+    )
+    organisation = models.ForeignKey(
+        'organisations.Organisation',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='dealer_pricing_rules',
+        help_text="Specific dealer organisation (null for tier-wide or global rule).",
+    )
+    dealer_tier = models.ForeignKey(
+        DealerTier,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='pricing_rules',
+        help_text="Target dealer tier (null for org-specific or global rule).",
+    )
+    part_listing = models.ForeignKey(
+        SparePartListing,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='dealer_pricing_rules',
+        help_text="Specific spare part listing (null for category-wide or general rule).",
+    )
+    vehicle_listing = models.ForeignKey(
+        VehicleListing,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='dealer_pricing_rules',
+        help_text="Specific vehicle listing (null for general rule).",
+    )
+    category = models.ForeignKey(
+        'catalogue.PartCategory',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='dealer_pricing_rules',
+        help_text="Target part category (null for product-specific or general rule).",
+    )
+    min_quantity = models.PositiveIntegerField(
+        default=1,
+        help_text="Minimum purchase quantity required for this rule to apply.",
+    )
+    max_quantity = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Maximum purchase quantity upper bound (null for unlimited).",
+    )
+    discount_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Discount percentage off retail (0.00 to 100.00).",
+    )
+    fixed_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Fixed dealer unit price overriding retail.",
+    )
+    currency = models.CharField(
+        max_length=10,
+        blank=True,
+        default='',
+        help_text="Applicable currency (e.g. GBP, INR). Blank applies to all currencies.",
+    )
+    priority = models.IntegerField(
+        default=0,
+        help_text="Evaluation priority override (higher numbers evaluated first).",
+    )
+    start_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Effective start datetime (null for immediate).",
+    )
+    end_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Effective end datetime (null for perpetual).",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Controls whether this rule is active.",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_dealer_rules',
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_dealer_rules',
+    )
+
+    class Meta:
+        verbose_name = 'Dealer Pricing Rule'
+        verbose_name_plural = 'Dealer Pricing Rules'
+        ordering = ['-priority', '-created_at']
+        indexes = [
+            models.Index(fields=['is_active', 'min_quantity']),
+            models.Index(fields=['organisation', 'is_active']),
+            models.Index(fields=['dealer_tier', 'is_active']),
+            models.Index(fields=['part_listing', 'is_active']),
+            models.Index(fields=['category', 'is_active']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(discount_percentage__gte=0) & models.Q(discount_percentage__lte=100),
+                name='dealer_rule_discount_percentage_range',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(fixed_price__isnull=True) | models.Q(fixed_price__gt=0),
+                name='dealer_rule_fixed_price_positive',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(min_quantity__gte=1),
+                name='dealer_rule_min_quantity_positive',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(max_quantity__isnull=True) | models.Q(max_quantity__gte=models.F('min_quantity')),
+                name='dealer_rule_max_gte_min_quantity',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(start_date__isnull=True)
+                    | models.Q(end_date__isnull=True)
+                    | models.Q(end_date__gte=models.F('start_date'))
+                ),
+                name='dealer_rule_valid_date_range',
+            ),
+        ]
+
+    def __str__(self):
+        target = (
+            self.part_listing.name if self.part_listing
+            else (self.vehicle_listing.title if self.vehicle_listing
+                  else (self.category.name if self.category else 'General'))
+        )
+        benefit = f"{self.discount_percentage}% off" if self.rule_type == DealerPricingRuleTypeChoices.PERCENTAGE_DISCOUNT else f"Fixed {self.currency} {self.fixed_price}"
+        qty = f"Qty {self.min_quantity}+" if not self.max_quantity else f"Qty {self.min_quantity}-{self.max_quantity}"
+        return f"Rule '{self.name}' [{target} | {qty}]: {benefit}"
+
+    def is_currently_effective(self) -> bool:
+        if not self.is_active:
+            return False
+        now = timezone.now()
+        if self.start_date and self.start_date > now:
+            return False
+        if self.end_date and self.end_date < now:
+            return False
+        return True
 
 
