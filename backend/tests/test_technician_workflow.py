@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from tests.quotation_states import make_quotation, advance_quotation
 from rest_framework import status
 from rest_framework.test import APIClient
 from django.utils import timezone
@@ -160,8 +161,7 @@ def assigned_work_order(db, workshop_profile, buyer_user, garage_vehicle, worksh
         unit_price=Decimal('80.00'),
         line_total=Decimal('80.00'),
     )
-    quotation.status = "ACCEPTED"
-    quotation.save(update_fields=['status'])
+    advance_quotation(quotation, "ACCEPTED")
     wo = WorkOrder.objects.create(
         workshop=workshop_profile,
         booking=booking,

@@ -27,6 +27,7 @@ from apps.workshops.models import (
     WorkOrderTaskStatusChoices,
     LineItemTypeChoices,
 )
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 @pytest.fixture
@@ -574,8 +575,7 @@ class TestWorkshopManagementAndQuotationFlow:
             currency='GBP',
             tax_rate_percent=Decimal('0.00'),
             total_amount=Decimal('50.00'),
-            status=QuotationStatusChoices.ISSUED,
-            issued_at=timezone.now(),
+            status=QuotationStatusChoices.DRAFT,  # line items added below; issued quotations are write-once
         )
         QuotationLineItem.objects.create(
             quotation=quote,
@@ -585,6 +585,7 @@ class TestWorkshopManagementAndQuotationFlow:
             unit_price=Decimal('50.00'),
             line_total=Decimal('50.00'),
         )
+        advance_quotation(quote, QuotationStatusChoices.ISSUED, issued_at=timezone.now())
 
         resp = buyer_client.get('/api/v1/workshops/bookings/my/?status=QUOTED')
         assert resp.status_code == status.HTTP_200_OK
@@ -669,8 +670,7 @@ class TestAdminWorkshopOversight:
             currency='GBP',
             tax_rate_percent=Decimal('0.00'),
             total_amount=Decimal('120.00'),
-            status=QuotationStatusChoices.ISSUED,
-            issued_at=timezone.now(),
+            status=QuotationStatusChoices.DRAFT,  # line items added below; issued quotations are write-once
         )
         QuotationLineItem.objects.create(
             quotation=quote_issued,
@@ -680,6 +680,7 @@ class TestAdminWorkshopOversight:
             unit_price=Decimal('60.00'),
             line_total=Decimal('120.00'),
         )
+        advance_quotation(quote_issued, QuotationStatusChoices.ISSUED, issued_at=timezone.now())
 
         # 5. CONFIRMED with an ACCEPTED quotation and generated WorkOrder
         b_wo = WorkshopBooking.objects.create(
@@ -696,8 +697,7 @@ class TestAdminWorkshopOversight:
             currency='GBP',
             tax_rate_percent=Decimal('0.00'),
             total_amount=Decimal('250.00'),
-            status=QuotationStatusChoices.ISSUED,
-            issued_at=timezone.now(),
+            status=QuotationStatusChoices.DRAFT,  # line items added below; issued quotations are write-once
         )
         QuotationLineItem.objects.create(
             quotation=quote_accepted,
@@ -715,9 +715,7 @@ class TestAdminWorkshopOversight:
             unit_price=Decimal('40.00'),
             line_total=Decimal('40.00'),
         )
-        quote_accepted.status = QuotationStatusChoices.ACCEPTED
-        quote_accepted.accepted_at = timezone.now()
-        quote_accepted.save(update_fields=['status', 'accepted_at'])
+        advance_quotation(quote_accepted, QuotationStatusChoices.ACCEPTED, issued_at=timezone.now(), accepted_at=timezone.now())
         work_order = WorkOrderService.create_work_order_for_booking(
             booking=b_wo,
             quotation=quote_accepted,
@@ -895,7 +893,7 @@ class TestAdminWorkshopOversight:
 
     def test_admin_search_distinct_prevents_duplicate_rows(self, admin_client, oversight_data):
         # Create additional quotation revision and work order task on b_wo
-        WorkshopQuotation.objects.create(
+        make_quotation(
             booking=oversight_data['b_wo'],
             version=2,
             currency='GBP',

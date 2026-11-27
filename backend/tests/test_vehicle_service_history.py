@@ -30,6 +30,7 @@ from apps.workshops.models import (
     WorkOrderTaskStatusChoices,
 )
 from apps.workshops.services import QuotationService, WorkOrderService
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 @pytest.fixture
@@ -167,7 +168,7 @@ def completed_work_order(db, workshop_profile, buyer_user, garage_vehicle, tech_
 
     quote = WorkshopQuotation.objects.create(
         booking=booking,
-        status=QuotationStatusChoices.ISSUED,
+        status=QuotationStatusChoices.DRAFT,
         tax_rate_percent=Decimal('20.00'),
         currency='GBP',
     )
@@ -188,6 +189,8 @@ def completed_work_order(db, workshop_profile, buyer_user, garage_vehicle, tech_
         line_total=Decimal('50.00'),
     )
     quote.recalculate_totals(commit=True)
+    # Issue only after scope is final: issued quotations are write-once (AUT-01)
+    advance_quotation(quote, QuotationStatusChoices.ISSUED)
     QuotationService.accept_quotation(quotation=quote, buyer=buyer_user)
 
     work_order = WorkOrder.objects.get(booking=booking)
@@ -252,7 +255,7 @@ class TestPlatformVerifiedServiceRecords:
         )
         quote = WorkshopQuotation.objects.create(
             booking=booking,
-            status=QuotationStatusChoices.ISSUED,
+            status=QuotationStatusChoices.DRAFT,
             tax_rate_percent=Decimal('20.00'),
         )
         QuotationLineItem.objects.create(
@@ -264,6 +267,8 @@ class TestPlatformVerifiedServiceRecords:
             line_total=Decimal('60.00'),
         )
         quote.recalculate_totals(commit=True)
+        # Issue only after scope is final: issued quotations are write-once (AUT-01)
+        advance_quotation(quote, QuotationStatusChoices.ISSUED)
         QuotationService.accept_quotation(quotation=quote, buyer=buyer_user)
         work_order = WorkOrder.objects.get(booking=booking)
 
@@ -282,7 +287,7 @@ class TestPlatformVerifiedServiceRecords:
         )
         quote = WorkshopQuotation.objects.create(
             booking=booking,
-            status=QuotationStatusChoices.ISSUED,
+            status=QuotationStatusChoices.DRAFT,
             tax_rate_percent=Decimal('20.00'),
         )
         QuotationLineItem.objects.create(
@@ -294,6 +299,8 @@ class TestPlatformVerifiedServiceRecords:
             line_total=Decimal('50.00'),
         )
         quote.recalculate_totals(commit=True)
+        # Issue only after scope is final: issued quotations are write-once (AUT-01)
+        advance_quotation(quote, QuotationStatusChoices.ISSUED)
         QuotationService.accept_quotation(quotation=quote, buyer=buyer_user)
         work_order = WorkOrder.objects.get(booking=booking)
 
@@ -641,7 +648,7 @@ class TestStageCAuditCorrectionsVehicleService:
             status=BookingStatusChoices.ACCEPTED,
             assigned_technician=tech_user,
         )
-        quote = WorkshopQuotation.objects.create(
+        quote = make_quotation(
             booking=booking,
             status=QuotationStatusChoices.ISSUED,
             tax_rate_percent=Decimal('20.00'),
@@ -692,7 +699,7 @@ class TestStageCAuditCorrectionsVehicleService:
             status=BookingStatusChoices.ACCEPTED,
             assigned_technician=tech_user,
         )
-        quote = WorkshopQuotation.objects.create(
+        quote = make_quotation(
             booking=booking,
             status=QuotationStatusChoices.ISSUED,
             tax_rate_percent=Decimal('20.00'),
@@ -736,7 +743,7 @@ class TestStageCAuditCorrectionsVehicleService:
             status=BookingStatusChoices.ACCEPTED,
             assigned_technician=tech_user,
         )
-        quote = WorkshopQuotation.objects.create(
+        quote = make_quotation(
             booking=booking,
             status=QuotationStatusChoices.ISSUED,
             tax_rate_percent=Decimal('20.00'),
@@ -971,7 +978,7 @@ class TestStageCAuditCorrectionsVehicleService:
             status=BookingStatusChoices.ACCEPTED,
             assigned_technician=tech_user,
         )
-        quote = WorkshopQuotation.objects.create(
+        quote = make_quotation(
             booking=booking,
             status=QuotationStatusChoices.ISSUED,
             tax_rate_percent=Decimal('20.00'),
@@ -1006,3 +1013,56 @@ class TestStageCAuditCorrectionsVehicleService:
         assert audit.metadata.get("odometer_unit_mismatch") is True
         assert audit.metadata.get("vehicle_odometer_unit") == "km"
         assert audit.metadata.get("odometer_unit") == "mi"
+
+
+@pytest.mark.django_db
+class TestG03VehicleLifeRecordBoundaries:
+    """
+    G03 / DX-GC-01: a workshop completion is a life event for the serviced vehicle only;
+    it does not change ownership status, infer warranty, or disclose records across owners.
+    """
+
+    def test_completion_records_life_event_for_serviced_vehicle_only(self, completed_work_order, garage_vehicle, other_garage_vehicle):
+        # AT-010: life event appears for the proper vehicle only
+        assert VehicleServiceRecord.objects.filter(work_order=completed_work_order).count() == 1
+        assert VehicleServiceRecord.objects.get(work_order=completed_work_order).vehicle_id == garage_vehicle.id
+        assert not VehicleServiceRecord.objects.filter(vehicle=other_garage_vehicle).exists()
+
+    def test_completion_does_not_infer_warranty(self, completed_work_order):
+        # AT-010: warranty not inferred
+        record = VehicleServiceRecord.objects.get(work_order=completed_work_order)
+        assert record.service_type == 'SERVICE'
+        assert 'warranty' not in record.service_title.lower()
+        assert 'warranty' not in record.description.lower()
+
+    def test_verified_service_record_does_not_change_ownership_status(self, completed_work_order, garage_vehicle, owner_user):
+        # AT-004: garage/service association is not title proof
+        VehicleServiceRecord.objects.filter(work_order=completed_work_order).delete()
+        garage_vehicle.ownership_status = 'SELF_DECLARED'
+        garage_vehicle.save(update_fields=['ownership_status', 'updated_at'])
+
+        record = VehicleServiceHistoryService.create_verified_record_for_work_order(completed_work_order, actor=owner_user)
+
+        assert record.is_verified is True
+        garage_vehicle.refresh_from_db()
+        assert garage_vehicle.ownership_status == 'SELF_DECLARED'
+
+    def test_same_vin_registered_by_another_user_does_not_expose_prior_history(self, buyer_user, other_buyer_user, garage_vehicle, completed_work_order):
+        # DX-GAP-03: prior owner PII and history are not disclosed via a shared VIN
+        later = GarageVehicle.objects.create(
+            user=other_buyer_user,
+            make=garage_vehicle.make,
+            model=garage_vehicle.model,
+            year=garage_vehicle.year,
+            vin=garage_vehicle.vin,
+        )
+        client = APIClient()
+        client.force_authenticate(user=other_buyer_user)
+        res = client.get(f"/api/v1/garage/vehicles/{later.id}/service-history/")
+        assert res.status_code == status.HTTP_200_OK
+        data = res.json()
+        results = data if isinstance(data, list) else data.get('results', [])
+        assert results == []
+        body = res.content.decode()
+        assert buyer_user.email not in body
+        assert completed_work_order.work_order_number not in body

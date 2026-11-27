@@ -226,7 +226,7 @@ class VehiclePassportPdfService:
                 Paragraph(
                     f"<b>Current Odometer:</b> {odometer_str}<br/>"
                     f"<b>MOT Status:</b> {vehicle.mot_status}<br/>"
-                    f"<b>Registered Owner:</b> {owner_name}<br/>"
+                    f"<b>Garage Account Holder:</b> {owner_name}<br/>"
                     f"<b>Ownership:</b> {vehicle.ownership_status.replace('_', ' ').title()}",
                     card_val,
                 ),

@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from tests.quotation_states import make_quotation, advance_quotation
 from rest_framework import status
 from rest_framework.test import APIClient
 from django.utils import timezone
@@ -127,7 +128,7 @@ def completed_work_order(db, workshop_profile, owner_user, garage_vehicle, works
         preferred_date=date.today() + timedelta(days=2),
         status="CONFIRMED",
     )
-    quotation = WorkshopQuotation.objects.create(
+    quotation = make_quotation(
         booking=booking,
         status="ACCEPTED",
         subtotal_labour=Decimal('150.00'),

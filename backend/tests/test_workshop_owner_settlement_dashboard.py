@@ -30,6 +30,7 @@ from apps.workshops.models import (
     ChangeOrderLineItem,
 )
 from apps.workshops.settlement_service import WorkOrderSettlementService
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 @pytest.fixture
@@ -163,7 +164,7 @@ def sample_work_orders(db, workshop_profile, buyer_user, vehicle):
         preferred_date=date.today(),
         status=BookingStatusChoices.ACCEPTED,
     )
-    q1 = WorkshopQuotation.objects.create(
+    q1 = make_quotation(
         quotation_number=f"QTN-{uuid.uuid4().hex[:6].upper()}",
         booking=b1,
         subtotal_labour=Decimal('416.67'),
@@ -214,7 +215,7 @@ def sample_work_orders(db, workshop_profile, buyer_user, vehicle):
         preferred_date=date.today() + timedelta(days=1),
         status=BookingStatusChoices.ACCEPTED,
     )
-    q2 = WorkshopQuotation.objects.create(
+    q2 = make_quotation(
         quotation_number=f"QTN-{uuid.uuid4().hex[:6].upper()}",
         booking=b2,
         subtotal_labour=Decimal('250.00'),
@@ -253,7 +254,7 @@ def sample_work_orders(db, workshop_profile, buyer_user, vehicle):
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.ACCEPTED,
     )
-    q3 = WorkshopQuotation.objects.create(
+    q3 = make_quotation(
         quotation_number=f"QTN-{uuid.uuid4().hex[:6].upper()}",
         booking=b3,
         subtotal_labour=Decimal('166.67'),
@@ -435,7 +436,7 @@ def test_financial_accuracy_change_order_does_not_double_count_tax(
         preferred_date=date.today(),
         status=BookingStatusChoices.ACCEPTED,
     )
-    q = WorkshopQuotation.objects.create(
+    q = make_quotation(
         quotation_number=f"QTN-{uuid.uuid4().hex[:6].upper()}",
         booking=b,
         subtotal_labour=Decimal('200.00'),

@@ -27,6 +27,7 @@ from apps.workshops.models import (
     ReviewStatusChoices,
     WorkshopDepositWebhookEvent,
 )
+from apps.workshops.models import _quotation_transition  # service-owned status transitions (AUT-01)
 from apps.garage.models import GarageVehicle
 from apps.catalogue.models import Part
 from apps.identity.models import User
@@ -318,6 +319,14 @@ class QuotationService:
         deposit_amount = data.get('deposit_amount')
 
         with transaction.atomic():
+            # Lock any draft quotation before the booking: issue/accept/reject lock quotation -> booking,
+            # and saving the draft below re-locks the quotation row (AUT-01), so keep the same order.
+            list(
+                WorkshopQuotation.objects.select_for_update(of=('self',))
+                .filter(booking_id=booking.id, status=QuotationStatusChoices.DRAFT)
+                .order_by('pk')  # deterministic: Meta.ordering would lock by -version
+                .values_list('id', flat=True)
+            )
             # Lock booking row to prevent concurrent version assignment races
             booking = WorkshopBooking.objects.select_for_update().get(id=booking.id)
 
@@ -427,7 +436,16 @@ class QuotationService:
     @classmethod
     def issue_quotation(cls, quotation: WorkshopQuotation, actor: User) -> WorkshopQuotation:
         with transaction.atomic():
-            quotation = WorkshopQuotation.objects.select_for_update().get(id=quotation.id)
+            # Lock order (AUT-01): every quotation this call may change (the draft and any earlier
+            # ISSUED version it supersedes), in primary-key order, then the booking.
+            booking_id = WorkshopQuotation.objects.filter(id=quotation.id).values_list('booking_id', flat=True).get()
+            list(
+                WorkshopQuotation.objects.select_for_update(of=('self',))
+                .filter(models.Q(id=quotation.id) | models.Q(booking_id=booking_id, status=QuotationStatusChoices.ISSUED))
+                .order_by('pk')
+                .values_list('id', flat=True)
+            )
+            quotation = WorkshopQuotation.objects.get(id=quotation.id)
             booking = WorkshopBooking.objects.select_for_update().get(id=quotation.booking_id)
 
             if quotation.status != QuotationStatusChoices.DRAFT:
@@ -436,16 +454,20 @@ class QuotationService:
                 raise DjangoValidationError("Cannot issue an empty quotation with no line items.")
 
             # Supersede any previously ISSUED quotation for this booking
-            WorkshopQuotation.objects.filter(
-                booking=booking,
-                status=QuotationStatusChoices.ISSUED,
-            ).exclude(id=quotation.id).update(status=QuotationStatusChoices.SUPERSEDED)
+            previous_ids = list(
+                WorkshopQuotation.objects.filter(booking=booking, status=QuotationStatusChoices.ISSUED)
+                .exclude(id=quotation.id)
+                .values_list('id', flat=True)
+            )
+            with _quotation_transition(previous_ids, QuotationStatusChoices.ISSUED, QuotationStatusChoices.SUPERSEDED):
+                WorkshopQuotation.objects.filter(id__in=previous_ids).update(status=QuotationStatusChoices.SUPERSEDED)
 
             quotation.status = QuotationStatusChoices.ISSUED
             quotation.issued_at = timezone.now()
             if quotation.requires_deposit and quotation.deposit_status == DepositStatusChoices.NOT_REQUIRED:
                 quotation.deposit_status = DepositStatusChoices.PENDING
-            quotation.save(update_fields=['status', 'issued_at', 'deposit_status', 'updated_at'])
+            with _quotation_transition([quotation.id], QuotationStatusChoices.DRAFT, QuotationStatusChoices.ISSUED):
+                quotation.save(update_fields=['status', 'issued_at', 'deposit_status', 'updated_at'])
 
             # Update booking status to QUOTED if still pending or confirmed without an active work order
             if booking.status in (
@@ -513,7 +535,8 @@ class QuotationService:
             # Mark quotation as ACCEPTED
             quotation.status = QuotationStatusChoices.ACCEPTED
             quotation.accepted_at = timezone.now()
-            quotation.save(update_fields=['status', 'accepted_at', 'updated_at'])
+            with _quotation_transition([quotation.id], QuotationStatusChoices.ISSUED, QuotationStatusChoices.ACCEPTED):
+                quotation.save(update_fields=['status', 'accepted_at', 'updated_at'])
 
             # Update booking status
             if booking.status != BookingStatusChoices.CONFIRMED:
@@ -573,7 +596,8 @@ class QuotationService:
             quotation.status = QuotationStatusChoices.REJECTED
             quotation.customer_rejection_reason = reason.strip() if reason else ''
             quotation.rejected_at = timezone.now()
-            quotation.save(update_fields=['status', 'customer_rejection_reason', 'rejected_at', 'updated_at'])
+            with _quotation_transition([quotation.id], QuotationStatusChoices.ISSUED, QuotationStatusChoices.REJECTED):
+                quotation.save(update_fields=['status', 'customer_rejection_reason', 'rejected_at', 'updated_at'])
 
             audit = record_audit_entry(
                 event_type="workshop.quotation.rejected",

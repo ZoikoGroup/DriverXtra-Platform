@@ -29,6 +29,7 @@ from apps.workshops.models import (
     ReviewStatusChoices,
 )
 from apps.workshops.services import WorkshopReviewService, QuotationService
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 @pytest.fixture
@@ -189,7 +190,7 @@ def completed_service(db, workshop, buyer, vehicle):
     quote = WorkshopQuotation.objects.create(
         booking=booking,
         version=1,
-        status=QuotationStatusChoices.ISSUED,
+        status=QuotationStatusChoices.DRAFT,  # line items added below; issued quotations are write-once
         tax_rate_percent=Decimal('20.00'),
         valid_until=date.today() + timedelta(days=14),
     )
@@ -202,8 +203,7 @@ def completed_service(db, workshop, buyer, vehicle):
         line_total=Decimal('54.17'),
     )
     quote.recalculate_totals(commit=True)
-    quote.status = QuotationStatusChoices.ACCEPTED
-    quote.save(update_fields=['status'])
+    advance_quotation(quote, QuotationStatusChoices.ACCEPTED)
 
     completed_time = timezone.now() - timedelta(hours=3)
     work_order = WorkOrder.objects.create(
@@ -300,15 +300,14 @@ class TestWorkshopReviewModel:
             preferred_date=date.today() + timedelta(days=2),
             status=BookingStatusChoices.CONFIRMED,
         )
-        q2 = WorkshopQuotation.objects.create(
+        q2 = make_quotation(
             booking=booking2,
             version=1,
             status=QuotationStatusChoices.ISSUED,
             tax_rate_percent=Decimal('20.00'),
             valid_until=date.today() + timedelta(days=14),
         )
-        q2.status = QuotationStatusChoices.ACCEPTED
-        q2.save(update_fields=['status'])
+        advance_quotation(q2, QuotationStatusChoices.ACCEPTED)
         wo2 = WorkOrder.objects.create(
             booking=booking2,
             quotation=q2,
@@ -586,15 +585,14 @@ class TestWorkshopReputationSummary:
                 preferred_date=date.today() + timedelta(days=2),
                 status=BookingStatusChoices.CONFIRMED,
             )
-            q = WorkshopQuotation.objects.create(
+            q = make_quotation(
                 booking=b,
                 version=1,
                 status=QuotationStatusChoices.ISSUED,
                 tax_rate_percent=Decimal('20.00'),
                 valid_until=date.today() + timedelta(days=14),
             )
-            q.status = QuotationStatusChoices.ACCEPTED
-            q.save(update_fields=['status'])
+            advance_quotation(q, QuotationStatusChoices.ACCEPTED)
             wo = WorkOrder.objects.create(
                 booking=b,
                 quotation=q,

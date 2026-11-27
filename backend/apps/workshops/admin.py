@@ -1,4 +1,5 @@
 from django.contrib import admin
+from apps.workshops.models import QUOTATION_CONTENT_LOCKED_STATUSES
 from apps.workshops.models import (
     WorkshopProfile,
     WorkshopOperatingHours,
@@ -161,9 +162,24 @@ class BookingServiceItemAdmin(admin.ModelAdmin):
     search_fields = ('service_name', 'booking__booking_number')
 
 
+def _quotation_is_locked(quotation):
+    """Issued (or later) quotations are write-once (DX-GC-06 AUT-01)."""
+    return quotation is not None and quotation.status in QUOTATION_CONTENT_LOCKED_STATUSES
+
+
 class QuotationLineItemInline(admin.TabularInline):
     model = QuotationLineItem
     extra = 0
+
+    # `obj` is the parent quotation.
+    def has_add_permission(self, request, obj=None):
+        return not _quotation_is_locked(obj) and super().has_add_permission(request, obj)
+
+    def has_change_permission(self, request, obj=None):
+        return not _quotation_is_locked(obj) and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return not _quotation_is_locked(obj) and super().has_delete_permission(request, obj)
 
 
 @admin.register(WorkshopQuotation)
@@ -187,8 +203,19 @@ class WorkshopQuotationAdmin(admin.ModelAdmin):
         'booking__booking_number',
         'booking__workshop__business_name',
     )
-    readonly_fields = ('quotation_number', 'created_at', 'updated_at')
+    # Status and lifecycle facts change only through QuotationService (AUT-01); new quotations are DRAFT.
+    readonly_fields = (
+        'quotation_number', 'status', 'issued_at', 'accepted_at', 'rejected_at',
+        'customer_rejection_reason', 'created_at', 'updated_at',
+    )
     inlines = [QuotationLineItemInline]
+
+    def has_change_permission(self, request, obj=None):
+        return not _quotation_is_locked(obj) and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        # Also consulted per object by the bulk "delete selected" action.
+        return not _quotation_is_locked(obj) and super().has_delete_permission(request, obj)
 
 
 @admin.register(QuotationLineItem)
@@ -204,6 +231,14 @@ class QuotationLineItemAdmin(admin.ModelAdmin):
     )
     list_filter = ('item_type',)
     search_fields = ('description', 'part_number', 'quotation__quotation_number')
+
+    def has_change_permission(self, request, obj=None):
+        parent = obj.quotation if obj is not None else None
+        return not _quotation_is_locked(parent) and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        parent = obj.quotation if obj is not None else None
+        return not _quotation_is_locked(parent) and super().has_delete_permission(request, obj)
 
 
 

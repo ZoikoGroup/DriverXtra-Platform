@@ -31,6 +31,7 @@ from apps.workshops.models import (
 from apps.workshops.services import QuotationService, WorkOrderService, ChangeOrderService
 from apps.garage.services import VehicleServiceHistoryService
 from platform_core.audit.models import AuditLog
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 @pytest.fixture
@@ -160,7 +161,7 @@ def work_order_fixture(db, workshop_profile, buyer_user, garage_vehicle, owner_u
     quote = WorkshopQuotation.objects.create(
         booking=booking,
         version=1,
-        status=QuotationStatusChoices.ISSUED,
+        status=QuotationStatusChoices.DRAFT,
         tax_rate_percent=Decimal('20.00'),
         valid_until=date.today() + timedelta(days=14),
     )
@@ -182,6 +183,8 @@ def work_order_fixture(db, workshop_profile, buyer_user, garage_vehicle, owner_u
     )
     quote.recalculate_totals(commit=True)
     # net = 65, tax 20% = 13.00, total = 78.00
+    # Issue only after scope is final: issued quotations are write-once (AUT-01)
+    advance_quotation(quote, QuotationStatusChoices.ISSUED)
 
     quote = QuotationService.accept_quotation(quote, buyer=buyer_user)
     wo = WorkOrder.objects.get(booking=booking)

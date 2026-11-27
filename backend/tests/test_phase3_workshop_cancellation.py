@@ -50,6 +50,7 @@ from apps.workshops.refund_service import WorkshopRefundService
 from apps.marketplace.payments.razorpay_provider import RazorpayPaymentProvider
 from apps.marketplace.payments.stripe_provider import StripePaymentProvider
 from platform_core.audit.models import AuditLog
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 @pytest.fixture
@@ -277,7 +278,7 @@ def test_04_ineligible_booking_work_order_completed(buyer_client, uk_workshop, b
         preferred_date=date.today() + timedelta(days=1),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("150.00"),
         status=QuotationStatusChoices.ACCEPTED,
@@ -331,7 +332,7 @@ def test_06_duplicate_cancellation_requests_prevent_duplicate_refunds(buyer_clie
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("200.00"),
         requires_deposit=True,
@@ -400,7 +401,7 @@ def test_08_fully_paid_booking_refund_deposit_and_balance(buyer_client, uk_works
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("200.00"),
         requires_deposit=True,
@@ -467,7 +468,7 @@ def test_09_deposit_only_refund(buyer_client, in_workshop, buyer_user, buyer_veh
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("5000.00"),
         requires_deposit=True,
@@ -511,7 +512,7 @@ def test_10_partially_paid_booking_refund(buyer_client, uk_workshop, buyer_user,
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("300.00"),
         requires_deposit=True,
@@ -563,7 +564,7 @@ def test_11_previously_refunded_amounts_prevent_double_refund(buyer_client, uk_w
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("300.00"),
         requires_deposit=True,
@@ -631,7 +632,7 @@ def test_12_no_payment_cancellation_does_not_call_gateway(buyer_client, uk_works
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    WorkshopQuotation.objects.create(
+    make_quotation(
         booking=booking,
         total_amount=Decimal("150.00"),
         requires_deposit=False,
@@ -663,7 +664,7 @@ def test_13_razorpay_refund_payload_and_idempotency_headers(buyer_client, in_wor
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("4000.00"),
         requires_deposit=True,
@@ -701,7 +702,7 @@ def test_14_stripe_refund_payload_and_idempotency(buyer_client, uk_workshop, buy
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("250.00"),
         requires_deposit=True,
@@ -736,7 +737,7 @@ def test_15_gateway_timeout_and_processing_unknown_transition(buyer_client, uk_w
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("200.00"),
         requires_deposit=True,
@@ -775,7 +776,7 @@ def test_16_gateway_timeout_reconciliation_resolves_to_succeeded(buyer_client, u
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CANCELLED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("200.00"),
         requires_deposit=True,
@@ -867,7 +868,7 @@ def test_18_prevention_of_payment_collection_after_cancellation(uk_workshop, buy
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CANCELLED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("200.00"),
         requires_deposit=True,
@@ -907,7 +908,7 @@ def test_19_preservation_of_completed_work_and_service_history(buyer_client, uk_
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         total_amount=Decimal("250.00"),
         status=QuotationStatusChoices.ACCEPTED,
@@ -1034,7 +1035,7 @@ def test_21_payment_100_no_previous_refund(buyer_client, uk_workshop, buyer_user
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1092,7 +1093,7 @@ def test_22_payment_100_with_successful_30_partial_refund(uk_workshop, buyer_use
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1171,7 +1172,7 @@ def test_23_payment_100_with_successful_100_full_refund(uk_workshop, buyer_user,
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1243,7 +1244,7 @@ def test_24_payment_100_with_30_processing_refund(uk_workshop, buyer_user, buyer
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1312,7 +1313,7 @@ def test_25_payment_100_with_30_processing_unknown_refund(uk_workshop, buyer_use
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1377,7 +1378,7 @@ def test_26_multiple_payments_different_previous_refunds(uk_workshop, buyer_user
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1471,7 +1472,7 @@ def test_27_legacy_refunded_status_with_associated_workshop_refund(uk_workshop, 
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1530,7 +1531,7 @@ def test_28_repeated_cancellation_and_concurrent_requests_block_duplicates(uk_wo
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1576,7 +1577,7 @@ def test_29_retrying_uncertain_refund_uses_same_idempotency_key(in_workshop, buy
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1645,7 +1646,7 @@ def test_30_new_refund_after_completed_partial_uses_distinct_identity_and_key(in
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,
@@ -1718,7 +1719,7 @@ def test_31_sum_of_refunds_never_exceeds_original_collected(uk_workshop, buyer_u
         preferred_date=date.today() + timedelta(days=2),
         status=BookingStatusChoices.CONFIRMED,
     )
-    quote = WorkshopQuotation.objects.create(
+    quote = make_quotation(
         booking=booking,
         version=1,
         status=QuotationStatusChoices.ACCEPTED,

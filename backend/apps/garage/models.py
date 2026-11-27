@@ -5,6 +5,11 @@ from apps.identity.models import User
 from apps.catalogue.models import VehicleVariant
 
 
+# A user adding a vehicle to My Garage is a self-declaration, not proof of title.
+# Verified ownership may only come from an authorised external source (DX-GC-01 DEC-03).
+OWNERSHIP_STATUS_SELF_DECLARED = 'SELF_DECLARED'
+
+
 class GarageVehicle(BaseUUIDModel):
     """Authenticated user's personal vehicle passport registered in My Garage."""
 

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from apps.garage.models import GarageVehicle
+from apps.garage.models import GarageVehicle, OWNERSHIP_STATUS_SELF_DECLARED
 from apps.catalogue.models import VehicleVariant
 
 
@@ -72,6 +72,7 @@ class GarageVehicleSerializer(serializers.ModelSerializer):
             'variant_display',
             'mot_data_source',
             'recalls_data_source',
+            'ownership_status',  # Server-controlled: garage association is not title proof
             'is_archived',
             'archived_at',
             'created_at',
@@ -132,6 +133,7 @@ class GarageVehicleSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = self.context['request'].user
         validated_data['user'] = user
+        validated_data['ownership_status'] = OWNERSHIP_STATUS_SELF_DECLARED
         if not GarageVehicle.objects.filter(user=user, is_archived=False).exists():
             validated_data['is_primary'] = True
         return super().create(validated_data)
