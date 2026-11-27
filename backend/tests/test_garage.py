@@ -206,3 +206,38 @@ class TestVehicleGarage:
         assert res.status_code == status.HTTP_404_NOT_FOUND
         v_seller.refresh_from_db()
         assert v_seller.is_archived is False
+
+
+@pytest.mark.django_db
+class TestGarageOwnershipIsNotTitleProof:
+    """
+    G03 / DX-GC-01 AT-004: garage association is not title proof.
+    Ownership status is server-controlled; self-registration never claims verified ownership.
+    """
+
+    def test_new_garage_vehicle_is_self_declared_not_verified(self, buyer_auth_client, buyer_user):
+        payload = {'make': 'Toyota', 'model': 'Corolla', 'year': 2019, 'vin': 'JTDBR32E720123456'}
+        res = buyer_auth_client.post('/api/v1/garage/vehicles/', payload, format='json')
+        assert res.status_code == status.HTTP_201_CREATED
+        assert res.json()['ownership_status'] == 'SELF_DECLARED'
+        assert GarageVehicle.objects.get(id=res.json()['id']).ownership_status == 'SELF_DECLARED'
+
+    def test_client_cannot_assert_verified_ownership_on_create(self, buyer_auth_client, buyer_user):
+        payload = {
+            'make': 'Toyota', 'model': 'Corolla', 'year': 2019,
+            'ownership_status': 'VERIFIED_OWNER',
+        }
+        res = buyer_auth_client.post('/api/v1/garage/vehicles/', payload, format='json')
+        assert res.status_code == status.HTTP_201_CREATED
+        assert GarageVehicle.objects.get(id=res.json()['id']).ownership_status == 'SELF_DECLARED'
+
+    def test_client_cannot_change_ownership_status_on_update(self, buyer_auth_client, buyer_user):
+        res = buyer_auth_client.post(
+            '/api/v1/garage/vehicles/', {'make': 'Kia', 'model': 'Niro', 'year': 2023}, format='json'
+        )
+        vehicle_id = res.json()['id']
+        patch = buyer_auth_client.patch(
+            f'/api/v1/garage/vehicles/{vehicle_id}/', {'ownership_status': 'VERIFIED_OWNER'}, format='json'
+        )
+        assert patch.status_code == status.HTTP_200_OK
+        assert GarageVehicle.objects.get(id=vehicle_id).ownership_status == 'SELF_DECLARED'

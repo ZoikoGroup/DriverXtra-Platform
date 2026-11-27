@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from tests.quotation_states import make_quotation, advance_quotation
 from rest_framework.test import APIClient
 from django.core.exceptions import ValidationError as DjangoValidationError
 
@@ -109,7 +110,7 @@ def work_order(db, workshop_profile, buyer_user, garage_vehicle, owner_user):
         preferred_date=date.today() + timedelta(days=2),
         status="CONFIRMED",
     )
-    quotation = WorkshopQuotation.objects.create(
+    quotation = make_quotation(
         booking=booking,
         status="ACCEPTED",
         subtotal_labour=Decimal('100.00'),

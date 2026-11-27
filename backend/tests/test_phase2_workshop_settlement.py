@@ -40,6 +40,7 @@ from apps.workshops.models import (
 )
 from apps.workshops.settlement_service import WorkOrderSettlementService
 from platform_core.audit.models import AuditLog
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 def build_razorpay_signature(order_id: str, payment_id: str, secret: str) -> str:
@@ -187,7 +188,7 @@ def in_work_order(db, in_workshop_profile, buyer_user, in_vehicle):
     )
     quote = WorkshopQuotation.objects.create(
         booking=booking,
-        status=QuotationStatusChoices.ISSUED,
+        status=QuotationStatusChoices.DRAFT,  # line items added below; issued quotations are write-once
         total_amount=Decimal('10000.00'),
         currency='INR',
         requires_deposit=True,
@@ -205,8 +206,7 @@ def in_work_order(db, in_workshop_profile, buyer_user, in_vehicle):
         unit_price=Decimal('10000.00'),
         line_total=Decimal('10000.00'),
     )
-    quote.status = QuotationStatusChoices.ACCEPTED
-    quote.save(update_fields=['status'])
+    advance_quotation(quote, QuotationStatusChoices.ACCEPTED)
     wo = WorkOrder.objects.create(
         booking=booking,
         quotation=quote,
@@ -229,7 +229,7 @@ def gb_work_order(db, gb_workshop_profile, buyer_user, gb_vehicle):
     )
     quote = WorkshopQuotation.objects.create(
         booking=booking,
-        status=QuotationStatusChoices.ISSUED,
+        status=QuotationStatusChoices.DRAFT,  # line items added below; issued quotations are write-once
         total_amount=Decimal('500.00'),
         currency='GBP',
         requires_deposit=True,
@@ -249,8 +249,7 @@ def gb_work_order(db, gb_workshop_profile, buyer_user, gb_vehicle):
         unit_price=Decimal('500.00'),
         line_total=Decimal('500.00'),
     )
-    quote.status = QuotationStatusChoices.ACCEPTED
-    quote.save(update_fields=['status'])
+    advance_quotation(quote, QuotationStatusChoices.ACCEPTED)
     wo = WorkOrder.objects.create(
         booking=booking,
         quotation=quote,

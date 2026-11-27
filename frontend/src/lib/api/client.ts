@@ -4285,11 +4285,16 @@ export const api = {
         });
       },
       async assignTechnician(id: string, technician_id: string): Promise<WorkOrderDetail> {
-        return apiRequest<WorkOrderDetail>(`/workshops/manage/work-orders/${id}/assign/`, {
-          method: "POST",
-          requiresAuth: true,
-          body: JSON.stringify({ technician_id }),
-        });
+        // Backend: WorkOrderAssignTechnicianView responds { status, message, work_order }.
+        const res = await apiRequest<{ status: string; message: string; work_order: WorkOrderDetail }>(
+          `/workshops/manage/work-orders/${id}/assign-technician/`,
+          {
+            method: "POST",
+            requiresAuth: true,
+            body: JSON.stringify({ technician_id }),
+          }
+        );
+        return res.work_order;
       },
       async updateStatus(
         id: string,

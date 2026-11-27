@@ -25,6 +25,7 @@ from apps.workshops.models import (
     QuotationStatusChoices,
     LineItemTypeChoices,
 )
+from tests.quotation_states import make_quotation, advance_quotation
 
 
 @pytest.fixture
@@ -321,7 +322,7 @@ class TestWorkshopBookingModel:
             vehicle=buyer_vehicle,
             preferred_date=date.today() + timedelta(days=3),
         )
-        WorkshopQuotation.objects.create(
+        make_quotation(
             booking=booking,
             status=QuotationStatusChoices.ACCEPTED,
             accepted_at=timezone.now(),
@@ -425,7 +426,7 @@ class TestWorkshopQuotationModel:
         assert quotation.total_amount == Decimal("390.60")
 
     def test_accepted_quotation_immutability(self, booking):
-        quotation = WorkshopQuotation.objects.create(
+        quotation = make_quotation(
             booking=booking,
             subtotal_labour=Decimal("100.00"),
             tax_rate_percent=Decimal("20.00"),
@@ -468,7 +469,7 @@ class TestWorkshopQuotationModel:
 
     def test_unique_accepted_quotation_per_booking_constraint(self, booking):
         # First accepted quotation
-        WorkshopQuotation.objects.create(
+        make_quotation(
             booking=booking,
             version=1,
             status=QuotationStatusChoices.ACCEPTED,
@@ -476,7 +477,7 @@ class TestWorkshopQuotationModel:
         )
         # Attempt to create second quotation with status ACCEPTED for same booking
         with pytest.raises((IntegrityError, ValidationError)):
-            WorkshopQuotation.objects.create(
+            make_quotation(
                 booking=booking,
                 version=2,
                 status=QuotationStatusChoices.ACCEPTED,

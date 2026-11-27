@@ -1,10 +1,12 @@
+import contextlib
+import contextvars
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
-from django.db import models
+from django.db import models, router, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -654,6 +656,321 @@ class BookingServiceItem(BaseUUIDModel):
         super().save(*args, **kwargs)
 
 
+# =========================================================================================
+# DX-GC-06 AUT-01: quotation (estimate version) write-once policy
+# =========================================================================================
+# A quotation is write-once once it has been sent (ISSUED) to the customer. Any later state keeps
+# the content frozen; new scope requires a new quotation version.
+QUOTATION_CONTENT_LOCKED_STATUSES = (
+    QuotationStatusChoices.ISSUED,
+    QuotationStatusChoices.ACCEPTED,
+    QuotationStatusChoices.REJECTED,
+    QuotationStatusChoices.SUPERSEDED,
+    QuotationStatusChoices.EXPIRED,
+)
+
+# The only status changes that exist, each owned by exactly one service workflow. Ordinary ORM
+# writes (save, QuerySet.update, bulk_update, create, admin) can never change status; the owning
+# service opens a short-lived grant for the specific quotations and edge (_quotation_transition).
+# EXPIRED has no owning workflow in the codebase, so it is unreachable until one is designed.
+QUOTATION_SERVICE_TRANSITIONS = {
+    (QuotationStatusChoices.DRAFT, QuotationStatusChoices.ISSUED): 'QuotationService.issue_quotation',
+    (QuotationStatusChoices.ISSUED, QuotationStatusChoices.SUPERSEDED): 'QuotationService.issue_quotation (earlier version)',
+    (QuotationStatusChoices.ISSUED, QuotationStatusChoices.ACCEPTED): 'QuotationService.accept_quotation',
+    (QuotationStatusChoices.ISSUED, QuotationStatusChoices.REJECTED): 'QuotationService.reject_quotation',
+}
+
+# Lifecycle facts, each recorded only by the transition that owns it. Outside that transition they
+# can be neither set, cleared nor rewritten; a new quotation starts with all of them empty.
+QUOTATION_TRANSITION_FIELDS = {
+    QuotationStatusChoices.ISSUED: ('issued_at',),
+    QuotationStatusChoices.ACCEPTED: ('accepted_at',),
+    QuotationStatusChoices.REJECTED: ('rejected_at', 'customer_rejection_reason'),
+    QuotationStatusChoices.SUPERSEDED: (),
+}
+QUOTATION_LIFECYCLE_FIELDS = ('issued_at', 'accepted_at', 'rejected_at', 'customer_rejection_reason')
+# The timestamp each transition must record (the rejection reason may legitimately be blank).
+QUOTATION_TRANSITION_REQUIRED = {
+    QuotationStatusChoices.ISSUED: 'issued_at',
+    QuotationStatusChoices.ACCEPTED: 'accepted_at',
+    QuotationStatusChoices.REJECTED: 'rejected_at',
+}
+
+# Customer-visible content (WorkshopQuotationSerializer): amount, scope-derived totals, tax,
+# booking/merchant linkage, terms, notes, identity and authorship. Frozen once locked.
+QUOTATION_CONTENT_FIELDS = (
+    'subtotal_labour', 'subtotal_parts', 'subtotal_other',
+    'discount_amount', 'tax_rate_percent', 'tax_amount',
+    'total_amount', 'currency', 'version', 'booking_id',
+    'tax_breakdown', 'requires_deposit', 'deposit_percentage',
+    'deposit_amount', 'terms_and_conditions', 'valid_until',
+    'workshop_notes', 'quotation_number', 'created_by_id',
+)
+
+# Deliberately mutable after issue: deposit payment state owned by the deposit/refund services
+# (deposit_status, deposit_paid_at, deposit_provider, deposit_transaction_id, deposit_order_id,
+# deposit_signature, deposit_idempotency_key) and updated_at.
+
+_QUOTATION_POLICY_FIELDS = ('status',) + QUOTATION_CONTENT_FIELDS + QUOTATION_LIFECYCLE_FIELDS
+
+_quotation_transition_grants = contextvars.ContextVar('quotation_transition_grants', default=frozenset())
+
+
+@contextlib.contextmanager
+def _quotation_transition(quotation_ids, from_status, to_status):
+    """
+    Internal: authorise one service-owned status edge for the given quotations, for the duration of
+    the block. Only edges in QUOTATION_SERVICE_TRANSITIONS can be granted. Used by QuotationService.
+    This guards ordinary ORM writes; it is not a security boundary against in-process code
+    (see G23 report: database-level enforcement).
+    """
+    if (from_status, to_status) not in QUOTATION_SERVICE_TRANSITIONS:
+        raise ValueError(f"No service owns the quotation transition {from_status} -> {to_status}.")
+    grants = frozenset((str(pk), from_status, to_status) for pk in quotation_ids)
+    token = _quotation_transition_grants.set(_quotation_transition_grants.get() | grants)
+    try:
+        yield
+    finally:
+        _quotation_transition_grants.reset(token)
+
+
+def _transition_granted(pk, from_status, to_status):
+    return (str(pk), from_status, to_status) in _quotation_transition_grants.get()
+
+
+def _blank(value):
+    return value is None or value == ''
+
+
+def _check_quotation_create(number, values):
+    """A quotation is always created as an empty DRAFT; issue/accept/reject happen via services."""
+    if values.get('status', QuotationStatusChoices.DRAFT) != QuotationStatusChoices.DRAFT:
+        raise ValidationError(
+            f"Quotation {number} must be created as DRAFT; status changes are made only by QuotationService."
+        )
+    for field in QUOTATION_LIFECYCLE_FIELDS:
+        if not _blank(values.get(field)):
+            raise ValidationError(
+                f"Quotation {number}: '{field}' is recorded by its lifecycle transition and cannot be set on creation."
+            )
+
+
+def _check_quotation_write(pk, number, db_values, new_values):
+    """
+    Raise ValidationError if writing new_values over the stored row db_values would bypass a service
+    transition, record a lifecycle fact outside its transition, or alter locked content.
+    Both arguments map attnames to values; only keys in new_values are written.
+    """
+    db_status = db_values['status']
+    new_status = new_values.get('status', db_status)
+
+    if new_status != db_status:
+        if not _transition_granted(pk, db_status, new_status):
+            if db_status == QuotationStatusChoices.ACCEPTED:
+                raise ValidationError(
+                    f"Quotation {number} has already been accepted and its status cannot be changed."
+                )
+            owner = QUOTATION_SERVICE_TRANSITIONS.get((db_status, new_status))
+            if owner:
+                raise ValidationError(
+                    f"Quotation {number}: {db_status} -> {new_status} can only be performed by {owner}."
+                )
+            raise ValidationError(
+                f"Quotation {number} cannot move from {db_status} to {new_status}. "
+                "Create a new quotation version instead."
+            )
+        recordable = QUOTATION_TRANSITION_FIELDS.get(new_status, ())
+        required = QUOTATION_TRANSITION_REQUIRED.get(new_status)
+        if required and _blank(new_values.get(required, db_values.get(required))):
+            raise ValidationError(
+                f"Quotation {number}: moving to {new_status} must record '{required}'."
+            )
+    else:
+        recordable = ()
+
+    for field in QUOTATION_LIFECYCLE_FIELDS:
+        if field in new_values and new_values[field] != db_values[field] and field not in recordable:
+            raise ValidationError(
+                f"Quotation {number}: '{field}' can only be recorded by its lifecycle transition."
+            )
+
+    if db_status in QUOTATION_CONTENT_LOCKED_STATUSES:
+        state = 'accepted' if db_status == QuotationStatusChoices.ACCEPTED else 'issued'
+        for field in QUOTATION_CONTENT_FIELDS:
+            if field in new_values and new_values[field] != db_values[field]:
+                raise ValidationError(
+                    f"Quotation {number} is {state} and immutable. Field '{field}' cannot be modified. "
+                    "Create a new quotation version instead."
+                )
+
+
+def _quotation_db_status(quotation_id, lock=False):
+    """Stored status of a quotation. With lock=True the row is locked (caller must be in a transaction)."""
+    if not quotation_id:
+        return None
+    qs = WorkshopQuotation._base_manager.filter(pk=quotation_id)
+    if lock:
+        qs = qs.select_for_update(of=('self',))
+    return qs.values_list('status', flat=True).first()
+
+
+def _lock_quotations(quotation_ids, using, fields=()):
+    """
+    Lock quotation rows in primary-key order (one global order: quotations before bookings before
+    line items) and return their stored values. Caller must be inside a transaction.
+    """
+    quotation_ids = {q for q in quotation_ids if q}
+    if not quotation_ids:
+        return []
+    return list(
+        WorkshopQuotation._base_manager.db_manager(using)
+        .select_for_update(of=('self',))
+        .filter(pk__in=quotation_ids)
+        .order_by('pk')
+        .values('pk', 'quotation_number', 'status', *fields)
+    )
+
+
+def _attname(model, name):
+    try:
+        return model._meta.get_field(name).attname
+    except Exception:
+        return name
+
+
+_QUOTATION_GUARDED_ATTNAMES = frozenset(_QUOTATION_POLICY_FIELDS)
+
+
+class WorkshopQuotationQuerySet(models.QuerySet):
+    """
+    Bulk ORM writes bypass save()/clean(); these overrides apply the same AUT-01 policy.
+    Matched rows are locked in primary-key order before the check, and the write is restricted to
+    exactly the rows that were locked and checked.
+    """
+
+    def update(self, **kwargs):
+        attnames = {_attname(self.model, k): v for k, v in kwargs.items()}
+        guarded = [a for a in attnames if a in _QUOTATION_GUARDED_ATTNAMES]
+        if not guarded:
+            return super().update(**kwargs)
+        with transaction.atomic(using=self.db):
+            ids = list(self.values_list('pk', flat=True))
+            rows = _lock_quotations(ids, self.db, fields=[a for a in _QUOTATION_POLICY_FIELDS if a != 'status'])
+            for row in rows:
+                if any(hasattr(attnames[a], 'resolve_expression') for a in guarded):
+                    raise ValidationError(
+                        f"Quotation {row['quotation_number']}: expression updates of protected fields are not allowed."
+                    )
+                _check_quotation_write(row['pk'], row['quotation_number'], row, {a: attnames[a] for a in guarded})
+            return models.QuerySet.update(
+                self.model._base_manager.db_manager(self.db).filter(pk__in=[r['pk'] for r in rows]), **kwargs
+            )
+
+    def delete(self):
+        with transaction.atomic(using=self.db):
+            rows = _lock_quotations(list(self.values_list('pk', flat=True)), self.db)
+            for row in rows:
+                if row['status'] in QUOTATION_CONTENT_LOCKED_STATUSES:
+                    raise ValidationError(
+                        f"Quotation {row['quotation_number']} has been issued and cannot be deleted."
+                    )
+            return models.QuerySet.delete(
+                self.model._base_manager.db_manager(self.db).filter(pk__in=[r['pk'] for r in rows])
+            )
+
+    delete.alters_data = True
+    delete.queryset_only = True
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        objs = list(objs)
+        attnames = [_attname(self.model, f) for f in fields]
+        guarded = [a for a in attnames if a in _QUOTATION_GUARDED_ATTNAMES]
+        if not (guarded and objs):
+            return super().bulk_update(objs, fields, batch_size=batch_size)
+        with transaction.atomic(using=self.db):
+            rows = _lock_quotations([o.pk for o in objs], self.db, fields=[a for a in _QUOTATION_POLICY_FIELDS if a != 'status'])
+            by_pk = {row['pk']: row for row in rows}
+            for obj in objs:
+                row = by_pk.get(obj.pk)
+                if row is not None:
+                    _check_quotation_write(obj.pk, row['quotation_number'], row, {a: getattr(obj, a) for a in guarded})
+            return super().bulk_update(objs, fields, batch_size=batch_size)
+
+    def bulk_create(self, objs, *args, **kwargs):
+        if kwargs.get('update_conflicts'):
+            raise ValidationError("Upsert (update_conflicts) is not permitted for quotations; issued content is write-once.")
+        objs = list(objs)
+        for obj in objs:
+            _check_quotation_create(obj.quotation_number, {f: getattr(obj, f) for f in ('status',) + QUOTATION_LIFECYCLE_FIELDS})
+        return super().bulk_create(objs, *args, **kwargs)
+
+
+class QuotationLineItemQuerySet(models.QuerySet):
+    """
+    Line-item writes are refused when any affected parent quotation is locked (AUT-01).
+    Lock order everywhere: parent quotations (primary-key order) first, then line-item rows.
+    """
+
+    @staticmethod
+    def _lock_unlocked_parents(quotation_ids, using):
+        """Lock parents in pk order and refuse if any is issued. Returns the set of locked parent ids."""
+        rows = _lock_quotations(quotation_ids, using)
+        locked = [r for r in rows if r['status'] in QUOTATION_CONTENT_LOCKED_STATUSES]
+        if locked:
+            state = 'an accepted' if any(r['status'] == QuotationStatusChoices.ACCEPTED for r in locked) else 'an issued'
+            numbers = ', '.join(sorted(r['quotation_number'] for r in locked))
+            raise ValidationError(
+                f"Cannot add, modify or delete line items on {state} quotation ({numbers}). "
+                "Create a new quotation version instead."
+            )
+        return {r['pk'] for r in rows}
+
+    def _lock_parents_then_items(self, extra_parent_ids=()):
+        # 1. unlocked read of the parents, 2. lock parents, 3. lock items, 4. verify nothing moved.
+        parent_ids = set(self.values_list('quotation_id', flat=True)) | {p for p in extra_parent_ids if p}
+        locked_parents = self._lock_unlocked_parents(parent_ids, self.db)
+        items = list(self.select_for_update(of=('self',)).order_by('pk').values_list('pk', 'quotation_id'))
+        if any(q not in locked_parents for _, q in items):
+            raise ValidationError("Line items changed parent quotation concurrently; retry the operation.")
+        return [pk for pk, _ in items]
+
+    def update(self, **kwargs):
+        target = kwargs.get('quotation_id', kwargs.get('quotation'))
+        extra = [getattr(target, 'pk', target)] if target is not None else []
+        with transaction.atomic(using=self.db):
+            pks = self._lock_parents_then_items(extra)
+            return models.QuerySet.update(self.model._base_manager.db_manager(self.db).filter(pk__in=pks), **kwargs)
+
+    def delete(self):
+        with transaction.atomic(using=self.db):
+            pks = self._lock_parents_then_items()
+            return models.QuerySet.delete(self.model._base_manager.db_manager(self.db).filter(pk__in=pks))
+
+    delete.alters_data = True
+    delete.queryset_only = True
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        objs = list(objs)
+        with transaction.atomic(using=self.db):
+            scope = self.model._base_manager.db_manager(self.db).filter(pk__in=[o.pk for o in objs])
+            stored_parents = set(scope.values_list('quotation_id', flat=True))
+            locked_parents = self._lock_unlocked_parents(stored_parents | {o.quotation_id for o in objs}, self.db)
+            items = list(scope.select_for_update(of=('self',)).order_by('pk').values_list('pk', 'quotation_id'))
+            if any(q not in locked_parents for _, q in items):
+                raise ValidationError("Line items changed parent quotation concurrently; retry the operation.")
+            return super().bulk_update(objs, fields, batch_size=batch_size)
+
+    def bulk_create(self, objs, *args, **kwargs):
+        if kwargs.get('update_conflicts'):
+            # A conflicting existing row may belong to a different (issued) quotation than the incoming
+            # object; that row cannot be identified and locked safely beforehand, so upserts are refused.
+            raise ValidationError("Upsert (update_conflicts) is not permitted for quotation line items.")
+        objs = list(objs)
+        with transaction.atomic(using=self.db):
+            self._lock_unlocked_parents({o.quotation_id for o in objs}, self.db)
+            return super().bulk_create(objs, *args, **kwargs)
+
+
 class WorkshopQuotation(BaseUUIDModel):
     """
     Official formal estimate/quote provided by workshop for a booking.
@@ -780,6 +1097,9 @@ class WorkshopQuotation(BaseUUIDModel):
     accepted_at = models.DateTimeField(null=True, blank=True)
     rejected_at = models.DateTimeField(null=True, blank=True)
 
+    # Guarded bulk operations (AUT-01); not used in migrations, so no schema change.
+    objects = WorkshopQuotationQuerySet.as_manager()
+
     class Meta:
         verbose_name = 'Workshop Quotation'
         verbose_name_plural = 'Workshop Quotations'
@@ -838,31 +1158,17 @@ class WorkshopQuotation(BaseUUIDModel):
             if existing_max is not None:
                 self.version = existing_max + 1
 
-        # Enforce immutability of ACCEPTED quotations
+        # DX-GC-06 AUT-01: creation is always an empty DRAFT; afterwards status moves only through
+        # service-owned transitions, lifecycle facts only with their transition, and content is
+        # frozen once issued. Deposit payment state may still change.
+        current = {field: getattr(self, field) for field in _QUOTATION_POLICY_FIELDS}
+        db_values = None
         if not self._state.adding and self.pk:
-            try:
-                db_instance = WorkshopQuotation.objects.get(pk=self.pk)
-                if db_instance.status == QuotationStatusChoices.ACCEPTED:
-                    # Prevent reverting status away from ACCEPTED
-                    if self.status != QuotationStatusChoices.ACCEPTED:
-                        raise ValidationError(
-                            f"Quotation {self.quotation_number} has already been accepted and its status cannot be changed."
-                        )
-                    # Check if any financial or core content field was changed
-                    immutable_fields = [
-                        'subtotal_labour', 'subtotal_parts', 'subtotal_other',
-                        'discount_amount', 'tax_rate_percent', 'tax_amount',
-                        'total_amount', 'currency', 'version', 'booking_id',
-                        'tax_breakdown', 'requires_deposit', 'deposit_percentage',
-                        'deposit_amount',
-                    ]
-                    for field in immutable_fields:
-                        if getattr(self, field) != getattr(db_instance, field):
-                            raise ValidationError(
-                                f"Quotation {self.quotation_number} is accepted and immutable. Field '{field}' cannot be modified."
-                            )
-            except WorkshopQuotation.DoesNotExist:
-                pass
+            db_values = WorkshopQuotation._base_manager.filter(pk=self.pk).values(*_QUOTATION_POLICY_FIELDS).first()
+        if db_values is None:
+            _check_quotation_create(self.quotation_number, current)
+        else:
+            _check_quotation_write(self.pk, self.quotation_number, db_values, current)
 
         # Deposit validation
         if self.requires_deposit:
@@ -887,6 +1193,11 @@ class WorkshopQuotation(BaseUUIDModel):
             if db_status == QuotationStatusChoices.ACCEPTED:
                 raise ValidationError(
                     f"Quotation {self.quotation_number} has already been accepted and its totals cannot be recalculated."
+                )
+            if db_status in QUOTATION_CONTENT_LOCKED_STATUSES:
+                raise ValidationError(
+                    f"Quotation {self.quotation_number} has been issued and its totals cannot be recalculated. "
+                    "Create a new quotation version instead."
                 )
         elif self.status == QuotationStatusChoices.ACCEPTED:
             raise ValidationError(
@@ -1025,16 +1336,26 @@ class WorkshopQuotation(BaseUUIDModel):
             if existing_max is not None:
                 self.version = existing_max + 1
 
-        self.full_clean()
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            if not self._state.adding and self.pk:
+                # Lock the stored row so the AUT-01 check in clean() and this write see the same
+                # committed state (PostgreSQL row lock; SQLite serialises writers instead).
+                _quotation_db_status(self.pk, lock=True)
+            self.full_clean()
+            super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
-        """Prevent deletion of accepted quotations."""
+        """Prevent deletion of accepted or issued quotations."""
         if self.status == QuotationStatusChoices.ACCEPTED:
             raise ValidationError(
                 f"Quotation {self.quotation_number} has been accepted and cannot be deleted."
             )
-        super().delete(*args, **kwargs)
+        with transaction.atomic():
+            if _quotation_db_status(self.pk, lock=True) in QUOTATION_CONTENT_LOCKED_STATUSES:
+                raise ValidationError(
+                    f"Quotation {self.quotation_number} has been issued and cannot be deleted."
+                )
+            return super().delete(*args, **kwargs)
 
 
 class QuotationLineItem(BaseUUIDModel):
@@ -1080,6 +1401,9 @@ class QuotationLineItem(BaseUUIDModel):
         validators=[MinValueValidator(Decimal('0.00'))],
     )
 
+    # Guarded bulk operations (AUT-01); not used in migrations, so no schema change.
+    objects = QuotationLineItemQuerySet.as_manager()
+
     class Meta:
         verbose_name = 'Quotation Line Item'
         verbose_name_plural = 'Quotation Line Items'
@@ -1093,6 +1417,11 @@ class QuotationLineItem(BaseUUIDModel):
         # Validate that parent quotation is not accepted
         if self.quotation_id and self.quotation.status == QuotationStatusChoices.ACCEPTED:
             raise ValidationError("Cannot add or modify line items on an accepted quotation.")
+        # Uses the stored status so a stale in-memory parent cannot bypass the lock (AUT-01).
+        if _quotation_db_status(self.quotation_id) in QUOTATION_CONTENT_LOCKED_STATUSES:
+            raise ValidationError(
+                "Cannot add or modify line items on an issued quotation. Create a new quotation version instead."
+            )
 
     def save(self, *args, **kwargs):
         # Auto-compute line_total if not manually provided or ensure consistency
@@ -1104,13 +1433,39 @@ class QuotationLineItem(BaseUUIDModel):
         if self.catalogue_part_id and not self.description:
             self.description = f"{self.catalogue_part.brand} {self.catalogue_part.name}"
 
-        self.full_clean()
-        super().save(*args, **kwargs)
+        using = router.db_for_write(QuotationLineItem, instance=self)
+        with transaction.atomic(using=using):
+            # Lock order (AUT-01): parent quotation(s) first, in pk order, then this line-item row.
+            existing = not self._state.adding and self.pk
+            previous = None
+            if existing:
+                previous = QuotationLineItem._base_manager.db_manager(using).filter(pk=self.pk).values_list('quotation_id', flat=True).first()
+            locked_parents = QuotationLineItemQuerySet._lock_unlocked_parents({self.quotation_id, previous}, using)
+            if existing and previous is not None:
+                stored = (
+                    QuotationLineItem._base_manager.db_manager(using).select_for_update(of=('self',))
+                    .filter(pk=self.pk).values_list('quotation_id', flat=True).first()
+                )
+                if stored is not None and stored not in locked_parents:
+                    raise ValidationError("Line item changed parent quotation concurrently; retry the operation.")
+            self.full_clean()
+            super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         if self.quotation_id and self.quotation.status == QuotationStatusChoices.ACCEPTED:
             raise ValidationError("Cannot delete line items from an accepted quotation.")
-        super().delete(*args, **kwargs)
+        using = router.db_for_write(QuotationLineItem, instance=self)
+        with transaction.atomic(using=using):
+            # Same lock order as every other line-item write: parent first, then the item.
+            stored = QuotationLineItem._base_manager.db_manager(using).filter(pk=self.pk).values_list('quotation_id', flat=True).first()
+            locked_parents = QuotationLineItemQuerySet._lock_unlocked_parents({stored or self.quotation_id}, using)
+            stored_locked = (
+                QuotationLineItem._base_manager.db_manager(using).select_for_update(of=('self',))
+                .filter(pk=self.pk).values_list('quotation_id', flat=True).first()
+            )
+            if stored_locked is not None and stored_locked not in locked_parents:
+                raise ValidationError("Line item changed parent quotation concurrently; retry the operation.")
+            return super().delete(*args, **kwargs)
 
 
 class WorkOrder(BaseUUIDModel):
